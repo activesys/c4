@@ -213,12 +213,26 @@ C4 将采集到的数据写入指定的数据库。
 
 ---
 
-### C4_FUN_00042：C4 支持 ASFP2 协议数据接收与发送
+### C4_FUN_00042：c4_asfp2_server 接收 ASFP2 数据并创建共享内存
 
 **功能描述**：
 
-C4 通过 ASFP2 协议接收来自其他 C4 实例或兼容系统的数据，
-也可通过 ASFP2 协议向其他 C4 实例或兼容系统发送数据。
+`c4_asfp2_server` 是每个 C4 实例默认启动的首个服务。它作为 ASFP2 服务端监听连接，
+接收来自其他 C4 实例或兼容系统的 ASFP2 数据，解析后写入共享内存的对应 point_id 记录。
+同时，`c4_asfp2_server` 负责创建并初始化 POSIX 共享内存——`shm_open` 后 `ftruncate`、
+`mmap`，初始化 Header 和 Point Control Array。
+
+**实现的需求**：C4_RS_00095, C4_RS_00096
+
+---
+
+### C4_FUN_00047：c4_asfp2_client 发送 ASFP2 数据
+
+**功能描述**：
+
+`c4_asfp2_client` 从共享内存读取已订阅 point 的数据，按 ASFP2 协议规范编码为数据包，
+发送到中心侧或其他 C4 实例。打包时自动检测属性开关条件（SAME_DATA_TYPE / KEY_SEQUENCE /
+SAME_TIMESTAMP）以优化带宽。
 
 **实现的需求**：C4_RS_00095
 
