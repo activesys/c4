@@ -944,13 +944,311 @@ flowchart TD
 
 # 第三章 Agent 和 MCP 接口规范
 
-> `c4_shm_manager` 向 Agent 暴露的 MCP 工具（`shm_create`、`check_expand`、`expand`、
-> `block_alloc`、`block_free`、`shm_status` 等）和资源将在本章中详细定义。
-> 其他 MCP 服务暴露的统一工具（`pause`、`resume`）和各自协议的配置下发接口
->（modbus_client、iec104_client、asfp2_client、asfp2_server、influxdb_client）
-> 也在此处统一规范。
->
-> *本章内容待补充。*
+Agent（TypeScript）与 MCP Server（Go）的交互分为两部分：**运行时 MCP 工具调用**（Agent 通过 MCP 协议操作 MCP Server）和**启动配置下发**（Agent 写入 `/etc/c4/config.json` 后启动各 MCP Server）。目录与资源管理工具（`shm_create`、`check_expand`、`expand`、`block_alloc`、`block_free`、`shm_status`、`pause`、`resume` 等）的工具签名、参数 schema、错误码将在后续版本中详细定义。
+
+---
+
+## 3.1 Agent ↔ MCP Server 交互模型
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        Agent (TypeScript)                        │
+│                                                                 │
+│   ┌─────────────┐  ┌──────────────┐  ┌───────────────────┐     │
+│   │ 配置生成器   │  │ 运行时 MCP   │  │ 状态监控          │     │
+│   │ (写 config)  │  │ 工具调用     │  │ (MCP Resource)    │     │
+│   └──────┬──────┘  └──────┬───────┘  └────────┬──────────┘     │
+│          │                │                    │                │
+└──────────┼────────────────┼────────────────────┼────────────────┘
+           │                │                    │
+           ▼                ▼                    ▼
+    /etc/c4/config.json   MCP 协议             MCP 协议
+           │            (stdio/SSE)           (stdio/SSE)
+           │                │                    │
+           ▼                ▼                    ▼
+    ┌──────────┐   ┌──────────┐   ┌──────────┐   ┌──────────┐
+    │c4_shm    │   │c4_modbus │   │c4_iec104 │   │c4_asfp2  │  ...
+    │_manager  │   │_client   │   │_client   │   │_client   │
+    │  (Go)    │   │  (Go)    │   │  (Go)    │   │  (Go)    │
+    └──────────┘   └──────────┘   └──────────┘   └──────────┘
+```
+
+### 交互流程
+
+```
+启动阶段：
+  1. Agent 生成 /etc/c4/config.json（写入所有 MCP Server 的配置）
+  2. Agent 启动 c4_shm_manager（首个服务）
+  3. Agent 通过 c4_shm_manager 的 MCP 工具创建共享内存
+  4. Agent 按 config.json 逐项启动各 MCP Server
+  5. 各 MCP Server 启动后读取 config.json 中自己的配置段，附加共享内存，开始工作
+
+运行阶段：
+  6. Agent 通过 MCP 工具监控各 MCP Server 状态（心跳、数据统计）
+  7. 用户要求新增采集点 → Agent 调用 c4_shm_manager 分配 point_id
+      → 更新 config.json 中对应 MCP Server 的 points 列表
+      → 通过 MCP 工具热更新配置或重启对应 MCP Server
+
+停止/回收阶段：
+  8. Agent 通过 MCP 工具执行 Pause-Resume 协议，回收不再使用的 point_id
+  9. Agent 更新 config.json 并通知 MCP Server
+```
+
+---
+
+## 3.2 配置文件 /etc/c4/config.json
+
+`/etc/c4/config.json` 是 Agent 启动各 MCP Server 的配置入口。每个 MCP Server 启动时读取
+文件中同名的顶层 key 对应的配置数组（支持多实例）。Agent 负责生成和维护此文件。
+
+### 3.2.1 通用结构
+
+```json
+{
+    "c4_modbus_client":     [ {...}, {...} ],   // Modbus 采集实例列表
+    "c4_iec104_client":     [ {...}, {...} ],   // IEC104 采集实例列表
+    "c4_asfp2_client":      [ {...}, {...} ],   // ASFP2 转发实例列表
+    "c4_asfp2_server":      [ {...} ],          // ASFP2 接收实例列表
+    "c4_influxdb_client":   [ {...} ]           // InfluxDB 入库实例列表
+}
+```
+
+每个顶层 key 对应一个 MCP Server 类型，值为该类型实例的配置数组。不同实例按数组顺序启动。
+
+### 3.2.2 c4_modbus_client 配置
+
+每个元素代表一个 Modbus TCP 设备连接。
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `name` | string | 实例名称，用于日志和监控标识 |
+| `ip` | string | Modbus TCP 设备 IP 地址 |
+| `port` | int | Modbus TCP 端口，标准 502 |
+| `hton_register` | int | Register 值是否做网络序转换：1=转换, 0=不转换 |
+| `hton_total` | int | 保留 |
+| `t0` | int | 连接超时（秒） |
+| `t1` | int | 请求超时（秒） |
+| `retries` | int | 最大重试次数 |
+| `coils_quantity_max` | int | 单次请求最大 Coil 数量 |
+| `registers_quantity_max` | int | 单次请求最大 Register 数量 |
+| `timer` | int | 采集周期（毫秒），决定写入共享内存的频率。设计约束 **1Hz（timer=1000）** |
+
+**points 数组元素**（参见 `docs/C4.docx` §19.29）：
+
+| 字段 | 类型 | 含义 |
+|------|------|------|
+| `uid` | integer | 单元标识符（设备地址） |
+| `addr` | integer | Modbus 地址 |
+| `fun` | integer | Modbus 功能码 |
+| `type` | integer | 数据的类型（ASFP2_TYPE_* 枚举值，见 §2.2.3） |
+| `swap` | integer | 交换的数据单元的字节数 |
+| `point_id` | integer | 全局 point_id，由 Agent 通过 `c4_shm_manager` 分配后填入 |
+
+### 3.2.3 c4_iec104_client 配置
+
+每个元素代表一个 IEC 60870-5-104 设备连接。
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `name` | string | 实例名称 |
+| `ip` | string | RTU/远动装置 IP 地址 |
+| `port` | int | IEC104 TCP 端口，标准 2404 |
+| `k` | int | 发送窗口大小（未确认 I 格式 APDU 最大数） |
+| `w` | int | 接收窗口大小（最新确认的接收序号之后的最大 I 格式数） |
+| `t0` | int | 连接超时（秒） |
+| `t1` | int | 发送超时（秒） |
+| `t2` | int | 接收超时（秒） |
+| `t3` | int | 空闲超时（秒），超时后发送 TEST FR |
+| `modules` | int | 支持的遥测/遥信/遥脉等模块数量 |
+| `common_address` | int | 公共地址（CASDU） |
+| `discard_cp56time2a` | int | 忽略 CP56Time2a 时间戳：1=忽略, 0=使用 |
+| `ignore_qds` | int | 忽略品质描述字：1=忽略, 0=使用 |
+| `it_timer` | int | 对时周期（毫秒） |
+| `gi_timer` | int | 总召周期（毫秒） |
+
+**points 数组元素**（参见 `docs/C4.docx` §19.11）：
+
+| 字段 | 类型 | 含义 |
+|------|------|------|
+| `addr` | integer | 104 地址（信息体地址 IOA） |
+| `point_id` | integer | 全局 point_id |
+
+### 3.2.4 c4_asfp2_client 配置
+
+每个元素代表一个 ASFP2 数据转发目标。
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `name` | string | 转发实例名称 |
+| `ip` | string | 目标服务器 IP |
+| `port` | int | ASFP2 服务端口 |
+| `t0` | int | 连接超时（秒） |
+| `t1` | int | 心跳发送间隔（秒） |
+| `t2` | int | 心跳应答超时（秒） |
+| `key_sequence` | int | ASFP2_ATTRIBUTE_KEY_SEQUENCE 开关：1=key 连续, 0=不连续 |
+| `same_data_type` | int | ASFP2_ATTRIBUTE_SAME_DATA_TYPE 开关：1=同类型, 0=不同类型 |
+| `same_timestamp` | int | ASFP2_ATTRIBUTE_SAME_TIMESTAMP 开关：1=同时间戳, 0=不同时间戳 |
+| `smart` | int | 时间戳毫秒归零：1=归零（提高压缩率）, 0=保留毫秒精度 |
+| `forward_kack` | int | 正向 KeepAlive Ack 字节值（典型 255） |
+| `inverse_keep` | int | 反向 KeepAlive 字节值（典型 0） |
+| `timer` | int | 转发周期（毫秒）。Reader 以 10 倍频率轮询（设计约束 **Reader=10Hz**，即此值 ≤ 100） |
+
+**points 数组元素**（参见 `docs/C4.docx` §19.24）：
+
+| 字段 | 类型 | 含义 |
+|------|------|------|
+| `point_id` | integer | 全局 point_id，标识共享内存中读取的数据源 |
+| `addr` | integer | ASFP2 地址（协议中的 key） |
+| `valid` | integer | ASFP2 倍率和偏移量开关 |
+| `coeff` | real | ASFP2 数值倍率（raw × coeff + base） |
+| `base` | real | ASFP2 数值偏移量 |
+
+### 3.2.5 c4_shm_manager 与 c4_asfp2_server
+
+`c4_shm_manager` 是单实例服务（无需配置数组），共享内存相关参数（如 `instance_id`、
+`shm_size`）由 Agent 通过 MCP 工具调用时传入。
+
+`c4_asfp2_server` 的配置结构（IP、端口、ASFP2 属性开关、反向 keep-alive 等）
+与 `c4_asfp2_client` 对称但无 points 列表（接收端按 `asfp2_key → point_id` 反向映射写入）。
+
+### 3.2.6 完整配置示例
+
+以下是一个完整的 `/etc/c4/config.json` 示例，包含 Modbus 采集（2 个风机 SCADA）、
+IEC104 采集（2 个主变 RTU）和 ASFP2 转发（到中心侧数据库和第三方）三种 MCP Server
+的多实例配置。各选项含义参见 `docs/C4.docx` 第 19 章。
+
+```json
+{
+    "c4_modbus_client": [
+        {
+            "name": "华能阿拉善1#风机SCADA服务",
+            "ip": "192.168.110.1",
+            "port": 502,
+            "hton_register": 1,
+            "hton_total": 0,
+            "t0": 30,
+            "t1": 10,
+            "retries": 10,
+            "coils_quantity_max": 2000,
+            "registers_quantity_max": 125,
+            "timer": 1000,
+            "points": [
+                {"uid": 1, "addr": 1000, "fun": 3, "type": 10, "swap": 2, "point_id": 1},
+                {"uid": 1, "addr": 1002, "fun": 3, "type": 10, "swap": 2, "point_id": 2}
+            ]
+        },
+        {
+            "name": "华能阿拉善2#风机SCADA服务",
+            "ip": "192.168.110.2",
+            "port": 502,
+            "hton_register": 1,
+            "hton_total": 0,
+            "t0": 30,
+            "t1": 10,
+            "retries": 10,
+            "coils_quantity_max": 2000,
+            "registers_quantity_max": 125,
+            "timer": 1000,
+            "points": [
+                {"uid": 1, "addr": 1000, "fun": 3, "type": 10, "swap": 2, "point_id": 3},
+                {"uid": 1, "addr": 1002, "fun": 3, "type": 10, "swap": 2, "point_id": 4}
+            ]
+        }
+    ],
+    "c4_iec104_client": [
+        {
+            "name": "华能阿拉善1#主变",
+            "ip": "192.168.110.99",
+            "port": 2404,
+            "k": 12,
+            "w": 8,
+            "t0": 30,
+            "t1": 15,
+            "t2": 10,
+            "t3": 20,
+            "modules": 32768,
+            "common_address": 1,
+            "discard_cp56time2a": 0,
+            "ignore_qds": 0,
+            "it_timer": 1000,
+            "gi_timer": 1000,
+            "points": [
+                {"addr": 16385, "point_id": 5},
+                {"addr": 16386, "point_id": 6},
+                {"addr": 25601, "point_id": 7}
+            ]
+        },
+        {
+            "name": "华能阿拉善2#主变",
+            "ip": "192.168.110.199",
+            "port": 2404,
+            "k": 12,
+            "w": 8,
+            "t0": 30,
+            "t1": 15,
+            "t2": 10,
+            "t3": 20,
+            "modules": 32768,
+            "common_address": 1,
+            "discard_cp56time2a": 0,
+            "ignore_qds": 0,
+            "it_timer": 1000,
+            "gi_timer": 1000,
+            "points": [
+                {"addr": 1, "point_id": 8},
+                {"addr": 2, "point_id": 9},
+                {"addr": 3, "point_id": 10}
+            ]
+        }
+    ],
+    "c4_asfp2_client": [
+        {
+            "name": "转发到中心测数据库服务器",
+            "ip": "172.16.109.11",
+            "port": 9999,
+            "t0": 30,
+            "t1": 20,
+            "t2": 10,
+            "key_sequence": 1,
+            "same_data_type": 1,
+            "same_timestamp": 1,
+            "smart": 1,
+            "forward_kack": 255,
+            "inverse_keep": 0,
+            "timer": 100,
+            "points": [
+                {"point_id": 1, "addr": 1000, "valid": 1, "coeff": 0.38, "base": 0},
+                {"point_id": 2, "addr": 1001, "valid": 1, "coeff": 0.38, "base": 0},
+                {"point_id": 3, "addr": 1002, "valid": 1, "coeff": 1, "base": 0},
+                {"point_id": 4, "addr": 1003, "valid": 1, "coeff": 1, "base": 0}
+            ]
+        },
+        {
+            "name": "转发到第三方数据服务器",
+            "ip": "172.16.109.13",
+            "port": 9999,
+            "t0": 30,
+            "t1": 20,
+            "t2": 10,
+            "key_sequence": 1,
+            "same_data_type": 1,
+            "same_timestamp": 1,
+            "smart": 1,
+            "forward_kack": 255,
+            "inverse_keep": 0,
+            "timer": 100,
+            "points": [
+                {"point_id": 3, "addr": 8002, "valid": 1, "coeff": 1, "base": 0},
+                {"point_id": 4, "addr": 8003, "valid": 1, "coeff": 1, "base": 0}
+            ]
+        }
+    ]
+}
+```
+
+> **后续工作**：各 MCP Server 向 Agent 暴露的 MCP 工具（`shm_create`、`check_expand`、
+> `expand`、`block_alloc`、`block_free`、`shm_status`、`pause`、`resume` 等）
+> 的工具签名、参数 schema、MCP Resource 结构以及热更新配置协议将在后续版本中详细定义。
 
 ---
 

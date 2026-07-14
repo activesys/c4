@@ -213,16 +213,25 @@ C4 将采集到的数据写入指定的数据库。
 
 ---
 
-### C4_FUN_00042：c4_asfp2_server 接收 ASFP2 数据并创建共享内存
+### C4_FUN_00042：c4_asfp2_server 接收 ASFP2 数据
 
 **功能描述**：
 
-`c4_asfp2_server` 是每个 C4 实例默认启动的首个服务。它作为 ASFP2 服务端监听连接，
-接收来自其他 C4 实例或兼容系统的 ASFP2 数据，解析后写入共享内存的对应 point_id 记录。
-同时，`c4_asfp2_server` 负责创建并初始化 POSIX 共享内存——`shm_open` 后 `ftruncate`、
-`mmap`，初始化 Header 和 Point Control Array。
+`c4_asfp2_server` 作为 ASFP2 服务端监听连接，接收来自其他 C4 实例或兼容系统的
+ASFP2 数据，解析后写入共享内存的对应 point_id 记录。`c4_asfp2_server` 以 `O_RDWR`
+模式附加已有共享内存（由 `c4_shm_manager` 创建），不参与共享内存的创建或销毁。
 
-**实现的需求**：C4_RS_00095, C4_RS_00096
+**实现的需求**：C4_RS_00095
+
+---
+
+### C4_FUN_00049：c4_shm_manager 管理共享内存
+
+**功能描述**：
+
+`c4_shm_manager` 是每个 C4 实例默认启动的首个 MCP 服务，负责 POSIX 共享内存的创建、扩容、块分配回收和状态查询。
+
+**实现的需求**：C4_RS_00096
 
 ---
 
