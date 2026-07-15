@@ -34,6 +34,11 @@ c4/
 | `c4/agent/` | **Node.js / TypeScript** | AI 推理层，MCP SDK 原生支持、Web 界面同语言 |
 | `c4/test/` | **Python 3** | 功能测试，测试目录命名对应功能编号（如 `c4_fun_00053`） |
 
+## 行为规则（硬约束 —— 绝对不可违反）
+
+1. **评审之后不能直接修改**：经 Oracle / Momus / 代码评审后，必须先向用户汇报评审发现的问题，由用户确认后再修改。不得在评审后静默修改代码或文档。
+2. **修改代码之后不能直接提交**：任何代码修改完成后，必须经用户确认后方可 `git commit`。不得在用户未明确要求的情况下自动提交。
+
 ## 核心设计原则
 
 - **Agent 不在实时数据路径中**：Agent 负责理解意图、规划方案、配置和监控 MCP 服务；
@@ -46,7 +51,8 @@ c4/
 
 | 文档 | 路径 | 说明 |
 |------|------|------|
-| 架构设计 | `docs/design/c4_architecture.md` | 共享内存布局、MCP 工具定义、配置格式 |
+| 架构设计 | `docs/design/c4_architecture.md` | 整体架构、共享内存布局、并发协议、配置格式 |
+| 共享内存管理 | `docs/design/c4_shm_manager.md` | 创建/扩容/分配算法、MCP 工具定义、交互时序、错误码 |
 | 功能规格 | `docs/specification/c4_function.md` | 功能点及其验收指导 |
 | 需求规格 | `docs/specification/c4_requirement.md` | 83 条形式化需求 |
 | 项目概述 | `docs/specification/c4_description.md` | 架构、应用场景 |
