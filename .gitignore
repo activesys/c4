@@ -39,3 +39,15 @@
 
 # debug information files
 *.dwo
+
+# Go binaries — match compiled binary, not the source directory
+mcp/*/c4_shm_manager
+
+# Go module files — override *.mod Fortran rule above
+!go.mod
+!go.sum
+
+# Python
+__pycache__/
+.pytest_cache/
+*.pyc

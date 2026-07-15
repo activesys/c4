@@ -247,6 +247,10 @@ block-beta
 | `global_write_seq` | 8B | 16 | 全局写入序号（原子单调递增），用于跨 point 的全局顺序 |
 | `reserved` | 8B | 24 | 保留，总计 32B |
 
+> **初始化规则**：`c4_shm_manager` 创建共享内存时，先通过 `ftruncate` 将文件扩展到目标大小
+> （自动零填充），再按上表写入各字段的指定值。未明确指定非零值的字段（`remap_version`、
+> `point_count`、`global_write_seq`、`reserved`）保持 `ftruncate` 后的默认值 `0`。
+
 ### 2.2.2 Data Block 字段说明
 
 | 字段 | 大小 | 偏移 | 说明 |
@@ -542,7 +546,7 @@ Agent 生成 instance_id
 │            c4_shm_manager（Go）                 │
 │                                               │
 │  shm_open("/c4_{id}", O_CREAT|O_EXCL|O_RDWR)  │
-│  ftruncate(64MB)                              │
+│  ftruncate(shm_size)                           │
 │  mmap                                         │
 │  初始化 Header（magic, version, max_points）    │
 │  写入所有 Data Block 的 magic = 0xC4DA7A00      │
@@ -577,7 +581,7 @@ flowchart TD
 |------|------|
 | 创建 | Agent 通过 MCP 工具调用 `c4_shm_manager`，命名规则 `/c4_{instance_id}` |
 | 附加 | 后续 MCP 服务以普通 `O_RDWR` 或 `O_RDONLY` 打开，校验 `magic` 后附加 |
-| 大小 | 默认 64MB（约可容纳 200 万 point），Agent 可通过 MCP 工具调整 |
+| 大小 | 无配置文件时默认 100k 点（≈3 MB）；配置文件存在时按 §3.3.1 算法计算，Agent 可通过 MCP 工具调整 |
 | 销毁 | `c4_shm_manager` 最后退出时 `shm_unlink`；进程异常退出由操作系统回收 |
 
 ### 2.5.2 扩容与块分配管理
@@ -1290,8 +1294,15 @@ Agent 与 `c4_shm_manager` 的交互遵循 MCP 标准协议。启动 `c4_shm_man
 4. c4_shm_manager 向 Agent 发送 roots/list 请求（MCP 协议中 server→client 的根目录查询）
    → Agent 返回配置文件的绝对路径 URI（含文件名）。文件名和路径可配置，例如
    `/etc/c4/shm.json` 或 `~/.local/c4/shared_memory.json`
-5. c4_shm_manager 读取 config.json，根据各服务的 points 总数计算所需共享内存大小
-   （计算算法后续定义），创建并初始化共享内存空间
+5. c4_shm_manager 根据配置文件是否存在决定共享内存大小：
+   - **配置文件不存在或为 null**（roots/list 返回空、文件路径不存在、或文件内容为空 JSON）：
+     创建默认 10 万点共享内存空间（max_points = 100000，point_count = 0），
+     所有 Data Block 初始化为 magic=0xC4DA7A00、state=0，
+     此时无 Writer/Reader 配置，不涉及 shm_id 分配和配置回填
+   - **配置文件存在**：
+     读取并解析配置文件，若 c4_shm_manager.writer 为空则报错拒绝创建，
+     否则按 §3.3.1 算法计算所需大小，创建并初始化共享内存空间，
+     分配 shm_id 并回填配置文件
 6. c4_shm_manager 向 Agent 返回 create_shm 的调用结果
 ```
 
@@ -1309,7 +1320,11 @@ sequenceDiagram
     S->>A: roots/list (请求根目录)
     A-->>S: {roots: [{uri: "file:///etc/c4/config.json"}]}
 
-    S->>FS: 读取配置文件, 根据 points 总数计算 shm_size
+    alt 配置文件存在
+        S->>FS: 读取配置文件, 根据 points 总数计算 shm_size
+    else 配置文件不存在
+        Note over S: max_points = 100000 (默认)
+    end
     S->>S: shm_open + ftruncate + mmap<br/>初始化 Header + Data Block Array
     S-->>A: create_shm 调用结果 (point_count, max_points)
 ```
@@ -1332,12 +1347,16 @@ Agent 生成的配置文件（以 §3.2.6 为例）中，各 MCP Server 的 `poi
 `c4_shm_manager` 根据配置文件中的 `c4_shm_manager.writer` 字段识别哪些 MCP Server 类型
 需要分配 shm_id。该字段由 Agent 生成，数据来源于各 MCP Server 注册时声明的角色属性。
 
+> **前置条件**：以下算法仅在配置文件存在且非空时执行。若配置文件不存在、为 null、
+> 或文件内容为空 JSON，c4_shm_manager 创建默认 10 万点共享内存空间（max_points = 100000, point_count = 0），
+> 不涉及 shm_id 分配和配置回填。
+
 Writer 端通过 `{service_id}.{point_id}` 组合形成全局唯一 key（如 `hnals_1_scada.windspeed`），
 Reader 端通过 `key` 字段引用同一 key。`c4_shm_manager` 据此为同一 data flow 的双方分配相同 shm_id。
 
 ```
 1. 解析配置文件，读取 c4_shm_manager.writer 和 c4_shm_manager.reader 分类
-   ┌ 若 c4_shm_manager 段缺失或 writer/reader 为空 → 报错，拒绝创建
+   ┌ 若 c4_shm_manager 段缺失或 writer 为空或 reader 为空 → 报错，拒绝创建
    └ 若分类正常 → 继续
 2. 遍历 writer 中列出的每个 MCP Server 类型，统计其 points 数组长度
    → writer_points = Σ 各 Writer 的 points.length
@@ -1435,19 +1454,36 @@ sequenceDiagram
 **内部流程**：
 
 1. 向 Agent 发送 `roots/list` 请求，获取配置文件绝对路径 URI
-2. 读取配置文件，按 §3.3.1 算法分配 shm_id 并回填到各 MCP Server 的 `points` 数组
-3. `shm_open("/c4_{instance_id}", O_CREAT|O_EXCL|O_RDWR)` → `ftruncate` → `mmap`
-4. 初始化所有 Data Block 的 `magic = 0xC4DA7A00`（state 自然为 0）
-5. 最后写入 Header `magic = 0xC4DA7A00`
-6. 将回填 shm_id 后的配置文件写回磁盘
-7. 返回结果给 Agent
+2. 若配置文件不存在或为 null（roots/list 返回空、路径无效、或文件内容为空 JSON）：
+   a. `shm_open("/c4_{instance_id}", O_CREAT|O_EXCL|O_RDWR)` → `ftruncate` → `mmap`
+   b. Header 字段：`magic = 0xC4DA7A00`、`version = 1`、`max_points = 100000`、`point_count = 0`；
+      其余字段（`remap_version`、`global_write_seq`、`reserved`）保持 `ftruncate` 零填充后的默认值 `0`（参见 §2.2.1 初始化规则）
+   c. 初始化所有 Data Block 的 `magic = 0xC4DA7A00`（state 自然为 0）
+   d. 写入 Header `magic = 0xC4DA7A00`（最终提交）
+   e. 跳至步骤 6（不涉及 shm_id 分配和配置回填）
+3. 若配置文件存在：
+   a. 读取配置文件，按 §3.3.1 算法分配 shm_id 并回填到各 MCP Server 的 `points` 数组
+      ┌ 若 `c4_shm_manager.writer` 或 `c4_shm_manager.reader` 为空 → 返回 `CONFIG_MISSING_SECTION` 错误
+      └ 若正常 → 继续
+   b. `shm_open("/c4_{instance_id}", O_CREAT|O_EXCL|O_RDWR)` → `ftruncate` → `mmap`
+   c. 初始化所有 Data Block 的 `magic = 0xC4DA7A00`（state 自然为 0）
+   d. 写入 Header `magic = 0xC4DA7A00`
+   e. 将回填 shm_id 后的配置文件写回磁盘
+4. 返回结果给 Agent
 
 **返回值**：成功时返回 `"success"`。
+`point_count = 0`、`max_points = 100000` 表示以默认模式创建（配置文件不存在）。
 
 **MCP 应答示例**：
 
 ```json
-// ========== 成功 ==========
+// ========== 成功：配置文件存在，按算法创建 ==========
+// --> 请求
+{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "create_shm", "arguments": {"instance_id": "hnals_farm_01"}}}
+// <-- 应答
+{"jsonrpc": "2.0", "id": 1, "result": {"content": [{"type": "text", "text": "success"}], "isError": false}}
+
+// ========== 成功：配置文件不存在，默认 10 万点 ==========
 // --> 请求
 {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "create_shm", "arguments": {"instance_id": "hnals_farm_01"}}}
 // <-- 应答
@@ -1457,9 +1493,9 @@ sequenceDiagram
 // <-- 应答
 {"jsonrpc": "2.0", "id": 1, "result": {"content": [{"type": "text", "text": "SHM_ALREADY_EXISTS: /c4_hnals_farm_01 is already created"}], "isError": true}}
 
-// ========== 业务错误：c4_shm_manager 配置段缺失 ==========
+// ========== 业务错误：c4_shm_manager 配置段缺少 writer ==========
 // <-- 应答
-{"jsonrpc": "2.0", "id": 1, "result": {"content": [{"type": "text", "text": "CONFIG_MISSING_SECTION: 'c4_shm_manager.writer' or 'c4_shm_manager.reader' not found in config"}], "isError": true}}
+{"jsonrpc": "2.0", "id": 1, "result": {"content": [{"type": "text", "text": "CONFIG_MISSING_SECTION: 'c4_shm_manager.writer' or 'c4_shm_manager.reader' not found or empty in config"}], "isError": true}}
 
 // ========== 业务错误：Writer 端 key 冲突 ==========
 // <-- 应答
@@ -1469,9 +1505,9 @@ sequenceDiagram
 // <-- 应答
 {"jsonrpc": "2.0", "id": 1, "result": {"content": [{"type": "text", "text": "UNKNOWN_READER_KEY: reader 'c4_asfp2_client[0].points[3].key' = 'unknown_scada.windspeed' not found in any writer"}], "isError": true}}
 
-// ========== 业务错误：roots/list 失败 ==========
+// ========== 业务错误：roots/list MCP 调用失败 ==========
 // <-- 应答
-{"jsonrpc": "2.0", "id": 1, "result": {"content": [{"type": "text", "text": "CONFIG_PATH_MISSING: Agent did not return a valid config file via roots/list"}], "isError": true}}
+{"jsonrpc": "2.0", "id": 1, "result": {"content": [{"type": "text", "text": "CONFIG_PATH_MISSING: roots/list protocol call failed, Agent may not be responding"}], "isError": true}}
 
 // ========== 业务错误：系统调用失败 ==========
 // <-- 应答
@@ -1900,10 +1936,16 @@ sequenceDiagram
         A->>S: tools/call create_shm({instance_id: "my_instance"})
         S->>A: roots/list
         A-->>S: {roots: [{uri: "file:///etc/c4/config.json"}]}
-        S->>FS: 读取 config → 按 §3.3.1 算法分配 shm_id
+        alt 配置文件存在
+            S->>FS: 读取 config → 按 §3.3.1 算法分配 shm_id
+        else 配置文件不存在
+            Note over S: max_points = 100000 (默认)
+        end
         S->>FS: shm_open /c4_my_instance (O_CREAT|O_EXCL)
         S->>FS: ftruncate + mmap + 初始化
-        S->>FS: 写回 config（回填 shm_id）
+        alt 配置文件存在
+            S->>FS: 写回 config（回填 shm_id）
+        end
         S-->>A: "success"
     end
 
@@ -2035,8 +2077,8 @@ sequenceDiagram
 | `SHM_NOT_CREATED` | 共享内存尚未创建 | `check_expand`, `expand`, `block_alloc`, `block_free`, `query_status` |
 | `SHM_CORRUPTED` | Header magic 校验失败 | `query_status`, `resume` |
 | `SHM_SYSCALL_FAILED` | POSIX 系统调用失败（shm_open / ftruncate / mmap） | `create_shm`, `expand` |
-| `CONFIG_MISSING_SECTION` | 配置文件缺少 `c4_shm_manager` 段 | `create_shm` |
-| `CONFIG_PATH_MISSING` | Agent 未通过 roots/list 返回有效配置文件路径 | `create_shm` |
+| `CONFIG_MISSING_SECTION` | 配置文件存在，但 `c4_shm_manager.writer` 或 `reader` 缺失或为空 | `create_shm` |
+| `CONFIG_PATH_MISSING` | roots/list MCP 协议调用失败（Agent 不可达或超时） | `create_shm` |
 | `DUPLICATE_KEY` | 两个 Writer point 的 `{service_id}.{point_id}` 重复 | `create_shm` |
 | `UNKNOWN_READER_KEY` | Reader 的 `key` 字段引用了不存在的 Writer key | `create_shm` |
 | `INSUFFICIENT_BLOCKS` | 空闲块不足，需先扩容 | `block_alloc` |
