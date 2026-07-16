@@ -334,10 +334,6 @@ func adjustShmHandler(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallT
 		}
 	}
 
-	if requiredPoints == 0 && !(writersEmpty && readersEmpty) {
-		return newError("CONFIG_MISSING_SECTION: 'c4_shm_manager.writer' or 'c4_shm_manager.reader' not found or empty in config"), nil
-	}
-
 	h := state.sm.HeaderInfo()
 	currentMaxPoints := int(h.MaxPoints)
 

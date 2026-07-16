@@ -196,14 +196,14 @@ def remove_points_from_config(config_path, service_id, point_ids):
 | **验证 1** | block[1..3] state=1（全部保持） |
 | **验证 2** | Header: `point_count=3`（不变），`remap_version=0` |
 
-#### TC5: 删除到零 → 全部回收
+#### TC5: 清空 points → 全量回收
 
 | 项目 | 内容 |
 |------|------|
 | **前置** | `create_shm`：modbus 3 点 → max=6。设 block[1..3] state=1 |
-| **操作** | 修改 config：清空 modbus points 数组（total=0）→ `adjust_shm()` |
-| **预期** | `CONFIG_MISSING_SECTION` 错误（writer 为空属于配置错误，不是回收场景） |
-| **说明** | 当前设计不允许 writer 配置为空，边界条件由配置解析层处理 |
+| **操作** | 修改 config：清空 modbus points 数组和 reader keys（total=0），writer/reader 列表保持非空 → `adjust_shm()` |
+| **预期** | `adjust_shm` 返回 `"success"`。所有 state=1 block 均为孤儿 → 全部回收为 state=0，point_count→0 |
+| **说明** | writer/reader 列表非空，走正常回收路径而非 CONFIG_MISSING_SECTION（仅 `c4_shm_manager.writer=[]` 且 `reader=[]` 时才触发该错误） |
 
 ---
 

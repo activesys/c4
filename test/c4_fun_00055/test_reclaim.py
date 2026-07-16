@@ -562,9 +562,10 @@ class TestNoDelete:
             os.unlink(config_path)
 
     def test_tc5_clear_all_writer_points(self, mcp, isolated_shm):
-        """TC5: 清空 modbus points 数组 → CONFIG_MISSING_SECTION。
+        """TC5: 清空 modbus points 数组 → 全量回收。
 
-        README §4.2 TC5 — writer 为空属于配置错误，由配置解析层处理。
+        required_points=0，但 writer/reader 列表非空，走正常回收路径：
+        所有 state=1 block 均为孤儿 → 全部回收，point_count→0，返回 success。
         """
         iid = "test_tc5"
         isolated_shm(iid)
@@ -584,8 +585,7 @@ class TestNoDelete:
                 set_block_state(path, sid, 1)
             set_header_point_count(path, 3)
 
-            # 操作：清空 modbus points 数组（total=0），同时清空 reader keys
-            # 避免残留 reader keys 触发 UNKNOWN_READER_KEY 先于 CONFIG_MISSING_SECTION
+            # 清空所有 writer points 和 reader keys
             cfg = _read_config(config_path)
             cfg["c4_modbus_client"][0]["points"] = []
             cfg["c4_asfp2_client"][0]["points"] = []
@@ -596,8 +596,17 @@ class TestNoDelete:
                 "adjust_shm", {},
                 on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
             )
-            # README: writer 为空属于配置错误 → CONFIG_MISSING_SECTION
-            _assert_mcp_error(resp, "CONFIG_MISSING_SECTION")
+            _assert_mcp_success(resp)
+
+            # 全量回收验证
+            h = read_shm_header(path)
+            assert h["point_count"] == 0, (
+                f"after clearing all points: point_count should be 0, got {h['point_count']}"
+            )
+            for sid in range(1, 4):
+                assert read_shm_block(path, sid)["state"] == 0, (
+                    f"block[{sid}] should be reclaimed (state=0)"
+                )
 
         finally:
             os.unlink(config_path)
