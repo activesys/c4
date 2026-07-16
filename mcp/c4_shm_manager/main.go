@@ -302,8 +302,16 @@ func adjustShmHandler(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallT
 
 	writers, writersOk := toStringSlice(shmCfg["writer"])
 	readers, readersOk := toStringSlice(shmCfg["reader"])
-	if !writersOk || len(writers) == 0 || !readersOk || len(readers) == 0 {
-		return newError("CONFIG_MISSING_SECTION: 'c4_shm_manager.writer' or 'c4_shm_manager.reader' not found or empty in config"), nil
+	if !writersOk || !readersOk {
+		return newError("CONFIG_MISSING_SECTION: 'c4_shm_manager.writer' or 'c4_shm_manager.reader' not found in config"), nil
+	}
+
+	// writer/reader both empty → full reclaim (valid for adjust_shm)
+	// one empty + one non-empty → error
+	writersEmpty := len(writers) == 0
+	readersEmpty := len(readers) == 0
+	if writersEmpty != readersEmpty {
+		return newError("CONFIG_MISSING_SECTION: 'c4_shm_manager.writer' is empty but 'c4_shm_manager.reader' is not, both must be non-empty or both empty"), nil
 	}
 
 	requiredPoints := 0
@@ -326,7 +334,7 @@ func adjustShmHandler(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallT
 		}
 	}
 
-	if requiredPoints == 0 {
+	if requiredPoints == 0 && !(writersEmpty && readersEmpty) {
 		return newError("CONFIG_MISSING_SECTION: 'c4_shm_manager.writer' or 'c4_shm_manager.reader' not found or empty in config"), nil
 	}
 
