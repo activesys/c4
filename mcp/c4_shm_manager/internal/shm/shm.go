@@ -132,6 +132,10 @@ func (s *SharedMemory) HeaderInfo() HeaderInfo {
 	}
 }
 
+func (s *SharedMemory) Path() string {
+	return s.path
+}
+
 func (s *SharedMemory) BlockInfo(shmID int) BlockInfo {
 	off := shmID * BlockSize
 	return BlockInfo{
@@ -163,6 +167,64 @@ func (s *SharedMemory) Unlink() error {
 		return fmt.Errorf("SHM_SYSCALL_FAILED: shm_unlink failed - %w", err)
 	}
 	return nil
+}
+
+func (s *SharedMemory) SetHeaderUint32(offset int, val uint32) {
+	binary.BigEndian.PutUint32(s.data[offset:], val)
+}
+
+func (s *SharedMemory) SetHeaderUint16(offset int, val uint16) {
+	binary.BigEndian.PutUint16(s.data[offset:], val)
+}
+
+func (s *SharedMemory) InitBlock(shmID int) {
+	binary.BigEndian.PutUint32(s.data[shmID*BlockSize+BlkOffMagic:], Magic)
+}
+
+func (s *SharedMemory) Expand(newMaxPoints int) error {
+	oldMax := s.maxPoints
+	totalSize := int64((newMaxPoints + 1) * BlockSize)
+
+	if err := unix.Ftruncate(s.fd, totalSize); err != nil {
+		return fmt.Errorf("SHM_SYSCALL_FAILED: ftruncate failed - %w", err)
+	}
+
+	/* write new max_points to old mmap (persisted to file via MAP_SHARED) */
+	binary.BigEndian.PutUint32(s.data[HdrOffMaxPoints:], uint32(newMaxPoints))
+
+	/* munmap old mapping */
+	if err := unix.Munmap(s.data); err != nil {
+		return fmt.Errorf("SHM_SYSCALL_FAILED: munmap failed - %w", err)
+	}
+
+	/* mmap new size */
+	data, err := unix.Mmap(s.fd, 0, int(totalSize), unix.PROT_READ|unix.PROT_WRITE, unix.MAP_SHARED)
+	if err != nil {
+		return fmt.Errorf("SHM_SYSCALL_FAILED: mmap failed - %w", err)
+	}
+	s.data = data
+	s.maxPoints = newMaxPoints
+
+	/* increment remap_version AFTER new mmap */
+	ver := binary.BigEndian.Uint16(s.data[HdrOffRemapVersion:])
+	binary.BigEndian.PutUint16(s.data[HdrOffRemapVersion:], ver+1)
+
+	/* init new blocks (oldMax+1 .. newMaxPoints) */
+	for i := oldMax + 1; i <= newMaxPoints; i++ {
+		s.InitBlock(i)
+	}
+
+	return nil
+}
+
+func (s *SharedMemory) FindFreeBlocks(maxPoints int) []uint32 {
+	var free []uint32
+	for i := 1; i <= maxPoints; i++ {
+		if s.data[i*BlockSize+BlkOffState] == 0 {
+			free = append(free, uint32(i))
+		}
+	}
+	return free
 }
 
 func ReadHeaderFromPath(path string) (HeaderInfo, error) {

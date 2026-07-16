@@ -195,6 +195,8 @@ func createFromConfig(configPath string, instanceID string) (*shm.SharedMemory, 
 		}
 	}
 
+	sm.SetHeaderUint32(8, uint32(totalPoints))
+
 	out, err := json.MarshalIndent(config, "", "  ")
 	if err != nil {
 		rollback(sm)
@@ -262,6 +264,187 @@ func queryStatusHandler(ctx context.Context, req *mcp.CallToolRequest) (*mcp.Cal
 	return newResult(string(data)), nil
 }
 
+func adjustShmHandler(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	if state.sm == nil {
+		return newError("SHM_NOT_CREATED: shared memory not initialized, call create_shm first"), nil
+	}
+
+	if _, err := os.Stat(state.sm.Path()); os.IsNotExist(err) {
+		state.sm = nil
+		state.currentInstanceID = ""
+		return newError("SHM_NOT_CREATED: shared memory not initialized, call create_shm first"), nil
+	}
+
+	rootRes, err := req.Session.ListRoots(ctx, nil)
+	if err != nil || rootRes == nil || len(rootRes.Roots) == 0 {
+		return newError("CONFIG_PATH_MISSING: roots/list protocol call failed, Agent may not be responding"), nil
+	}
+
+	configPath := rootRes.Roots[0].URI
+	if len(configPath) > 7 && configPath[:7] == "file://" {
+		configPath = configPath[7:]
+	}
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return newError("CONFIG_MISSING_SECTION: cannot read config file: " + err.Error()), nil
+	}
+
+	var config map[string]any
+	if err := json.Unmarshal(data, &config); err != nil {
+		return newError(fmt.Sprintf("CONFIG_PARSE_ERROR: failed to parse config JSON: %v", err)), nil
+	}
+
+	shmCfg, ok := config["c4_shm_manager"].(map[string]any)
+	if !ok {
+		return newError("CONFIG_MISSING_SECTION: 'c4_shm_manager' key not found in config"), nil
+	}
+
+	writers, writersOk := toStringSlice(shmCfg["writer"])
+	readers, readersOk := toStringSlice(shmCfg["reader"])
+	if !writersOk || len(writers) == 0 || !readersOk || len(readers) == 0 {
+		return newError("CONFIG_MISSING_SECTION: 'c4_shm_manager.writer' or 'c4_shm_manager.reader' not found or empty in config"), nil
+	}
+
+	requiredPoints := 0
+	for _, wType := range writers {
+		section, ok := config[wType]
+		if !ok {
+			continue
+		}
+		instances, ok := section.([]any)
+		if !ok {
+			continue
+		}
+		for _, inst := range instances {
+			instMap, ok := inst.(map[string]any)
+			if !ok {
+				continue
+			}
+			pts, _ := instMap["points"].([]any)
+			requiredPoints += len(pts)
+		}
+	}
+
+	h := state.sm.HeaderInfo()
+	currentMaxPoints := int(h.MaxPoints)
+
+	keyMap := make(map[string]int)
+	assignedSet := make(map[int]bool)
+	for _, wType := range writers {
+		section, ok := config[wType]
+		if !ok {
+			continue
+		}
+		instances, _ := section.([]any)
+		for _, inst := range instances {
+			instMap := inst.(map[string]any)
+			serviceID, _ := instMap["id"].(string)
+			pts, _ := instMap["points"].([]any)
+			for _, pt := range pts {
+				ptMap := pt.(map[string]any)
+				pointID, _ := ptMap["id"].(string)
+				key := serviceID + "." + pointID
+
+				if existingID, exists := keyMap[key]; exists {
+					return newError(fmt.Sprintf("DUPLICATE_KEY: key '%s' already assigned to shm_id=%d", key, existingID)), nil
+				}
+
+				shmID := 0
+				if sid, ok := ptMap["shm_id"].(float64); ok {
+					shmID = int(sid)
+				}
+
+				keyMap[key] = shmID
+				if shmID > 0 {
+					assignedSet[shmID] = true
+				}
+			}
+		}
+	}
+
+	needsExpand := requiredPoints > currentMaxPoints
+
+	/* assign shm_id to new points (config maps only, no shm side effects yet) */
+	nextID := 1
+	for _, wType := range writers {
+		section := config[wType]
+		instances := section.([]any)
+		for _, inst := range instances {
+			instMap := inst.(map[string]any)
+			pts := instMap["points"].([]any)
+			for _, pt := range pts {
+				ptMap := pt.(map[string]any)
+				shmID := 0
+				if sid, ok := ptMap["shm_id"].(float64); ok {
+					shmID = int(sid)
+				}
+				if shmID == 0 {
+					for assignedSet[nextID] {
+						nextID++
+					}
+					ptMap["shm_id"] = float64(nextID)
+
+					serviceID, _ := instMap["id"].(string)
+					pointID, _ := ptMap["id"].(string)
+					key := serviceID + "." + pointID
+					keyMap[key] = nextID
+
+					assignedSet[nextID] = true
+					nextID++
+				}
+			}
+		}
+	}
+
+	/* resolve reader keys BEFORE touching shm */
+	for _, rType := range readers {
+		section, ok := config[rType]
+		if !ok {
+			continue
+		}
+		instances, _ := section.([]any)
+		for _, inst := range instances {
+			instMap := inst.(map[string]any)
+			pts, _ := instMap["points"].([]any)
+			for _, pt := range pts {
+				ptMap := pt.(map[string]any)
+				key, _ := ptMap["key"].(string)
+				pid, exists := keyMap[key]
+				if !exists {
+					return newError(fmt.Sprintf("UNKNOWN_READER_KEY: reader key '%s' not found in any writer", key)), nil
+				}
+				ptMap["shm_id"] = float64(pid)
+			}
+		}
+	}
+
+	/* now apply shm changes — reader validation passed */
+	if needsExpand {
+		newMaxPoints := requiredPoints * 2
+		if err := state.sm.Expand(newMaxPoints); err != nil {
+			return newError(err.Error()), nil
+		}
+	}
+	state.sm.SetHeaderUint32(8, uint32(requiredPoints))
+
+	out, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		return newError(fmt.Sprintf("CONFIG_WRITE_FAILED: marshal failed: %v", err)), nil
+	}
+
+	tmpPath := configPath + ".tmp"
+	if err := os.WriteFile(tmpPath, out, 0644); err != nil {
+		return newError(fmt.Sprintf("CONFIG_WRITE_FAILED: write failed: %v", err)), nil
+	}
+	if err := os.Rename(tmpPath, configPath); err != nil {
+		os.Remove(tmpPath)
+		return newError(fmt.Sprintf("CONFIG_WRITE_FAILED: rename failed: %v", err)), nil
+	}
+
+	return newResult("success"), nil
+}
+
 func newResult(text string) *mcp.CallToolResult {
 	return &mcp.CallToolResult{
 		Content: []mcp.Content{&mcp.TextContent{Text: text}},
@@ -293,6 +476,15 @@ func main() {
 			InputSchema: json.RawMessage(`{"type":"object","properties":{},"required":[]}`),
 		},
 		queryStatusHandler,
+	)
+
+	server.AddTool(
+		&mcp.Tool{
+			Name:        "adjust_shm",
+			Description: "Adjust shared memory capacity and point allocation based on config file",
+			InputSchema: json.RawMessage(`{"type":"object","properties":{},"required":[]}`),
+		},
+		adjustShmHandler,
 	)
 
 	if err := server.Run(context.Background(), &mcp.StdioTransport{}); err != nil {

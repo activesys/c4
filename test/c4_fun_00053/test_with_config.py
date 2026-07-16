@@ -86,11 +86,11 @@ def _assert_mcp_error(resp, expected_prefix):
     )
 
 
-def _assert_header(path, max_points):
+def _assert_header(path, max_points, point_count=0):
     h = read_shm_header(path)
     assert h["magic"] == MAGIC, f"magic: {hex(h['magic'])}"
     assert h["version"] == 1, f"version: {h['version']}"
-    assert h["point_count"] == 0, f"point_count: {h['point_count']}"
+    assert h["point_count"] == point_count, f"point_count: {h['point_count']}"
     assert h["max_points"] == max_points, f"max_points: {h['max_points']}"
     assert h["remap_version"] == 0
     assert h["global_write_seq"] == 0
@@ -158,7 +158,7 @@ class TestWithConfigShmCreation:
             assert resp["result"]["content"][0]["text"] == "success"
 
             path = shm_path(iid)
-            _assert_header(path, max_points=4)
+            _assert_header(path, max_points=4, point_count=2)
             _assert_block(path, 1)
             _assert_block(path, 2)
             _assert_block(path, 4)
@@ -201,7 +201,7 @@ class TestWithConfigShmCreation:
 
             path = shm_path(iid)
             # writer_points = 2 + 3 = 5, max_points = 10
-            _assert_header(path, max_points=10)
+            _assert_header(path, max_points=10, point_count=5)
             _assert_block(path, 1)
             _assert_block(path, 5)
         finally:
@@ -459,9 +459,9 @@ class TestWithConfigShmCreation:
 
             inner = json.loads(resp["result"]["content"][0]["text"])
             assert inner["magic"] == "valid"
-            assert inner["point_count"] == 0
+            assert inner["point_count"] == 2
             assert inner["max_points"] == 4
-            assert inner["free_blocks"] == 4
+            assert inner["free_blocks"] == 2
         finally:
             os.unlink(config_path)
 
