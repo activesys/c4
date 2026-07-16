@@ -1,6 +1,6 @@
 # C4 共享内存管理设计
 
-> **版本**：v0.1.0 | **最后更新**：2026-07-15 | **父文档**：[c4_architecture.md](c4_architecture.md)
+> **版本**：v0.2.0 | **最后更新**：2026-07-16 | **父文档**：[c4_architecture.md](c4_architecture.md)
 
 ---
 
@@ -70,8 +70,8 @@ flowchart TD
 
 #### adjust_shm 统一调整机制
 
-当用户新增采集点或启动新 Writer 后，Agent 更新配置文件，然后调用
-`c4_shm_manager` 的 `adjust_shm` 工具一次性完成容量判断、扩容（如需）和点分配。
+当用户新增采集点或启动新 Writer 后，或者停掉 Writer / 删除采集点后，Agent 更新配置文件，然后调用
+`c4_shm_manager` 的 `adjust_shm` 工具一次性完成容量判断、扩容（如需）、点分配和块回收。
 所有操作在 `c4_shm_manager` 进程内原子化完成。
 
 **Pause-Resume 协议前置**：为确保 `ftruncate` / `munmap` 期间其他 MCP 进程不访问
@@ -87,26 +87,31 @@ Phase 1 - Pause：
      - 向 Agent ack "paused"
 
 Phase 2 - adjust_shm：
-  a. Agent 确认所有 MCP 进程已暂停 → 调用 c4_shm_manager.adjust_shm()
-  b. c4_shm_manager 内部：
-     - 通过 roots/list 获取配置文件路径
-     - 读取配置文件，按 §2.2 算法计算所需点数 (required_points)
-       ┌ 若 required_points ≤ current_max_points（不超容量）：
-       │   在 state=0 的空闲块中为新点分配 shm_id
-       │   已有点地址不变
-       │   header.point_count = required_points
-       └ 若 required_points > current_max_points（超容量）：
-           new_max = required_points × 2
-           ftruncate(shm_fd, (new_max + 1) × 32)
-           header.max_points = new_max
-           header.remap_version++          // 递增版本号
-           munmap + mmap 新大小
-           新增 block 全部写入 magic = 0xC4DA7A00
-           已有点保持原 shm_id，配置中 shm_id=0 的新点分配空闲 shm_id
-           header.point_count = required_points
-     - 回填配置文件（将分配后的 shm_id 写入各 MCP Server 的 points 数组）
-     - 写回配置文件到磁盘
-     - 返回结果给 Agent
+   a. Agent 确认所有 MCP 进程已暂停 → 调用 c4_shm_manager.adjust_shm()
+   b. c4_shm_manager 内部：
+      - 通过 roots/list 获取配置文件路径
+      - 读取配置文件，按 §2.2 算法计算所需点数 (required_points)
+        ┌ 回收孤儿块（required_points < header.point_count）：
+        │   配置文件中的 Writer key 集合与当前 shm 中已分配 block 比较
+        │   不再出现在配置文件中的 point 对应的 block → state 置 0，回收为空闲
+        │   仍存在的 point 对应的 block 保持 state=1，不受影响
+        │   header.point_count = required_points
+        ├ 若 required_points ≤ current_max_points（不超容量，无回收或回收后）：
+        │   在 state=0 的空闲块中为新点分配 shm_id
+        │   已有点地址不变
+        │   header.point_count = required_points
+        └ 若 required_points > current_max_points（超容量）：
+            new_max = required_points × 2
+            ftruncate(shm_fd, (new_max + 1) × 32)
+            header.max_points = new_max
+            header.remap_version++          // 递增版本号
+            munmap + mmap 新大小
+            新增 block 全部写入 magic = 0xC4DA7A00
+            已有点保持原 shm_id，配置中 shm_id=0 的新点分配空闲 shm_id
+            header.point_count = required_points
+      - 回填配置文件（将分配后的 shm_id 写入各 MCP Server 的 points 数组）
+      - 写回配置文件到磁盘
+      - 返回结果给 Agent
 
 Phase 3 - Resume：
   a. Agent 向所有 MCP 进程下发 resume 指令（携带 new_max_points）
@@ -141,7 +146,9 @@ sequenceDiagram
     S->>A: roots/list
     A-->>S: {roots: [{uri: "file:///etc/c4/config.json"}]}
     S->>S: 读配置，算点数<br/>容量判断
-    alt 不超容量
+    alt 回收孤儿块
+        Note over S: 已删除点 → state=0<br/>仍存在点保持不变
+    else 不超容量
         Note over S: 空闲块中分配<br/>已有点不变
     else 超容量
         S->>S: ftruncate<br/>max_points=N×2<br/>remap_version++<br/>munmap + mmap<br/>已有点保持原ID, 新点分配
@@ -168,15 +175,27 @@ sequenceDiagram
 
 - **配置文件是唯一真相源**：`adjust_shm` 以配置文件中的 points 列表为准计算需求和分类 block（已有点 vs 孤儿块 vs 空闲块），不依赖 Agent 传入点数参数
 - **已有点地址不变**：`ftruncate` 只追加尾部空间，已有 block 的物理偏移不变。配置文件中已有点的 shm_id 始终保持原值
-- **shm_id 一次分配，终身不变**：寻址公式绑定物理位置，重编号会导致映射关系全乱
-- **不缩容**：已分配后不再缩减共享内存，避免截断仍在使用的块。空间换简单性
-- **回收逻辑另议**：Writer 停止或点表缩减时产生的孤儿 block 回收对应 C4_FUN_00055，不在当前 `adjust_shm` 范围内处理
+- **shm_id 一次分配，终身不变**：寻址公式绑定物理位置，重编号会导致映射关系全乱。即使 writer 停止或点被删除，其 shm_id 不会被重新分配给其他点——该 block 被回收后仅供同一点重新激活使用
+- **不缩容**：已分配后不再缩减共享内存，避免截断仍在使用的块。块回收仅将 `state` 置 0，不释放文件空间。空间换简单性
+- **回收通过 adjust_shm 统一处理**：Writer 停止或点表缩减时，`adjust_shm` 将不再出现在配置中的 point 对应的 block 的 `state` 置 0，`point_count` 随之递减。回收后 block 可被后续分配复用
 - **全量离线可重建**：如果碎片严重，可在所有 writer 离线时 `shm_unlink` 后重新紧凑分配
 
 #### 块回收
 
-回收发生在 writer 停止或需要减少采集点时。必须确保 write 和 read 都已停止后才修改
-`state`，避免与新分配的 writer 冲突。回收逻辑对应 C4_FUN_00055，不在 `adjust_shm` 中处理。
+回收发生在 writer 停止或需要减少采集点时，**由 `adjust_shm` 统一处理**。必须确保 write 和 read
+都已停止（通过 Pause-Resume 协议，见 §1.2）后才修改 `state`，避免与新分配的 writer 冲突。
+
+**回收算法**：
+
+`adjust_shm` 读取配置文件后，对比当前 shm 中已分配的 block 与配置文件中的 Writer point 集合：
+
+1. 遍历当前 shm 中所有 `state=1` 的 block，其 shm_id 对应配置中某个已分配的 point
+2. 配置文件中的 point 有确定的 `key`（`{service_id}.{point_id}`），通过 key→shm_id 映射找到对应 block
+3. 若某个 block 的 shm_id 在配置文件中**找不到对应 point**（即该 point 已被删除），则此 block 为**孤儿块**：
+   - block 的 `state` 置 0（回收为空闲）
+   - `point_count` 递减
+4. 仍存在的 point 对应的 block 保持 `state=1`，不受影响
+5. 回收后的空闲 block 可在同一 `adjust_shm` 调用中被新 point 分配（先回收再分配）
 
 **`point_count` 的维护**：由于只有 `c4_shm_manager`（受 Agent 委托）做分配/回收操作，
 `point_count` 的读写是无竞争的，无需原子操作保护。
@@ -222,6 +241,51 @@ Agent 新增 writer5(15个)，生成新配置文件：
 关键性质：
 - **已有点全部保持原 shm_id**：writer1~4 的 shm_id 不变，数据管道无需重配置
 - **碎片可接受**：`shm_id * 32` 仍是 O(1) 直接寻址
+
+#### Writer 删除回收示例
+
+```
+初始状态（write1~4 运行中，max_points=20）：
+  writer1:  [ 1..2]   (2个, state=1)
+  writer2:  [ 3..4]   (2个, state=1)
+  writer3:  [ 5..7]   (3个, state=1)
+  writer4:  [ 8..10]  (3个, state=1)
+  空闲:    [11..20]  (10个, state=0)
+  point_count=10
+
+Agent 停止 writer3(3个点)，从配置文件删除 writer3 的 points：
+
+1. Agent → 所有 MCP: pause
+
+2. Agent → c4_shm_manager: adjust_shm()
+   required_points = 2 + 2 + 3 = 7  (writer1+2+4)
+   current_max_points = 20
+   required_points(7) < point_count(10) → 触发回收
+
+   回收阶段：
+     配置文件 key 集合 = {writer1.p1, writer1.p2, writer2.p1, writer2.p2,
+                         writer4.p1, writer4.p2, writer4.p3}
+     writer3 的 3 个 key 不在配置中 → 对应 block[5..7] state → 0
+     point_count: 10 → 7
+
+   分配阶段：无新 point（全部已有 shm_id），跳过
+
+   最终：
+     writer1:  [1..2]   (state=1)
+     writer2:  [3..4]   (state=1)
+     已回收:  [5..7]   (state=0，原 writer3)
+     writer4:  [8..10]  (state=1)
+     空闲:    [5..7][11..20]  (13个, state=0)
+     point_count=7
+   回填配置，返回 "success"
+
+3. Agent → 所有 MCP: resume
+```
+
+关键性质：
+- **回收不破坏仍在用的 block**：writer1、2、4 的 block 保持 state=1，数据管道不受影响
+- **回收后可立即复用**：回收的 block[5..7] 在同一 `adjust_shm` 调用中可供新 point 分配
+- **shm_id 不重分配**：block[5] 的 shm_id 始终是 5，即使被回收也不会分配给其他 key——仅在原 writer3 恢复时重新激活
 
 ### 1.3 `c4_shm_manager` 崩溃恢复
 
@@ -508,21 +572,21 @@ sequenceDiagram
 
 ### 3.2 Tool: `adjust_shm`
 
-根据配置文件计算所需点数，判断是否需要扩容，并为所有点分配 shm_id。
-已有点的 shm_id 保持不变，新点在空闲块或扩容后的新空间中分配。
+根据配置文件计算所需点数，判断是否需要扩容或回收，并为所有点分配 shm_id。
+已有点的 shm_id 保持不变，新点在空闲块或扩容后的新空间中分配，被删除的点的 block 回收为空闲。
 
 **前置条件**：Agent 必须先通过 Pause-Resume 协议暂停所有 MCP 进程的数据路径
 （见 §1.2），确认所有进程已暂停后再调用此工具。
 
-**触发条件**：Agent 更新配置文件后（新增 Writer、新增采集点），需要调整共享内存
-容量和点分配。
+**触发条件**：Agent 更新配置文件后（新增/删除 Writer、新增/删除采集点），需要调整共享内存
+容量、点分配和块回收。
 
 **参数**：
 
 ```json
 {
     "name": "adjust_shm",
-    "description": "调整共享内存容量和点分配。根据配置文件计算所需点数，如不超容量则在空闲块中分配新点，超容量则扩容至所需点数的 2 倍后分配。已有点地址不变",
+    "description": "调整共享内存容量和点分配。根据配置文件计算所需点数：回收已删除点的 block，为新点在空闲块中分配，超容量时扩容至 2 倍。已有点地址不变",
     "inputSchema": {
         "type": "object",
         "properties": {},
@@ -541,7 +605,14 @@ sequenceDiagram
    └ 正常 → 继续
 3. 读取当前共享内存 Header，获取 `current_max_points`
 4. 容量判断与执行：
-   a. **不超容量**（`required_points ≤ current_max_points`）：
+   首先执行**块回收**（如果存在孤儿 block）：
+      - 遍历配置文件中的所有 Writer point，构建 key（`{service_id}.{point_id}`）→ shm_id 映射
+      - 扫描 `block[1..max_points]`，找出 `state=1` 的 block
+      - 若 block 的 shm_id 在 key→shm_id 映射中**不存在**，则该 block 为孤儿块：
+         `state` 置 0（回收），`point_count` 递减
+      - 仍存在的 point 对应的 block 不受影响
+   然后执行**容量判断**：
+    a. **不超容量**（`required_points ≤ current_max_points`）：
       - 扫描 `block[1..max_points]`，收集 `state=0` 的空闲 shm_id
       - 为配置文件中 `shm_id=0` 的新点分配空闲 shm_id
       - 已有点（已有 shm_id 的）地址不变
@@ -764,11 +835,44 @@ sequenceDiagram
     M2-->>A: "success"
 ```
 
-### 4.4 场景四：Writer 崩溃后回收
+### 4.4 场景四：Writer 停止后回收
 
-回收流程对应 C4_FUN_00055，不在 `adjust_shm` 中处理。Agent 检测到 writer 心跳超时后，
-通过 Pause-Resume 协议暂停相关 reader，然后通过共享内存直接操作回收对应的 block
-（state → 0，point_count 递减）。详见 C4_FUN_00055 设计。
+Agent 检测到 writer 心跳超时或收到停止指令后，从配置文件删除对应 writer 的 points，
+然后通过 Pause-Resume 协议暂停所有 MCP 进程，调用 `adjust_shm` 完成块回收。
+
+```mermaid
+sequenceDiagram
+    participant A as Agent
+    participant S as c4_shm_manager
+    participant CFG as config.json
+    participant M1 as modbus_client
+    participant M2 as asfp2_client
+
+    Note over A: Writer 停止<br/>Agent 从配置删除对应 points
+    A->>CFG: 删除 writer3 的 points 列表
+
+    Note over A,M2: Phase 1 — Pause
+    A->>M1: tools/call pause({shm_ids: []})
+    A->>M2: tools/call pause({shm_ids: []})
+    M1-->>A: "success"
+    M2-->>A: "success"
+
+    Note over A,S: Phase 2 — adjust_shm（回收 + 分配）
+    A->>S: tools/call adjust_shm()
+    S->>A: roots/list
+    A-->>S: {roots: [{uri: "file:///etc/c4/config.json"}]}
+    S->>CFG: 读取配置，计算 required_points=7
+    Note over S: required_points(7) < point_count(10)<br/>触发回收：writer3 的 3 个 block state→0
+    S->>S: 回收孤儿块 → 分配新点<br/>回填配置
+    S->>CFG: 写回配置
+    S-->>A: "success"
+
+    Note over A,M2: Phase 3 — Resume
+    A->>M1: tools/call resume({shm_ids: []})
+    A->>M2: tools/call resume({shm_ids: []})
+    M1-->>A: "success"
+    M2-->>A: "success"
+```
 
 ---
 
@@ -795,4 +899,4 @@ sequenceDiagram
 | `-32602` | Invalid params | 必填参数缺失、类型错误、schema 校验失败 |
 | `-32700` | Parse error | JSON 格式不合法 |
 
-> **对应功能**：C4_FUN_00053, C4_FUN_00054, C4_FUN_00055, C4_FUN_00056, C4_FUN_00049
+> **对应功能**：C4_FUN_00053, C4_FUN_00054, C4_FUN_00055, C4_FUN_00049

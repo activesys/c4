@@ -181,6 +181,10 @@ func (s *SharedMemory) InitBlock(shmID int) {
 	binary.BigEndian.PutUint32(s.data[shmID*BlockSize+BlkOffMagic:], Magic)
 }
 
+func (s *SharedMemory) SetBlockState(shmID int, state uint8) {
+	s.data[shmID*BlockSize+BlkOffState] = state
+}
+
 func (s *SharedMemory) Expand(newMaxPoints int) error {
 	oldMax := s.maxPoints
 	totalSize := int64((newMaxPoints + 1) * BlockSize)

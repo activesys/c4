@@ -3,7 +3,7 @@
 [![License](https://img.shields.io/badge/license-AGPL%20v3-blue.svg)](LICENSE)
 [![Spec](https://img.shields.io/badge/spec-v0.3.0-green.svg)](docs/specification/c4_description.md)
 
-让数据接入智能化、自动化。
+C4让数据接入更智能、更轻松。
 
 C4 是一个部署在工业数据服务器上的 AI 智能体，将传统需要实施工程师手动完成的数据接入配置工作——解读点表、配置协议参数、设置转发规则、排查连接故障——转变为自然语言驱动的自动化流程。场站工作人员无需专业知识，通过 Web 界面提交需求和任意格式的文档，即可完成数据接入。
 

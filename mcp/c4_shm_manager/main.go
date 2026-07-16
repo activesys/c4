@@ -326,6 +326,10 @@ func adjustShmHandler(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallT
 		}
 	}
 
+	if requiredPoints == 0 {
+		return newError("CONFIG_MISSING_SECTION: 'c4_shm_manager.writer' or 'c4_shm_manager.reader' not found or empty in config"), nil
+	}
+
 	h := state.sm.HeaderInfo()
 	currentMaxPoints := int(h.MaxPoints)
 
@@ -360,6 +364,14 @@ func adjustShmHandler(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallT
 					assignedSet[shmID] = true
 				}
 			}
+		}
+	}
+
+	/* reclaim orphan blocks: scan state=1 blocks, reclaim any whose shm_id is not in assignedSet */
+	for shmID := 1; shmID <= currentMaxPoints; shmID++ {
+		bi := state.sm.BlockInfo(shmID)
+		if bi.State == 1 && !assignedSet[shmID] {
+			state.sm.SetBlockState(shmID, 0)
 		}
 	}
 
