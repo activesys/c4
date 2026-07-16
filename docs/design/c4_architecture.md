@@ -964,7 +964,7 @@ IEC104 采集（2 个主变 RTU）和 ASFP2 转发（到中心侧数据库和第
 
 ## 3.3 共享内存管理
 
-`c4_shm_manager` 通过 MCP 协议向 Agent 暴露 `create_shm`、`adjust_shm`、`query_status`
+`c4_shm_manager` 通过 MCP 协议向 Agent 暴露 `create_shm`、`adjust_shm`
 三个工具，涵盖共享内存的创建、扩容、点分配和状态查询。Agent 不直接操作共享内存。
 
 > 工具接口定义、配置文件解析算法、交互时序和错误码详见 [c4_shm_manager.md](c4_shm_manager.md)。

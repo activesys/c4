@@ -1,6 +1,6 @@
 # C4 共享内存管理设计
 
-> **版本**：v0.3.0 | **最后更新**：2026-07-16 | **父文档**：[c4_architecture.md](c4_architecture.md)
+> **版本**：v0.3.1 | **最后更新**：2026-07-16 | **父文档**：[c4_architecture.md](c4_architecture.md)
 
 ---
 
@@ -14,7 +14,7 @@
 
 共享内存由 **`c4_shm_manager`** 创建并管理。`c4_shm_manager` 是每个 C4 实例默认启动
 的首个 MCP 服务，它通过 MCP 协议向 Agent 暴露共享内存管理的全部能力（创建、扩容、
-块分配/回收、状态查询）。Agent 不直接操作共享内存——所有 shm 操作通过
+块分配/回收）。Agent 不直接操作共享内存——所有 shm 操作通过
 `c4_shm_manager` 提供的 MCP 工具完成。
 
 ### 1.1 创建流程
@@ -475,7 +475,7 @@ sequenceDiagram
 
     A->>S: 启动进程
     A->>S: initialize (MCP 握手, 声明 roots 能力)
-    S-->>A: 工具列表 (create_shm, adjust_shm, query_status, ...)
+    S-->>A: 工具列表 (create_shm, adjust_shm, ...)
 
     A->>S: tools/call (create_shm)<br/>params: {instance_id}
     S->>A: roots/list (请求根目录)
@@ -754,7 +754,7 @@ sequenceDiagram
 > - **`mmap` 后文件尺寸与 `header.max_points` 不一致**（崩溃发生在 `ftruncate` 后、`header.max_points` 更新前）：重启后 `c4_shm_manager` `mmap` 时检测 `file_size > (header.max_points + 1) × BLOCK_SIZE`，以文件尺寸为准修正 `header.max_points`，然后按 §1.3 崩溃恢复流程重建 `point_count`。
 > - **配置文件必须原子写入**：回填配置文件时使用 write-to-temp + `fsync` + `rename` 模式，避免中途崩溃导致配置文件损坏（半写 JSON 无法解析）。
 
-**返回值**：成功时返回 `"success"`。Agent 需要状态信息时可调用 `query_status`。
+**返回值**：成功时返回 `"success"`。
 
 **MCP 应答示例**：
 
@@ -792,58 +792,6 @@ sequenceDiagram
 
 ---
 
-### 3.3 Tool: `query_status`
-
-查询共享内存整体状态，包括容量、活跃点数、空闲块数和 Header 完整性信息。
-
-**触发条件**：Agent 周期性监控（心跳）、用户查询、故障诊断。
-
-**参数**：
-
-```json
-{
-    "name": "query_status",
-    "description": "查询共享内存的整体状态，包括容量、活跃点、空闲块、Header 校验信息",
-    "inputSchema": {
-        "type": "object",
-        "properties": {},
-        "required": []
-    }
-}
-```
-
-**返回值**：
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `magic` | string | Header magic 校验结果：`"valid"` / `"invalid"` / `"not_found"` |
-| `version` | integer | 布局版本号 |
-| `remap_version` | integer | 当前 remap 版本号 |
-| `point_count` | integer | 当前活跃 point 数量（state=1 的 block 总数） |
-| `max_points` | integer | 共享内存最大 point 容量 |
-| `free_blocks` | integer | 空闲块数量（= max_points - point_count） |
-| `global_write_seq` | integer | 全局写入序号 |
-
-**MCP 应答示例**：
-
-```json
-// ========== 成功 ==========
-// --> 请求
-{"jsonrpc": "2.0", "id": 6, "method": "tools/call", "params": {"name": "query_status", "arguments": {}}}
-// <-- 应答
-{"jsonrpc": "2.0", "id": 6, "result": {"content": [{"type": "text", "text": "{\"magic\":\"valid\",\"version\":1,\"remap_version\":1,\"point_count\":10,\"max_points\":20,\"free_blocks\":10,\"global_write_seq\":15042}"}], "isError": false}}
-
-// ========== 业务错误：magic 损坏 ==========
-// <-- 应答
-{"jsonrpc": "2.0", "id": 6, "result": {"content": [{"type": "text", "text": "SHM_CORRUPTED: header magic is 0x00000000, expected 0xC4DA7A00"}], "isError": true}}
-
-// ========== 业务错误：共享内存未创建 ==========
-// <-- 应答
-{"jsonrpc": "2.0", "id": 6, "result": {"content": [{"type": "text", "text": "SHM_NOT_CREATED: shared memory /c4_hnals_farm_01 does not exist"}], "isError": true}}
-```
-
----
-
 ## 4. 典型交互时序
 
 ### 4.1 场景一：首次创建
@@ -873,10 +821,6 @@ sequenceDiagram
         S->>FS: 写回 config（回填 shm_id）
     end
     S-->>A: "success"
-
-    Note over A: 验证
-    A->>S: tools/call query_status()
-    S-->>A: {magic: "valid", point_count: 10, ...}
 ```
 
 ### 4.2 场景二：扩容流程
@@ -1054,8 +998,7 @@ sequenceDiagram
 | 错误码 | 含义 | 触发工具 |
 |--------|------|---------|
 | `SHM_ALREADY_EXISTS` | 共享内存已存在（O_EXCL 冲突） | `create_shm` |
-| `SHM_NOT_CREATED` | 共享内存尚未创建 | `adjust_shm`, `query_status` |
-| `SHM_CORRUPTED` | Header magic 校验失败 | `query_status`, `resume` |
+| `SHM_NOT_CREATED` | 共享内存尚未创建 | `adjust_shm` |
 | `SHM_SYSCALL_FAILED` | POSIX 系统调用失败（shm_open / ftruncate / mmap） | `create_shm`, `adjust_shm` |
 | `CONFIG_MISSING_SECTION` | `c4_shm_manager` 段缺失；或创建时 writer 与 reader 仅一方为空 | `create_shm`, `adjust_shm` |
 | `CONFIG_PATH_MISSING` | roots/list MCP 协议调用失败（Agent 不可达或超时） | `create_shm`, `adjust_shm` |
