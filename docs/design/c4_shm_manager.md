@@ -500,8 +500,12 @@ Agent 生成的配置文件中，各 MCP Server 的 `points` 数组中 `shm_id`
 
 | 角色 | MCP Server | 说明 |
 |------|-----------|------|
-| **Writer** | `c4_modbus_client`、`c4_iec104_client`、`c4_asfp2_server` | 向共享内存写入数据。其中 `c4_asfp2_server` 无 points 列表（接收端按反向映射动态分配），静态分配时贡献 0 点 |
+| **Writer** | `c4_modbus_client`、`c4_iec104_client`、`c4_asfp2_server` | 向共享内存写入数据 |
 | **Reader** | `c4_asfp2_client`、`c4_influxdb_client` | 从共享内存读取数据 |
+
+> **注**：`c4_asfp2_server` 的 points 中为 `{addr → shm_id}` 的反向映射（按 ASFP2 协议 key 匹配），
+> 与 `c4_modbus_client` 的 `{key → shm_id}` 形式不同，但同样参与 `adjust_shm` 的 shm_id 分配和回填。
+> 详细设计见 [c4_asfp2_server.md](c4_asfp2_server.md)。
 
 **算法**：
 
