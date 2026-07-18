@@ -120,7 +120,6 @@ type instanceState struct {
 	listener  net.Listener
 	addrMap   map[uint32]int // addr → shm_id
 	stats     instanceStats
-	paused    atomic.Bool
 	quit      chan struct{}
 }
 
@@ -395,7 +394,7 @@ func parseASFP2Data(conn net.Conn, inst *instanceState, shmData []byte) {
 					bit := (buf[pos+byteIdx] >> bitIdx) & 1
 					addr := mutableKey + uint32(i)
 					shmID, ok := inst.addrMap[addr]
-					if ok && !inst.paused.Load() {
+					if ok {
 						writeBlock(shmData, shmID, mutableType, mutableTimestamp, uint64(bit), 1)
 						atomic.AddUint64(&inst.stats.itemsWritten, 1)
 					} else {
@@ -495,7 +494,7 @@ func parseASFP2Data(conn net.Conn, inst *instanceState, shmData []byte) {
 				pos += valueSize
 
 				shmID, ok := inst.addrMap[itemKey]
-				if ok && !inst.paused.Load() {
+				if ok {
 					writeBlock(shmData, shmID, itemType, itemTs, value, valueSize)
 					atomic.AddUint64(&inst.stats.itemsWritten, 1)
 				} else {
@@ -575,7 +574,7 @@ func writeBlock(shmData []byte, shmID int, dataType uint8, timestamp uint64, val
 
 func startHandler(ctx context.Context, req *mcp.CallToolRequest, input struct{}) (*mcp.CallToolResult, any, error) {
 	if state.started.Load() {
-		return newError("ALREADY_STARTED: start has already been called, service is running"), nil, nil
+		return newError("ALREADY_RUNNING: start has already been called and service is running, call stop first"), nil, nil
 	}
 
 	instances, configPath, err := loadConfig(req)
@@ -665,9 +664,7 @@ func runServer(ist *instanceState, shmData []byte) {
 	}
 }
 
-func pauseHandler(ctx context.Context, req *mcp.CallToolRequest, input struct {
-	ShmIDs []int `json:"shm_ids"`
-}) (*mcp.CallToolResult, any, error) {
+func stopHandler(ctx context.Context, req *mcp.CallToolRequest, input struct{}) (*mcp.CallToolResult, any, error) {
 	if !state.started.Load() {
 		return newError("SERVICE_NOT_READY: start has not been called"), nil, nil
 	}
@@ -675,89 +672,19 @@ func pauseHandler(ctx context.Context, req *mcp.CallToolRequest, input struct {
 	state.mu.Lock()
 	defer state.mu.Unlock()
 
-	pauseAll := len(input.ShmIDs) == 0
-	targetSet := make(map[int]bool)
-	for _, id := range input.ShmIDs {
-		targetSet[id] = true
-	}
-
-	for _, ist := range state.instances {
-		if pauseAll {
-			ist.paused.Store(true)
-		} else {
-			// Check if any point in this instance's addrMap has matching shm_id
-			for _, shmID := range ist.addrMap {
-				if targetSet[shmID] {
-					ist.paused.Store(true)
-					break
-				}
-			}
-		}
-	}
-
-	return newResult("success"), nil, nil
-}
-
-func resumeHandler(ctx context.Context, req *mcp.CallToolRequest, input struct {
-	ShmIDs       []int `json:"shm_ids"`
-	NewMaxPoints int   `json:"new_max_points"`
-}) (*mcp.CallToolResult, any, error) {
-	if !state.started.Load() {
-		return newError("SERVICE_NOT_READY: start has not been called"), nil, nil
-	}
-
-	state.mu.Lock()
-	defer state.mu.Unlock()
-
-	// Reload config via roots/list
-	instances, configPath, err := loadConfig(req)
-	if err != nil {
-		return newError(err.Error()), nil, nil
-	}
-
-	// Remap shm
-	if state.shmData != nil {
-		unix.Munmap(state.shmData)
-		unix.Close(state.shmFd)
-	}
-	shmData, shmFd, err := attachShm(configPath)
-	if err != nil {
-		return newError(err.Error()), nil, nil
-	}
-	state.shmData = shmData
-	state.shmFd = shmFd
-
-	// Rebuild instances
 	for _, ist := range state.instances {
 		close(ist.quit)
 		ist.listener.Close()
 	}
+	state.instances = nil
 
-	var newInstances []*instanceState
-	for _, cfg := range instances {
-		addrMap := make(map[uint32]int)
-		for _, pt := range cfg.Points {
-			if pt.ShmID > 0 {
-				addrMap[pt.Addr] = pt.ShmID
-			}
-		}
-
-		listener, err := net.Listen("tcp", fmt.Sprintf(":%d", cfg.Port))
-		if err != nil {
-			return newError(fmt.Sprintf("PORT_BIND_FAILED: instance '%s': cannot bind port %d: %v", cfg.ID, cfg.Port, err)), nil, nil
-		}
-
-		ist := &instanceState{
-			cfg:      cfg,
-			listener: listener,
-			addrMap:  addrMap,
-			quit:     make(chan struct{}),
-		}
-		newInstances = append(newInstances, ist)
-		go runServer(ist, shmData)
+	if state.shmData != nil {
+		unix.Munmap(state.shmData)
+		unix.Close(state.shmFd)
+		state.shmData = nil
 	}
 
-	state.instances = newInstances
+	state.started.Store(false)
 
 	return newResult("success"), nil, nil
 }
@@ -794,11 +721,7 @@ func statusHandler(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallTool
 			Port:        ist.cfg.Port,
 			PointsCount: len(ist.cfg.Points),
 		}
-		if ist.paused.Load() {
-			s.State = "paused"
-		} else {
-			s.State = "running"
-		}
+		s.State = "running"
 		s.Stats.PacketsReceived = atomic.LoadUint64(&ist.stats.packetsReceived)
 		s.Stats.ItemsReceived = atomic.LoadUint64(&ist.stats.itemsReceived)
 		s.Stats.ItemsWritten = atomic.LoadUint64(&ist.stats.itemsWritten)
@@ -845,20 +768,11 @@ func main() {
 
 	mcp.AddTool(server,
 		&mcp.Tool{
-			Name:        "pause",
-			Description: "Pause data reception for specified shm_ids (empty=all)",
-			InputSchema: json.RawMessage(`{"type":"object","properties":{"shm_ids":{"type":"array","items":{"type":"integer","minimum":1}}}}`),
+			Name:        "stop",
+			Description: "Stop all ASFP2 server instances and release resources",
+			InputSchema: json.RawMessage(`{"type":"object","properties":{},"required":[]}`),
 		},
-		pauseHandler,
-	)
-
-	mcp.AddTool(server,
-		&mcp.Tool{
-			Name:        "resume",
-			Description: "Resume data reception and reload configuration",
-			InputSchema: json.RawMessage(`{"type":"object","properties":{"shm_ids":{"type":"array","items":{"type":"integer","minimum":1}},"new_max_points":{"type":"integer"}}}`),
-		},
-		resumeHandler,
+		stopHandler,
 	)
 
 	server.AddTool(

@@ -128,7 +128,7 @@ class TestReceive:
         assert 100 <= _value_u16(b1["value"]) <= 200
         assert 100 <= _value_u16(b2["value"]) <= 200
 
-        start_asfp2_server.call_tool("pause", {})
+        start_asfp2_server.call_tool("stop", {})
 
     # ── TC2: 无属性优化 ──
 
@@ -154,7 +154,7 @@ class TestReceive:
         _assert_block_written(shm, 1, 4)
         _assert_block_written(shm, 2, 4)
 
-        start_asfp2_server.call_tool("pause", {})
+        start_asfp2_server.call_tool("stop", {})
 
     # ── TC3: key_range — 多 key 连续发送 ──
 
@@ -185,7 +185,7 @@ class TestReceive:
         for shm_id in range(1, 6):
             _assert_block_written(shm, shm_id, 4)
 
-        start_asfp2_server.call_tool("pause", {})
+        start_asfp2_server.call_tool("stop", {})
 
     # ── TC4: 变长类型过滤 — STRING 被丢弃 ──
 
@@ -211,7 +211,7 @@ class TestReceive:
         _assert_block_not_written(shm, 1)
         _assert_block_not_written(shm, 2)
 
-        start_asfp2_server.call_tool("pause", {})
+        start_asfp2_server.call_tool("stop", {})
 
     # ── TC5: BOOLEAN 类型 ──
 
@@ -240,7 +240,7 @@ class TestReceive:
         for shm_id in range(1, 6):
             _assert_block_written(shm, shm_id, 0)
 
-        start_asfp2_server.call_tool("pause", {})
+        start_asfp2_server.call_tool("stop", {})
 
     # ── TC6: BIT 类型 ──
 
@@ -269,7 +269,7 @@ class TestReceive:
         for shm_id in range(1, 6):
             _assert_block_written(shm, shm_id, 15)
 
-        start_asfp2_server.call_tool("pause", {})
+        start_asfp2_server.call_tool("stop", {})
 
     # ── TC7: FLOAT32 类型 ──
 
@@ -296,7 +296,7 @@ class TestReceive:
         _assert_block_written(shm, 2, 10)
         assert 100.0 <= _value_f32(b1["value"]) <= 200.0
 
-        start_asfp2_server.call_tool("pause", {})
+        start_asfp2_server.call_tool("stop", {})
 
     # ── TC8: v2.1.0 扩展格式 ──
 
@@ -322,7 +322,7 @@ class TestReceive:
         _assert_block_written(shm, 1, 4)
         _assert_block_written(shm, 2, 4)
 
-        start_asfp2_server.call_tool("pause", {})
+        start_asfp2_server.call_tool("stop", {})
 
     # ── TC9: LARGE_DATA_BLOCK 类型 — 被过滤 ──
 
@@ -360,7 +360,7 @@ class TestReceive:
         _assert_block_not_written(shm, 1)
         _assert_block_not_written(shm, 2)
 
-        start_asfp2_server.call_tool("pause", {})
+        start_asfp2_server.call_tool("stop", {})
 
     # ── TC10: 多连接并发 ──
 
@@ -420,7 +420,7 @@ class TestReceive:
         assert 500 <= _value_u16(b5["value"]) <= 600
         assert 500 <= _value_u16(b6["value"]) <= 600
 
-        start_asfp2_server.call_tool("pause", {})
+        start_asfp2_server.call_tool("stop", {})
 
     # ── TC11: BLOB/BITSTRING 变长类型过滤 ──
 
@@ -447,7 +447,7 @@ class TestReceive:
         _assert_block_not_written(shm, 1)
         _assert_block_not_written(shm, 2)
 
-        start_asfp2_server.call_tool("pause", {})
+        start_asfp2_server.call_tool("stop", {})
 
     # ── TC12: UINT64 — 8 字节整型边界 ──
 
@@ -474,7 +474,7 @@ class TestReceive:
         _assert_block_written(shm, 2, 8)
         assert 100 <= _value_u64(b1["value"]) <= 200
 
-        start_asfp2_server.call_tool("pause", {})
+        start_asfp2_server.call_tool("stop", {})
 
     # ── TC13: v2.1.1 整数类型 — 基本解析 ──
 
@@ -500,7 +500,7 @@ class TestReceive:
         _assert_block_written(shm, 1, 4)
         _assert_block_written(shm, 2, 4)
 
-        start_asfp2_server.call_tool("pause", {})
+        start_asfp2_server.call_tool("stop", {})
 
     # ── TC14: v2.1.1 FLOAT32 网络序 ──
 
@@ -527,7 +527,7 @@ class TestReceive:
         _assert_block_written(shm, 2, 10)
         assert 100.0 <= _value_f32(b1["value"]) <= 200.0
 
-        start_asfp2_server.call_tool("pause", {})
+        start_asfp2_server.call_tool("stop", {})
 
     # ── TC15: v2.1.0 FLOAT32 ──
 
@@ -554,4 +554,4 @@ class TestReceive:
         _assert_block_written(shm, 2, 10)
         assert 100.0 <= _value_f32(b1["value"]) <= 200.0
 
-        start_asfp2_server.call_tool("pause", {})
+        start_asfp2_server.call_tool("stop", {})

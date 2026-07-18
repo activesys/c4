@@ -347,7 +347,7 @@ def test_tc1_equal_swap(mcp, isolated_shm):
         h = read_shm_header(full_path)
         assert h["point_count"] == 10, f"point_count: {h['point_count']}"
         assert h["max_points"] == 20, f"max_points: {h['max_points']}"
-        assert h["remap_version"] == 0, f"remap_version: {h['remap_version']}"
+        assert h["reserved"] == 0, f"reserved: {h['reserved']}"
 
         # writer1: block[1..2] state=1
         for sid in (1, 2):
@@ -426,7 +426,7 @@ def test_tc2_net_increase(mcp, isolated_shm):
         h = read_shm_header(full_path)
         assert h["point_count"] == 12, f"point_count: {h['point_count']}"
         assert h["max_points"] == 20, f"max_points: {h['max_points']}"
-        assert h["remap_version"] == 0, f"remap_version: {h['remap_version']}"
+        assert h["reserved"] == 0, f"reserved: {h['reserved']}"
 
         # block[5..7]: state=1（复用回收空间）
         for sid in (5, 6, 7):
@@ -496,7 +496,7 @@ def test_tc3_net_decrease(mcp, isolated_shm):
         h = read_shm_header(full_path)
         assert h["point_count"] == 8, f"point_count: {h['point_count']}"
         assert h["max_points"] == 20, f"max_points: {h['max_points']}"
-        assert h["remap_version"] == 0, f"remap_version: {h['remap_version']}"
+        assert h["reserved"] == 0, f"reserved: {h['reserved']}"
 
         # block[5..8]: state=1（writer5 复用回收空间）
         for sid in (5, 6, 7, 8):
@@ -533,7 +533,7 @@ def test_tc3_net_decrease(mcp, isolated_shm):
 def test_tc4_mixed_expand(mcp, isolated_shm):
     """TC4: 删除 writer3（3 点）+ 新增 writer5（15 点）→ 触发扩容。
 
-    预期：required_points=22 > max=20，扩容至 44。remap_version++。
+    预期：required_points=22 > max=20，扩容至 44。reserved++。
     """
     iid = f"tc4_{uuid.uuid4().hex[:8]}"
     config_path, temp_dir = _create_and_activate(mcp, isolated_shm, iid)
@@ -556,7 +556,7 @@ def test_tc4_mixed_expand(mcp, isolated_shm):
         h = read_shm_header(full_path)
         assert h["point_count"] == 22, f"point_count: {h['point_count']}"
         assert h["max_points"] == 44, f"max_points: {h['max_points']}"
-        assert h["remap_version"] > 0, f"remap_version: {h['remap_version']}"
+        assert h["reserved"] == 0, f"reserved: {h['reserved']}"
 
         # block[5..7]: state=1（复用回收）
         for sid in (5, 6, 7):
@@ -631,7 +631,7 @@ def test_tc5_single_point_swap(mcp, isolated_shm):
         h = read_shm_header(full_path)
         assert h["point_count"] == 10, f"point_count: {h['point_count']}"
         assert h["max_points"] == 20, f"max_points: {h['max_points']}"
-        assert h["remap_version"] == 0, f"remap_version: {h['remap_version']}"
+        assert h["reserved"] == 0, f"reserved: {h['reserved']}"
 
         # block[1]: state=1（writer1 保留的点）
         assert read_shm_block(full_path, 1)["state"] == 1, (

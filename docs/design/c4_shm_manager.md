@@ -74,20 +74,20 @@ flowchart TD
 `c4_shm_manager` 的 `adjust_shm` 工具一次性完成容量判断、扩容（如需）、点分配和块回收。
 所有操作在 `c4_shm_manager` 进程内原子化完成。
 
-**Pause-Resume 协议前置**：为确保 `ftruncate` / `munmap` 期间其他 MCP 进程不访问
-共享内存（避免 SIGSEGV），Agent 调用 `adjust_shm` 前必须先执行 Pause-Resume 的
-Pause 阶段（pause/resume 工具定义见 [c4_architecture.md §3.3.1](c4_architecture.md)）。流程如下：
+**Stop-Start 协议前置**：为确保 `ftruncate` / `munmap` 期间其他 MCP 进程不访问
+共享内存（避免 SIGSEGV），Agent 调用 `adjust_shm` 前必须先执行 Stop-Start 协议的
+Stop 阶段（stop/start 工具定义见 [c4_architecture.md §3.3.1](c4_architecture.md)）。流程如下：
 
 ```
-Phase 1 - Pause：
-  a. Agent 向所有 MCP 进程下发 pause 指令
+Phase 1 - Stop：
+  a. Agent 向所有 MCP 进程下发 stop 指令
   b. 每个 MCP 进程：
-     - 停止读写循环（不再进入新临界区）
-     - 等待所有 in-flight 临界区自然结束（最多一个写入周期）
-     - 向 Agent ack "paused"
+     - 关闭所有监听端口和活跃连接
+     - 销毁实例状态
+     - 向 Agent ack "success"
 
 Phase 2 - adjust_shm：
-   a. Agent 确认所有 MCP 进程已暂停 → 调用 c4_shm_manager.adjust_shm()
+   a. Agent 确认所有 MCP 进程已停止 → 调用 c4_shm_manager.adjust_shm()
    b. c4_shm_manager 内部：
       - 通过 roots/list 获取配置文件路径
       - 读取配置文件，按 §2.2 算法计算所需点数 (required_points)
@@ -107,7 +107,6 @@ Phase 2 - adjust_shm：
             new_max = required_points × 2
             ftruncate(shm_fd, (new_max + 1) × 32)
             header.max_points = new_max
-            header.remap_version++          // 递增版本号
             munmap + mmap 新大小
             新增 block 全部写入 magic = 0xC4DA7A00
             已有点保持原 shm_id，配置中 shm_id=0 的新点分配空闲 shm_id
@@ -116,13 +115,12 @@ Phase 2 - adjust_shm：
       - 写回配置文件到磁盘
       - 返回结果给 Agent
 
-Phase 3 - Resume：
-  a. Agent 向所有 MCP 进程下发 resume 指令（携带 new_max_points）
+Phase 3 - Start：
+  a. Agent 向所有 MCP 进程下发 start 指令
   b. 每个 MCP 进程：
-     - 检测 header.remap_version 与本地 local_remap_version 不一致
-     - munmap + mmap 新大小
-     - local_remap_version = header.remap_version
-     - 重启读写循环
+     - 重新 shm_open + mmap 共享内存（获取调整后的大小）
+     - 重新读取配置文件
+     - 启动所有数据路径实例
 ```
 
 ```mermaid
@@ -133,15 +131,15 @@ sequenceDiagram
     participant M2 as asfp2_client
     participant M3 as 其他 MCP ...
 
-    A->>M1: pause
-    A->>M2: pause
-    A->>M3: pause
+    A->>M1: stop
+    A->>M2: stop
+    A->>M3: stop
     M1->>M1: 停止循环<br/>等待临界区退出
     M2->>M2: 停止循环<br/>等待临界区退出
     M3->>M3: 停止循环<br/>等待临界区退出
-    M1-->>A: "paused"
-    M2-->>A: "paused"
-    M3-->>A: "paused"
+    M1-->>A: "success"
+    M2-->>A: "success"
+    M3-->>A: "success"
 
     Note over A: 所有进程已暂停<br/>shm 无访问
 
@@ -153,25 +151,22 @@ sequenceDiagram
     alt 不超容量
         Note over S: 空闲块（含回收的）中分配<br/>已有点不变
     else 超容量
-        S->>S: ftruncate<br/>max_points=N×2<br/>remap_version++<br/>munmap + mmap<br/>已有点保持原ID, 新点分配
+        S->>S: ftruncate<br/>max_points=N×2<br/>munmap + mmap<br/>已有点保持原ID, 新点分配
     end
     S->>S: 回填配置 → 写回磁盘
     S-->>A: "success"
 
-    A->>M1: resume
-    A->>M2: resume
-    A->>M3: resume
-    M1->>M1: 检测 remap_version<br/>munmap + mmap<br/>重启循环
-    M2->>M2: 检测 remap_version<br/>munmap + mmap<br/>重启循环
-    M3->>M3: 检测 remap_version<br/>munmap + mmap<br/>重启循环
+    A->>M1: start
+    A->>M2: start
+    A->>M3: start
+    M1->>M1: shm_open + mmap<br/>重新读配置 → 启动实例
+    M2->>M2: shm_open + mmap<br/>重新读配置 → 启动实例
+    M3->>M3: shm_open + mmap<br/>重新读配置 → 启动实例
 ```
 
-**`remap_version` 的双重角色**：
+**`reserved`**：`stop` 已释放所有进程的 shm 映射，`start` 总是 fresh `shm_open` + `mmap` 自动获取最新大小。`reserved` 字段不再需要被检测或比对，始终为 0。
 
-- **主路径**：Pause-Resume 协议保证扩容时无人访问 shm，`remap_version` 作为恢复阶段各进程判断"是否需要重新映射"的依据
-- **降级路径**：如果某个 MCP 进程因网络抖动错过了 resume 指令，它在下次读写循环前检测到 `remap_version` 变化后自行 munmap + mmap——不依赖信号到达
-
-**扩容开销**：扩容过程中数据断流时长 ≈ pause 收集时间（< 1ms）+ ftruncate + mmap（~100μs）+ resume 恢复（< 1ms），总计 < 5ms。扩容是低频事件（数天至数月一次），可接受。
+**扩容开销**：扩容过程中数据断流时长 ≈ stop 关闭时间（< 1ms）+ ftruncate + mmap（~100μs）+ start 重启（< 1ms），总计 < 5ms。扩容是低频事件（数天至数月一次），可接受。
 
 **关键性质**：
 
@@ -185,7 +180,7 @@ sequenceDiagram
 #### 块回收
 
 回收发生在 writer 停止或需要减少采集点时，**由 `adjust_shm` 统一处理**。必须确保 write 和 read
-都已停止（通过 Pause-Resume 协议，见 §1.2）后才修改 `state`，避免与新分配的 writer 冲突。
+都已停止（通过 Stop-Start 协议，见 §1.2）后才修改 `state`，避免与新分配的 writer 冲突。
 
 **回收算法**：
 
@@ -220,20 +215,20 @@ sequenceDiagram
 
 Agent 新增 writer5(15个)，生成新配置文件：
 
-1. Agent → 所有 MCP: pause
+1. Agent → 所有 MCP: stop
 
 2. Agent → c4_shm_manager: adjust_shm()
    required_points = 10 + 15 = 25
    current_max_points = 20
    required_points(25) > current_max_points(20) → 扩容
    new_max = 25 × 2 = 50
-   ftruncate → max_points=50, remap_version++
-   分配：已有 [1..10] 不变，新增 [11..25]
+    ftruncate → max_points=50
+    分配：已有 [1..10] 不变，新增 [11..25]
    空闲：[26..50] (25个, state=0)
    point_count=25
    回填配置，返回 "success"
 
-3. Agent → 所有 MCP: resume
+3. Agent → 所有 MCP: start
 
 最终：
   writer1:  [ 1..2]   (2个, 不变)
@@ -262,7 +257,7 @@ Agent 新增 writer5(15个)，生成新配置文件：
 
 Agent 停止 writer3(3个点)，从配置文件删除 writer3 的 points：
 
-1. Agent → 所有 MCP: pause
+1. Agent → 所有 MCP: stop
 
 2. Agent → c4_shm_manager: adjust_shm()
    required_points = 2 + 2 + 3 = 7  (writer1+2+4)
@@ -286,7 +281,7 @@ Agent 停止 writer3(3个点)，从配置文件删除 writer3 的 points：
      point_count=7
    回填配置，返回 "success"
 
-3. Agent → 所有 MCP: resume
+3. Agent → 所有 MCP: start
 ```
 
 关键性质：
@@ -626,7 +621,7 @@ sequenceDiagram
 2. 若配置文件不存在或为 null（roots/list 返回空、路径无效、或文件内容为空 JSON）：
    a. `shm_open("/c4_{instance_id}", O_CREAT|O_EXCL|O_RDWR)` → `ftruncate` → `mmap`
    b. Header 字段：`magic = 0xC4DA7A00`、`version = 1`、`max_points = 100000`、`point_count = 0`；
-      其余字段（`remap_version`、`global_write_seq`、`reserved`）保持 `ftruncate` 零填充后的默认值 `0`（参见 [c4_architecture.md §2.2.1](c4_architecture.md) 初始化规则）
+      `global_write_seq` 及两个 `reserved` 字段保持 `ftruncate` 零填充后的默认值 `0`（参见 [c4_architecture.md §2.2.1](c4_architecture.md) 初始化规则）
    c. 初始化所有 Data Block 的 `magic = 0xC4DA7A00`（state 自然为 0）
    d. 写入 Header `magic = 0xC4DA7A00`（最终提交）
    e. 跳至步骤 6（不涉及 shm_id 分配和配置回填）
@@ -695,7 +690,7 @@ sequenceDiagram
 根据配置文件计算所需点数，判断是否需要扩容或回收，并为所有点分配 shm_id。
 已有点的 shm_id 保持不变，新点在空闲块或扩容后的新空间中分配，被删除的点的 block 回收为空闲。
 
-**前置条件**：Agent 必须先通过 Pause-Resume 协议暂停所有 MCP 进程的数据路径
+**前置条件**：Agent 必须先通过 Stop-Start 协议暂停所有 MCP 进程的数据路径
 （见 §1.2），确认所有进程已暂停后再调用此工具。
 
 **触发条件**：Agent 更新配置文件后（新增/删除 Writer、新增/删除采集点），需要调整共享内存
@@ -744,7 +739,6 @@ sequenceDiagram
       - `new_max_points = required_points × 2`
       - `ftruncate(shm_fd, (new_max_points + 1) × 32)`
       - `header.max_points = new_max_points`
-      - `header.remap_version++`
       - `munmap` 旧映射 → `mmap` 新大小
       - 新增 block 全部写入 `magic = 0xC4DA7A00`
       - 已有点保持原 shm_id，配置中 `shm_id=0` 的新点分配空闲 shm_id
@@ -841,8 +835,8 @@ sequenceDiagram
     A->>CFG: 写入新 points 列表
 
     Note over A,M2: Phase 1 — Pause
-    A->>M1: tools/call pause({shm_ids: []})
-    A->>M2: tools/call pause({shm_ids: []})
+    A->>M1: tools/call stop()
+    A->>M2: tools/call stop()
     M1-->>A: "success"
     M2-->>A: "success"
     Note over A: 所有进程已暂停
@@ -853,15 +847,15 @@ sequenceDiagram
     A-->>S: {roots: [{uri: "file:///etc/c4/config.json"}]}
     S->>CFG: 读取配置，计算 required_points=25
     Note over S: required_points(25) > max_points(20)<br/>new_max = 25×2 = 50
-    S->>S: ftruncate + remap_version++ + mmap<br/>已有点保持原 shm_id，新点分配<br/>回填配置
+    S->>S: ftruncate + mmap<br/>已有点保持原 shm_id，新点分配<br/>回填配置
     S->>CFG: 写回配置
     S-->>A: "success"
 
-    Note over A,M2: Phase 3 — Resume
-    A->>M1: tools/call resume({shm_ids: [], new_max_points: 50})
-    A->>M2: tools/call resume({shm_ids: [], new_max_points: 50})
-    M1->>M1: 检测 remap_version<br/>munmap+mmap → 重启循环<br/>新 shm_id 加入写入列表
-    M2->>M2: 检测 remap_version<br/>munmap+mmap → 重启循环<br/>新 shm_id 加入读取列表
+    Note over A,M2: Phase 3 — Start
+    A->>M1: tools/call start()
+    A->>M2: tools/call start()
+    M1->>M1: shm_open + mmap → 重读配置<br/>新 shm_id 加入写入列表
+    M2->>M2: shm_open + mmap → 重读配置<br/>新 shm_id 加入读取列表
     M1-->>A: "success"
     M2-->>A: "success"
 ```
@@ -880,8 +874,8 @@ sequenceDiagram
     A->>CFG: 写入新 points 列表
 
     Note over A,M2: Phase 1 — Pause
-    A->>M1: tools/call pause({shm_ids: []})
-    A->>M2: tools/call pause({shm_ids: []})
+    A->>M1: tools/call stop()
+    A->>M2: tools/call stop()
     M1-->>A: "success"
     M2-->>A: "success"
 
@@ -895,9 +889,9 @@ sequenceDiagram
     S->>CFG: 回填配置 → 写回
     S-->>A: "success"
 
-    Note over A,M2: Phase 3 — Resume
-    A->>M1: tools/call resume({shm_ids: []})
-    A->>M2: tools/call resume({shm_ids: []})
+    Note over A,M2: Phase 3 — Start
+    A->>M1: tools/call start()
+    A->>M2: tools/call start()
     M1-->>A: "success"
     M2-->>A: "success"
 ```
@@ -905,7 +899,7 @@ sequenceDiagram
 ### 4.4 场景四：Writer 停止后回收
 
 Agent 检测到 writer 心跳超时或收到停止指令后，从配置文件删除对应 writer 的 points，
-然后通过 Pause-Resume 协议暂停所有 MCP 进程，调用 `adjust_shm` 完成块回收。
+然后通过 Stop-Start 协议暂停所有 MCP 进程，调用 `adjust_shm` 完成块回收。
 
 ```mermaid
 sequenceDiagram
@@ -919,8 +913,8 @@ sequenceDiagram
     A->>CFG: 删除 writer3 的 points 列表
 
     Note over A,M2: Phase 1 — Pause
-    A->>M1: tools/call pause({shm_ids: []})
-    A->>M2: tools/call pause({shm_ids: []})
+    A->>M1: tools/call stop()
+    A->>M2: tools/call stop()
     M1-->>A: "success"
     M2-->>A: "success"
 
@@ -935,9 +929,9 @@ sequenceDiagram
     S->>CFG: 写回配置
     S-->>A: "success"
 
-    Note over A,M2: Phase 3 — Resume
-    A->>M1: tools/call resume({shm_ids: []})
-    A->>M2: tools/call resume({shm_ids: []})
+    Note over A,M2: Phase 3 — Start
+    A->>M1: tools/call start()
+    A->>M2: tools/call start()
     M1-->>A: "success"
     M2-->>A: "success"
 ```
@@ -946,7 +940,7 @@ sequenceDiagram
 
 ### 4.5 场景五：同时回收与再分配（混合操作）
 
-Agent 在一次配置变更中既删除旧 Writer 又新增 Writer，通过 Pause-Resume 协议暂停所有 MCP 进程后，
+Agent 在一次配置变更中既删除旧 Writer 又新增 Writer，通过 Stop-Start 协议暂停所有 MCP 进程后，
 调用 `adjust_shm` 一次性完成回收 → 分配的原子化序列。
 
 ```mermaid
@@ -961,8 +955,8 @@ sequenceDiagram
     A->>CFG: 删除 writer3 的 points<br/>新增 writer5 的 points
 
     Note over A,M2: Phase 1 — Pause
-    A->>M1: tools/call pause({shm_ids: []})
-    A->>M2: tools/call pause({shm_ids: []})
+    A->>M1: tools/call stop()
+    A->>M2: tools/call stop()
     M1-->>A: "success"
     M2-->>A: "success"
 
@@ -977,9 +971,9 @@ sequenceDiagram
     S->>CFG: 回填配置（writer5 shm_id=5,6,7）
     S-->>A: "success"
 
-    Note over A,M2: Phase 3 — Resume
-    A->>M1: tools/call resume({shm_ids: []})
-    A->>M2: tools/call resume({shm_ids: []})
+    Note over A,M2: Phase 3 — Start
+    A->>M1: tools/call start()
+    A->>M2: tools/call start()
     M1->>M1: writer3 停止写入<br/>writer5 开始写入 [5..7]
     M2->>M2: writer3 停止读取<br/>writer5 开始读取 [5..7]
     M1-->>A: "success"

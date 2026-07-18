@@ -342,11 +342,11 @@ class TestPureReclaim:
                 "block[5].state must be 0 (orphan reclaimed)"
             )
 
-            # 验证 3：Header — point_count=2, max_points=10, remap_version=0
+            # 验证 3：Header — point_count=2, max_points=10, reserved=0
             h = read_shm_header(path)
             assert h["point_count"] == 2, f"point_count: {h['point_count']}"
             assert h["max_points"] == 10, f"max_points: {h['max_points']}"
-            assert h["remap_version"] == 0, f"remap_version: {h['remap_version']}"
+            assert h["reserved"] == 0, f"reserved: {h['reserved']}"
 
             # 验证 4：配置回填 — p1→1, p2→2；p3,p4,p5 已移除
             shm_map = _get_shm_id_map(config_path, "c4_modbus_client")
@@ -419,10 +419,10 @@ class TestPureReclaim:
                     f"block[{sid}].state must be 0 (orphan iec104 reclaimed)"
                 )
 
-            # 验证 3：Header — point_count=4, remap_version=0
+            # 验证 3：Header — point_count=4, reserved=0
             h = read_shm_header(path)
             assert h["point_count"] == 4, f"point_count: {h['point_count']}"
-            assert h["remap_version"] == 0, f"remap_version: {h['remap_version']}"
+            assert h["reserved"] == 0, f"reserved: {h['reserved']}"
 
             # 验证 4：配置回填 — modbus shm_ids 1..4 不变
             modbus_ids_after = _get_shm_ids_from_config(
@@ -496,11 +496,11 @@ class TestPureReclaim:
             assert read_shm_block(path, 1)["state"] == 1, "block[1].state must be 1"
             assert read_shm_block(path, 2)["state"] == 1, "block[2].state must be 1"
 
-            # 验证 4：Header — point_count=4, max_points=10, remap_version=0
+            # 验证 4：Header — point_count=4, max_points=10, reserved=0
             h = read_shm_header(path)
             assert h["point_count"] == 4, f"point_count: {h['point_count']}"
             assert h["max_points"] == 10, f"max_points: {h['max_points']}"
-            assert h["remap_version"] == 0, f"remap_version: {h['remap_version']}"
+            assert h["reserved"] == 0, f"reserved: {h['reserved']}"
 
             # 验证 5：配置回填 — p6→3, p7→4（已在验证 2 中覆盖）
             assert shm_map.get("p1") == 1
@@ -553,10 +553,10 @@ class TestNoDelete:
                     f"block[{sid}].state must be 1"
                 )
 
-            # 验证 2：Header — point_count=3（不变），remap_version=0
+            # 验证 2：Header — point_count=3（不变），reserved=0
             h = read_shm_header(path)
             assert h["point_count"] == 3, f"point_count: {h['point_count']}"
-            assert h["remap_version"] == 0, f"remap_version: {h['remap_version']}"
+            assert h["reserved"] == 0, f"reserved: {h['reserved']}"
 
         finally:
             os.unlink(config_path)
@@ -659,7 +659,7 @@ class TestStateConsistency:
             assert h["version"] == 1, f"version: {h['version']} (expected 1)"
             assert h["point_count"] == 3, f"point_count: {h['point_count']} (expected 3)"
             assert h["max_points"] == 12, f"max_points: {h['max_points']} (expected 12)"
-            assert h["remap_version"] == 0, f"remap_version: {h['remap_version']} (expected 0)"
+            assert h["reserved"] == 0, f"reserved: {h['reserved']} (expected 0)"
 
         finally:
             os.unlink(config_path)
@@ -896,10 +896,10 @@ class TestStateConsistency:
                 "block[4].state must be 0 (never activated, unaffected)"
             )
 
-            # 验证 4：Header — point_count=4, remap_version=0
+            # 验证 4：Header — point_count=4, reserved=0
             h = read_shm_header(path)
             assert h["point_count"] == 4, f"point_count: {h['point_count']} (expected 4)"
-            assert h["remap_version"] == 0, f"remap_version: {h['remap_version']}"
+            assert h["reserved"] == 0, f"reserved: {h['reserved']}"
 
         finally:
             os.unlink(config_path)
@@ -949,10 +949,10 @@ class TestStateConsistency:
                     f"block[{sid}].state must be 1 (retained)"
                 )
 
-            # 验证 3：Header — point_count=5, remap_version=0
+            # 验证 3：Header — point_count=5, reserved=0
             h = read_shm_header(path)
             assert h["point_count"] == 5, f"point_count: {h['point_count']} (expected 5)"
-            assert h["remap_version"] == 0, f"remap_version: {h['remap_version']}"
+            assert h["reserved"] == 0, f"reserved: {h['reserved']}"
 
         finally:
             os.unlink(config_path)
@@ -1043,12 +1043,12 @@ class TestStateConsistency:
                 "block[5].state must be 0 (preserved from 1st reclaim)"
             )
 
-            # 验证 2c：Header — point_count=1, remap_version=0
+            # 验证 2c：Header — point_count=1, reserved=0
             h2 = read_shm_header(path)
             assert h2["point_count"] == 1, (
                 f"point_count after 2nd: {h2['point_count']} (expected 1)"
             )
-            assert h2["remap_version"] == 0, f"remap_version: {h2['remap_version']}"
+            assert h2["reserved"] == 0, f"reserved: {h2['reserved']}"
 
         finally:
             os.unlink(config_path)

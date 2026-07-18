@@ -77,7 +77,7 @@ def _assert_default_shm(instance_id: str):
     h = read_shm_header(path)
     assert h["magic"] == MAGIC, f"Header magic: {hex(h['magic'])}"
     assert h["version"] == VERSION, f"Header version: {h['version']}"
-    assert h["remap_version"] == 0, f"Header remap_version: {h['remap_version']}"
+    assert h["reserved"] == 0, f"Header reserved: {h['reserved']}"
     assert h["point_count"] == 0, f"Header point_count: {h['point_count']}"
     assert h["max_points"] == DEFAULT_MAX_POINTS, (
         f"Header max_points: {h['max_points']}"
@@ -272,7 +272,7 @@ class TestNoConfigShmCreation:
         inner = json.loads(resp["result"]["content"][0]["text"])
         assert inner["magic"] == "valid"
         assert inner["version"] == VERSION
-        assert inner["remap_version"] == 0
+        assert inner["reserved"] == 0
         assert inner["point_count"] == 0
         assert inner["max_points"] == DEFAULT_MAX_POINTS
         assert inner["free_blocks"] == DEFAULT_MAX_POINTS  # max - point_count

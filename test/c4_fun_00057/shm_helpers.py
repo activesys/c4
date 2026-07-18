@@ -49,7 +49,7 @@ def read_shm_header(full_path: str) -> dict:
         return {
             "magic": struct.unpack(">I", data[0:4])[0],
             "version": struct.unpack(">H", data[4:6])[0],
-            "remap_version": struct.unpack(">H", data[6:8])[0],
+            "reserved": struct.unpack(">H", data[6:8])[0],
             "point_count": struct.unpack(">I", data[8:12])[0],
             "max_points": struct.unpack(">I", data[12:16])[0],
             "global_write_seq": struct.unpack(">Q", data[16:24])[0],

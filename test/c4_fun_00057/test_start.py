@@ -232,12 +232,12 @@ class TestAsfp2ServerStart:
                 f"Port {port} should not be listening for empty instances"
             )
 
-    # ── TC4: 重复调用 start → ALREADY_STARTED ─────
+    # ── TC4: 重复调用 start →     ALREADY_RUNNING ─────
 
     def test_tc4_double_start(
         self, prepare_environment, start_asfp2_server, isolated_shm
     ):
-        """TC4: SELF-CONTAINED — 首次 start 成功，再次 start 返回 ALREADY_STARTED。"""
+        """TC4: SELF-CONTAINED — 首次 start 成功，再次 start 返回     ALREADY_RUNNING。"""
         iid = "test_tc4"
         isolated_shm(iid)
 
@@ -255,7 +255,7 @@ class TestAsfp2ServerStart:
         assert resp1["result"].get("isError", False) is False
         assert resp1["result"]["content"][0]["text"] == "success"
 
-        # 再次 start — 应返回 ALREADY_STARTED
+        # 再次 start — 应返回     ALREADY_RUNNING
         resp2 = start_asfp2_server.call_tool(
             "start",
             {},
@@ -263,18 +263,14 @@ class TestAsfp2ServerStart:
                 [{"uri": f"file://{config_path}"}]
             ),
         )
-        _assert_mcp_error(resp2, "ALREADY_STARTED")
+        _assert_mcp_error(resp2, "ALREADY_RUNNING")
 
-    # ── TC5: start 未调用前调用 pause/resume/status → SERVICE_NOT_READY
+    # ── TC5: start 未调用前调用 stop/status → SERVICE_NOT_READY
 
     def test_tc5_service_not_ready(self, start_asfp2_server):
-        """TC5: start 前调用 pause/resume/status 均返回 SERVICE_NOT_READY。"""
-        # pause
-        resp = start_asfp2_server.call_tool("pause", {})
-        _assert_mcp_error(resp, "SERVICE_NOT_READY")
-
-        # resume
-        resp = start_asfp2_server.call_tool("resume", {})
+        """TC5: start 前调用 stop/status 均返回 SERVICE_NOT_READY。"""
+        # stop
+        resp = start_asfp2_server.call_tool("stop", {})
         _assert_mcp_error(resp, "SERVICE_NOT_READY")
 
         # status

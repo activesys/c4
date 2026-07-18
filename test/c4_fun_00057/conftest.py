@@ -363,8 +363,7 @@ def start_asfp2_server():
             tool_names = []
 
     assert "start" in tool_names, f"start not in tools: {tool_names}"
-    assert "pause" in tool_names, f"pause not in tools: {tool_names}"
-    assert "resume" in tool_names, f"resume not in tools: {tool_names}"
+    assert "stop" in tool_names, f"stop not in tools: {tool_names}"
     assert "status" in tool_names, f"status not in tools: {tool_names}"
 
     yield client

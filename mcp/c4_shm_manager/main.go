@@ -260,7 +260,7 @@ func queryStatusHandler(ctx context.Context, req *mcp.CallToolRequest) (*mcp.Cal
 	status := shm.StatusInfo{
 		Magic:          "valid",
 		Version:        int(h.Version),
-		RemapVersion:   int(h.RemapVersion),
+		Reserved2:      h.Reserved2,
 		PointCount:     int(h.PointCount),
 		MaxPoints:      int(h.MaxPoints),
 		FreeBlocks:     int(h.MaxPoints) - int(h.PointCount),

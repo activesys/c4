@@ -92,7 +92,7 @@ def _assert_header(path, max_points, point_count=0):
     assert h["version"] == 1, f"version: {h['version']}"
     assert h["point_count"] == point_count, f"point_count: {h['point_count']}"
     assert h["max_points"] == max_points, f"max_points: {h['max_points']}"
-    assert h["remap_version"] == 0
+    assert h["reserved"] == 0
     assert h["global_write_seq"] == 0
     assert h["reserved"] == 0
     expected_size = (max_points + 1) * 32

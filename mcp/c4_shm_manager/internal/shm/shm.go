@@ -20,7 +20,7 @@ const (
 const (
 	HdrOffMagic          = 0
 	HdrOffVersion        = 4
-	HdrOffRemapVersion   = 6
+	HdrOffReserved2   = 6
 	HdrOffPointCount     = 8
 	HdrOffMaxPoints      = 12
 	HdrOffGlobalWriteSeq = 16
@@ -40,7 +40,7 @@ const (
 type HeaderInfo struct {
 	Magic          uint32
 	Version        uint16
-	RemapVersion   uint16
+	Reserved2      uint16
 	PointCount     uint32
 	MaxPoints      uint32
 	GlobalWriteSeq uint64
@@ -60,7 +60,7 @@ type BlockInfo struct {
 type StatusInfo struct {
 	Magic          string `json:"magic"`
 	Version        int    `json:"version"`
-	RemapVersion   int    `json:"remap_version"`
+	Reserved2     uint16 `json:"reserved"`
 	PointCount     int    `json:"point_count"`
 	MaxPoints      int    `json:"max_points"`
 	FreeBlocks     int    `json:"free_blocks"`
@@ -124,7 +124,7 @@ func (s *SharedMemory) HeaderInfo() HeaderInfo {
 	return HeaderInfo{
 		Magic:          binary.BigEndian.Uint32(s.data[HdrOffMagic:]),
 		Version:        binary.BigEndian.Uint16(s.data[HdrOffVersion:]),
-		RemapVersion:   binary.BigEndian.Uint16(s.data[HdrOffRemapVersion:]),
+		Reserved2:  binary.BigEndian.Uint16(s.data[HdrOffReserved2:]),
 		PointCount:     binary.BigEndian.Uint32(s.data[HdrOffPointCount:]),
 		MaxPoints:      binary.BigEndian.Uint32(s.data[HdrOffMaxPoints:]),
 		GlobalWriteSeq: binary.BigEndian.Uint64(s.data[HdrOffGlobalWriteSeq:]),
@@ -210,8 +210,8 @@ func (s *SharedMemory) Expand(newMaxPoints int) error {
 	s.maxPoints = newMaxPoints
 
 	/* increment remap_version AFTER new mmap */
-	ver := binary.BigEndian.Uint16(s.data[HdrOffRemapVersion:])
-	binary.BigEndian.PutUint16(s.data[HdrOffRemapVersion:], ver+1)
+	ver := binary.BigEndian.Uint16(s.data[HdrOffReserved2:])
+	binary.BigEndian.PutUint16(s.data[HdrOffReserved2:], ver+1)
 
 	/* init new blocks (oldMax+1 .. newMaxPoints) */
 	for i := oldMax + 1; i <= newMaxPoints; i++ {
@@ -247,7 +247,7 @@ func ReadHeaderFromPath(path string) (HeaderInfo, error) {
 	return HeaderInfo{
 		Magic:          binary.BigEndian.Uint32(data[HdrOffMagic:]),
 		Version:        binary.BigEndian.Uint16(data[HdrOffVersion:]),
-		RemapVersion:   binary.BigEndian.Uint16(data[HdrOffRemapVersion:]),
+		Reserved2:  binary.BigEndian.Uint16(data[HdrOffReserved2:]),
 		PointCount:     binary.BigEndian.Uint32(data[HdrOffPointCount:]),
 		MaxPoints:      binary.BigEndian.Uint32(data[HdrOffMaxPoints:]),
 		GlobalWriteSeq: binary.BigEndian.Uint64(data[HdrOffGlobalWriteSeq:]),

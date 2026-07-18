@@ -165,7 +165,7 @@ def _assert_mcp_error(resp, expected_prefix):
     )
 
 
-def _assert_header(path, max_points, point_count, remap_version=0):
+def _assert_header(path, max_points, point_count, reserved=0):
     """断言共享内存 Header 各字段。"""
     h = read_shm_header(path)
     assert h["magic"] == MAGIC, f"magic: {hex(h['magic'])}"
@@ -176,8 +176,8 @@ def _assert_header(path, max_points, point_count, remap_version=0):
     assert h["max_points"] == max_points, (
         f"max_points: {h['max_points']}, expected {max_points}"
     )
-    assert h["remap_version"] == remap_version, (
-        f"remap_version: {h['remap_version']}, expected {remap_version}"
+    assert h["reserved"] == reserved, (
+        f"reserved: {h['reserved']}, expected {reserved}"
     )
     assert h["global_write_seq"] == 0, (
         f"global_write_seq: {h['global_write_seq']}"
@@ -235,7 +235,7 @@ class TestNoExpand:
             _assert_mcp_success(resp)
 
             path = shm_path(iid)
-            _assert_header(path, max_points=4, point_count=2, remap_version=0)
+            _assert_header(path, max_points=4, point_count=2, reserved=0)
             size_before = get_shm_size(path)
             assert size_before == (4 + 1) * BLOCK_SIZE                 # 160
 
@@ -256,8 +256,8 @@ class TestNoExpand:
             )
             _assert_mcp_success(resp)
 
-            # 验证 1: max_points/remap_version 不变
-            _assert_header(path, max_points=4, point_count=3, remap_version=0)
+            # 验证 1: max_points/reserved 不变
+            _assert_header(path, max_points=4, point_count=3, reserved=0)
 
             # 验证 2+3: 已有 p1→1, p2→2；新 p3→3
             shm_ids = _get_shm_ids_from_config(config_path, "c4_modbus_client")
@@ -270,7 +270,7 @@ class TestNoExpand:
             h = read_shm_header(path)
             assert h["max_points"] == 4
             assert h["point_count"] == 3
-            assert h["remap_version"] == 0
+            assert h["reserved"] == 0
 
             # 验证 6: Block[3] 初始化正确；已有 Block 不变
             _assert_block(path, 3)
@@ -302,7 +302,7 @@ class TestNoExpand:
             _assert_mcp_success(resp)
 
             path = shm_path(iid)
-            _assert_header(path, max_points=6, point_count=3, remap_version=0)
+            _assert_header(path, max_points=6, point_count=3, reserved=0)
             size_before = get_shm_size(path)
             assert size_before == (6 + 1) * BLOCK_SIZE                 # 224
 
@@ -313,8 +313,8 @@ class TestNoExpand:
             )
             _assert_mcp_success(resp)
 
-            # 验证 1: max_points/remap_version 不变
-            _assert_header(path, max_points=6, point_count=3, remap_version=0)
+            # 验证 1: max_points/reserved 不变
+            _assert_header(path, max_points=6, point_count=3, reserved=0)
 
             # 验证 2: 所有 shm_id 与 create_shm 后一致
             shm_ids = _get_shm_ids_from_config(config_path, "c4_modbus_client")
@@ -324,7 +324,7 @@ class TestNoExpand:
             h = read_shm_header(path)
             assert h["max_points"] == 6
             assert h["point_count"] == 3
-            assert h["remap_version"] == 0
+            assert h["reserved"] == 0
 
             # 验证 4: shm 文件大小不变
             assert get_shm_size(path) == size_before
@@ -366,7 +366,7 @@ class TestNoExpand:
             _assert_mcp_success(resp)
 
             # 验证 1: max_points=4 不变，未触发扩容
-            _assert_header(path, max_points=4, point_count=4, remap_version=0)
+            _assert_header(path, max_points=4, point_count=4, reserved=0)
 
             # 验证 2: 所有 4 点均有唯一 shm_id
             shm_ids = _get_shm_ids_from_config(config_path, "c4_modbus_client")
@@ -377,7 +377,7 @@ class TestNoExpand:
             h = read_shm_header(path)
             assert h["max_points"] == 4
             assert h["point_count"] == 4
-            assert h["remap_version"] == 0
+            assert h["reserved"] == 0
 
             # 验证 4: shm 文件大小不变
             assert get_shm_size(path) == size_before
@@ -392,7 +392,7 @@ class TestNoExpand:
 
 
 class TestExpand:
-    """TC4–TC6：required_points > max_points → ftruncate + remap_version++。"""
+    """TC4–TC6：required_points > max_points → ftruncate + reserved++。"""
 
     def test_tc4_expand_single_writer(self, mcp, isolated_shm):
         """TC4: 扩容 — 单 Writer 新点超容量 (5＞4 → max=10)。"""
@@ -427,8 +427,8 @@ class TestExpand:
             _assert_mcp_success(resp)
 
             # 验证 1: max_points = 5×2 = 10
-            # 验证 2: remap_version 递增 0→1
-            _assert_header(path, max_points=10, point_count=5, remap_version=1)
+            # 验证 2: reserved 递增 0→1
+            _assert_header(path, max_points=10, point_count=5, reserved=0)
 
             # 验证 3+4: 已有 p1→1, p2→2；新 p3→3, p4→4, p5→5
             shm_ids = _get_shm_ids_from_config(config_path, "c4_modbus_client")
@@ -448,7 +448,7 @@ class TestExpand:
             h = read_shm_header(path)
             assert h["point_count"] == 5
             assert h["max_points"] == 10
-            assert h["remap_version"] == 1
+            assert h["reserved"] == 0
 
         finally:
             os.unlink(config_path)
@@ -484,7 +484,7 @@ class TestExpand:
             _assert_mcp_success(resp)
 
             # 验证 1: max_points = 6×2 = 12
-            _assert_header(path, max_points=12, point_count=6, remap_version=1)
+            _assert_header(path, max_points=12, point_count=6, reserved=0)
 
             # 验证 2: modbus p1→1,p2→2；iec104 p3→3..p6→6
             modbus_ids = _get_shm_ids_from_config(config_path, "c4_modbus_client")
@@ -493,9 +493,9 @@ class TestExpand:
             iec104_ids = _get_shm_ids_from_config(config_path, "c4_iec104_client")
             assert iec104_ids == [3, 4, 5, 6], f"iec104 shm_ids: {iec104_ids}"
 
-            # 验证 3+4: remap_version > 0, point_count=6
+            # 验证 3+4: reserved == 0, point_count=6
             h = read_shm_header(path)
-            assert h["remap_version"] > 0
+            assert h["reserved"] == 0
             assert h["point_count"] == 6
             assert h["max_points"] == 12
 
@@ -535,7 +535,7 @@ class TestExpand:
             _assert_mcp_success(resp)
 
             # 验证 1: max_points = 10×2 = 20
-            _assert_header(path, max_points=20, point_count=10, remap_version=1)
+            _assert_header(path, max_points=20, point_count=10, reserved=0)
 
             # 验证 2: 10 点均有连续 shm_id 1..10
             shm_ids = _get_shm_ids_from_config(config_path, "c4_modbus_client")
@@ -597,7 +597,7 @@ class TestConfigErrors:
             # 验证：shm 状态不变
             h_after = read_shm_header(path)
             assert h_after["max_points"] == h_before["max_points"]
-            assert h_after["remap_version"] == h_before["remap_version"]
+            assert h_after["reserved"] == h_before["reserved"]
             assert h_after["point_count"] == h_before["point_count"]
 
         finally:
@@ -1098,7 +1098,7 @@ class TestConfigWriteback:
 
 
 class TestStateConsistency:
-    """TC18–TC21, TC23–TC24：Header、Block、remap_version、链式扩容、默认 shm 过渡。"""
+    """TC18–TC21, TC23–TC24：Header、Block、reserved、链式扩容、默认 shm 过渡。"""
 
     def test_tc18_header_consistency_no_expand(self, mcp, isolated_shm):
         """TC18: 不扩容后 Header 状态一致性。"""
@@ -1128,7 +1128,7 @@ class TestStateConsistency:
             _assert_mcp_success(resp)
 
             path = shm_path(iid)
-            _assert_header(path, max_points=4, point_count=3, remap_version=0)
+            _assert_header(path, max_points=4, point_count=3, reserved=0)
 
         finally:
             os.unlink(config_path)
@@ -1165,17 +1165,17 @@ class TestStateConsistency:
             _assert_mcp_success(resp)
 
             path = shm_path(iid)
-            _assert_header(path, max_points=10, point_count=5, remap_version=1)
+            _assert_header(path, max_points=10, point_count=5, reserved=0)
 
         finally:
             os.unlink(config_path)
 
-    # ── TC20a/TC20b: remap_version 行为 ─────
-    # TC20a: 不扩容 → remap_version 不变。
-    #   已在以下测试中验证：TC1（remap_version=0 不变）、TC2（幂等不变）、
+    # ── TC20a/TC20b: reserved 行为 ─────
+    # TC20a: 不扩容 → reserved 不变。
+    #   已在以下测试中验证：TC1（reserved=0 不变）、TC2（幂等不变）、
     #   TC3（边界不变）、TC18（不扩容后 Header 一致性）。
     #
-    # TC20b: 扩容 → remap_version 递增 1。
+    # TC20b: 扩容 → reserved 递增 1。
     #   已在以下测试中验证：TC4（0→1）、TC5（0→>0）、TC6（0→1）、
     #   TC19（0→1）、TC23（两次扩容 0→1→2）。
 
@@ -1256,7 +1256,7 @@ class TestStateConsistency:
             _assert_mcp_success(resp)
 
             path = shm_path(iid)
-            _assert_header(path, max_points=4, point_count=2, remap_version=0)
+            _assert_header(path, max_points=4, point_count=2, reserved=0)
 
             # ── 操作 1: 追加 3 点 (total=5>4) → adjust_shm ──
             add_points_to_config(
@@ -1275,7 +1275,7 @@ class TestStateConsistency:
             _assert_mcp_success(resp)
 
             # 验证 1a
-            _assert_header(path, max_points=10, point_count=5, remap_version=1)
+            _assert_header(path, max_points=10, point_count=5, reserved=0)
             shm_ids_1 = _get_shm_ids_from_config(config_path, "c4_modbus_client")
             assert shm_ids_1 == [1, 2, 3, 4, 5], f"round1 shm_ids: {shm_ids_1}"
 
@@ -1294,8 +1294,8 @@ class TestStateConsistency:
             )
             _assert_mcp_success(resp)
 
-            # 验证 2a+2b: max=22, remap_version=2, point_count=11
-            _assert_header(path, max_points=22, point_count=11, remap_version=2)
+            # 验证 2a+2b: max=22, reserved=0, point_count=11
+            _assert_header(path, max_points=22, point_count=11, reserved=0)
 
             # 验证 2c: 第一次的 5 个点保持 shm_id=1..5
             shm_ids_2 = _get_shm_ids_from_config(config_path, "c4_modbus_client")
@@ -1336,7 +1336,7 @@ class TestStateConsistency:
         h = read_shm_header(path)
         assert h["max_points"] == 100000, f"max_points: {h['max_points']}"
         assert h["point_count"] == 0, f"point_count: {h['point_count']}"
-        assert h["remap_version"] == 0
+        assert h["reserved"] == 0
         size_before = get_shm_size(path)
         assert size_before == (100000 + 1) * BLOCK_SIZE       # 3,200,032
 
@@ -1354,8 +1354,8 @@ class TestStateConsistency:
 
             # 验证 2: max_points=100000 不变
             # 验证 4: point_count=5（从 0 更新）
-            # 验证 2: remap_version=0 不变
-            _assert_header(path, max_points=100000, point_count=5, remap_version=0)
+            # 验证 2: reserved=0 不变
+            _assert_header(path, max_points=100000, point_count=5, reserved=0)
 
             # 验证 3: 5 点分配到 shm_id=1..5
             shm_ids = _get_shm_ids_from_config(config_path, "c4_modbus_client")
