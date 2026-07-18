@@ -10,7 +10,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"c4/mcp/c4_shm_manager/internal/shm"
+	"c4/mcp/internal/shm"
 )
 
 var state = &serverState{}
@@ -92,32 +92,36 @@ func isEmptyJSON(data []byte) bool {
 	return s == "{}" || s == "null"
 }
 
-func createFromConfig(configPath string, instanceID string) (*shm.SharedMemory, error) {
+func loadConfigSection(configPath string) (map[string]any, []string, []string, error) {
 	data, err := os.ReadFile(configPath)
 	if err != nil {
-		return nil, fmt.Errorf("CONFIG_MISSING_SECTION: cannot read config file: %v", err)
+		return nil, nil, nil, fmt.Errorf("CONFIG_MISSING_SECTION: cannot read config file: %v", err)
 	}
 
 	var config map[string]any
 	if err := json.Unmarshal(data, &config); err != nil {
-		return nil, fmt.Errorf("CONFIG_PARSE_ERROR: failed to parse config JSON: %v", err)
+		return nil, nil, nil, fmt.Errorf("CONFIG_PARSE_ERROR: failed to parse config JSON: %v", err)
 	}
 
 	shmCfg, ok := config["c4_shm_manager"].(map[string]any)
 	if !ok {
-		return nil, fmt.Errorf("CONFIG_MISSING_SECTION: 'c4_shm_manager' key not found in config")
+		return nil, nil, nil, fmt.Errorf("CONFIG_MISSING_SECTION: 'c4_shm_manager' key not found in config")
 	}
 
 	writers, writersOk := toStringSlice(shmCfg["writer"])
 	readers, readersOk := toStringSlice(shmCfg["reader"])
-	if !writersOk || len(writers) == 0 {
-		return nil, fmt.Errorf("CONFIG_MISSING_SECTION: 'c4_shm_manager.writer' not found or empty in config")
-	}
-	if !readersOk || len(readers) == 0 {
-		return nil, fmt.Errorf("CONFIG_MISSING_SECTION: 'c4_shm_manager.reader' not found or empty in config")
+	if !writersOk || !readersOk {
+		return nil, nil, nil, fmt.Errorf("CONFIG_MISSING_SECTION: 'c4_shm_manager.writer' or 'c4_shm_manager.reader' not found in config")
 	}
 
-	totalPoints := 0
+	return config, writers, readers, nil
+}
+
+func countPoints(config map[string]any, writers []string) (int, error) {
+	if len(writers) == 0 {
+		return 0, nil
+	}
+	total := 0
 	writerFound := false
 	for _, wType := range writers {
 		section, ok := config[wType]
@@ -127,23 +131,40 @@ func createFromConfig(configPath string, instanceID string) (*shm.SharedMemory, 
 		writerFound = true
 		instances, ok := section.([]any)
 		if !ok {
-			continue
+			return 0, fmt.Errorf("CONFIG_PARSE_ERROR: writer '%s' is not an array", wType)
 		}
 		for _, inst := range instances {
 			instMap, ok := inst.(map[string]any)
 			if !ok {
-				continue
+				return 0, fmt.Errorf("CONFIG_PARSE_ERROR: instance in '%s' is not an object", wType)
 			}
 			pts, _ := instMap["points"].([]any)
-			totalPoints += len(pts)
+			total += len(pts)
 		}
 	}
+	if total == 0 && !writerFound {
+		return 0, fmt.Errorf("CONFIG_MISSING_SECTION: writer type(s) not found in config")
+	}
+	return total, nil
+}
+
+func createFromConfig(configPath string, instanceID string) (*shm.SharedMemory, error) {
+	config, writers, readers, err := loadConfigSection(configPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(writers) == 0 || len(readers) == 0 {
+		return nil, fmt.Errorf("CONFIG_MISSING_SECTION: 'c4_shm_manager.writer' or 'c4_shm_manager.reader' is empty")
+	}
+
+	totalPoints, err := countPoints(config, writers)
+	if err != nil {
+		return nil, err
+	}
+
 	if totalPoints == 0 {
-		if !writerFound {
-			return nil, fmt.Errorf("CONFIG_MISSING_SECTION: writer type(s) not found in config")
-		}
-		maxPoints := shm.DefaultMaxPoints
-		sm, err := shm.Create(instanceID, maxPoints)
+		sm, err := shm.Create(instanceID, shm.DefaultMaxPoints)
 		if err != nil {
 			return nil, err
 		}
@@ -163,13 +184,22 @@ func createFromConfig(configPath string, instanceID string) (*shm.SharedMemory, 
 		if !ok {
 			continue
 		}
-		instances, _ := section.([]any)
+		instances, ok := section.([]any)
+		if !ok {
+			return nil, fmt.Errorf("CONFIG_PARSE_ERROR: writer '%s' is not an array", wType)
+		}
 		for _, inst := range instances {
-			instMap := inst.(map[string]any)
+			instMap, ok := inst.(map[string]any)
+			if !ok {
+				return nil, fmt.Errorf("CONFIG_PARSE_ERROR: instance in '%s' is not an object", wType)
+			}
 			serviceID, _ := instMap["id"].(string)
 			pts, _ := instMap["points"].([]any)
 			for _, pt := range pts {
-				ptMap := pt.(map[string]any)
+				ptMap, ok := pt.(map[string]any)
+				if !ok {
+					return nil, fmt.Errorf("CONFIG_PARSE_ERROR: point in '%s' is not an object", wType)
+				}
 				pointID, _ := ptMap["id"].(string)
 				key := serviceID + "." + pointID
 				if _, exists := keyMap[key]; exists {
@@ -188,12 +218,21 @@ func createFromConfig(configPath string, instanceID string) (*shm.SharedMemory, 
 		if !ok {
 			continue
 		}
-		instances, _ := section.([]any)
+		instances, ok := section.([]any)
+		if !ok {
+			return nil, fmt.Errorf("CONFIG_PARSE_ERROR: reader '%s' is not an array", rType)
+		}
 		for _, inst := range instances {
-			instMap := inst.(map[string]any)
+			instMap, ok := inst.(map[string]any)
+			if !ok {
+				return nil, fmt.Errorf("CONFIG_PARSE_ERROR: instance in '%s' is not an object", rType)
+			}
 			pts, _ := instMap["points"].([]any)
 			for _, pt := range pts {
-				ptMap := pt.(map[string]any)
+				ptMap, ok := pt.(map[string]any)
+				if !ok {
+					return nil, fmt.Errorf("CONFIG_PARSE_ERROR: point in '%s' is not an object", rType)
+				}
 				key, _ := ptMap["key"].(string)
 				pid, exists := keyMap[key]
 				if !exists {
@@ -295,53 +334,20 @@ func adjustShmHandler(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallT
 		configPath = configPath[7:]
 	}
 
-	data, err := os.ReadFile(configPath)
+	config, writers, readers, err := loadConfigSection(configPath)
 	if err != nil {
-		return newError("CONFIG_MISSING_SECTION: cannot read config file: " + err.Error()), nil
+		return newError(err.Error()), nil
 	}
 
-	var config map[string]any
-	if err := json.Unmarshal(data, &config); err != nil {
-		return newError(fmt.Sprintf("CONFIG_PARSE_ERROR: failed to parse config JSON: %v", err)), nil
-	}
-
-	shmCfg, ok := config["c4_shm_manager"].(map[string]any)
-	if !ok {
-		return newError("CONFIG_MISSING_SECTION: 'c4_shm_manager' key not found in config"), nil
-	}
-
-	writers, writersOk := toStringSlice(shmCfg["writer"])
-	readers, readersOk := toStringSlice(shmCfg["reader"])
-	if !writersOk || !readersOk {
-		return newError("CONFIG_MISSING_SECTION: 'c4_shm_manager.writer' or 'c4_shm_manager.reader' not found in config"), nil
-	}
-
-	// writer/reader both empty → full reclaim (valid for adjust_shm)
-	// one empty + one non-empty → error
 	writersEmpty := len(writers) == 0
 	readersEmpty := len(readers) == 0
 	if writersEmpty != readersEmpty {
 		return newError("CONFIG_MISSING_SECTION: 'c4_shm_manager.writer' is empty but 'c4_shm_manager.reader' is not, both must be non-empty or both empty"), nil
 	}
 
-	requiredPoints := 0
-	for _, wType := range writers {
-		section, ok := config[wType]
-		if !ok {
-			continue
-		}
-		instances, ok := section.([]any)
-		if !ok {
-			continue
-		}
-		for _, inst := range instances {
-			instMap, ok := inst.(map[string]any)
-			if !ok {
-				continue
-			}
-			pts, _ := instMap["points"].([]any)
-			requiredPoints += len(pts)
-		}
+	requiredPoints, err := countPoints(config, writers)
+	if err != nil {
+		return newError(err.Error()), nil
 	}
 
 	h := state.sm.HeaderInfo()
@@ -354,13 +360,22 @@ func adjustShmHandler(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallT
 		if !ok {
 			continue
 		}
-		instances, _ := section.([]any)
+		instances, ok := section.([]any)
+		if !ok {
+			return newError(fmt.Sprintf("CONFIG_PARSE_ERROR: writer '%s' is not an array", wType)), nil
+		}
 		for _, inst := range instances {
-			instMap := inst.(map[string]any)
+			instMap, ok := inst.(map[string]any)
+			if !ok {
+				return newError(fmt.Sprintf("CONFIG_PARSE_ERROR: instance in '%s' is not an object", wType)), nil
+			}
 			serviceID, _ := instMap["id"].(string)
 			pts, _ := instMap["points"].([]any)
 			for _, pt := range pts {
-				ptMap := pt.(map[string]any)
+				ptMap, ok := pt.(map[string]any)
+				if !ok {
+					return newError(fmt.Sprintf("CONFIG_PARSE_ERROR: point in '%s' is not an object", wType)), nil
+				}
 				pointID, _ := ptMap["id"].(string)
 				key := serviceID + "." + pointID
 
@@ -395,12 +410,21 @@ func adjustShmHandler(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallT
 	nextID := 1
 	for _, wType := range writers {
 		section := config[wType]
-		instances := section.([]any)
+		instances, ok := section.([]any)
+		if !ok {
+			return newError(fmt.Sprintf("CONFIG_PARSE_ERROR: writer '%s' is not an array", wType)), nil
+		}
 		for _, inst := range instances {
-			instMap := inst.(map[string]any)
-			pts := instMap["points"].([]any)
+			instMap, ok := inst.(map[string]any)
+			if !ok {
+				return newError(fmt.Sprintf("CONFIG_PARSE_ERROR: instance in '%s' is not an object", wType)), nil
+			}
+			pts, _ := instMap["points"].([]any)
 			for _, pt := range pts {
-				ptMap := pt.(map[string]any)
+				ptMap, ok := pt.(map[string]any)
+				if !ok {
+					return newError(fmt.Sprintf("CONFIG_PARSE_ERROR: point in '%s' is not an object", wType)), nil
+				}
 				shmID := 0
 				if sid, ok := ptMap["shm_id"].(float64); ok {
 					shmID = int(sid)
@@ -429,12 +453,21 @@ func adjustShmHandler(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallT
 		if !ok {
 			continue
 		}
-		instances, _ := section.([]any)
+		instances, ok := section.([]any)
+		if !ok {
+			return newError(fmt.Sprintf("CONFIG_PARSE_ERROR: reader '%s' is not an array", rType)), nil
+		}
 		for _, inst := range instances {
-			instMap := inst.(map[string]any)
+			instMap, ok := inst.(map[string]any)
+			if !ok {
+				return newError(fmt.Sprintf("CONFIG_PARSE_ERROR: instance in '%s' is not an object", rType)), nil
+			}
 			pts, _ := instMap["points"].([]any)
 			for _, pt := range pts {
-				ptMap := pt.(map[string]any)
+				ptMap, ok := pt.(map[string]any)
+				if !ok {
+					return newError(fmt.Sprintf("CONFIG_PARSE_ERROR: point in '%s' is not an object", rType)), nil
+				}
 				key, _ := ptMap["key"].(string)
 				pid, exists := keyMap[key]
 				if !exists {

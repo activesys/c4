@@ -366,7 +366,7 @@ class TestStart:
         fd = os.open(shm_path, os.O_RDWR)
         try:
             shm = mmap.mmap(fd, 32, mmap.MAP_SHARED, mmap.PROT_WRITE)
-            shm.write(struct.pack(">I", 0xDEADBEEF))
+            shm.write(struct.pack("=I", 0xDEADBEEF))
             shm.close()
         finally:
             os.close(fd)

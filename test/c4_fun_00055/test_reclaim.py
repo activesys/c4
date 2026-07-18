@@ -56,7 +56,7 @@ def set_header_point_count(shm_path_arg, count):
         fd = os.open(shm_path_arg, os.O_RDWR)
         _shm = mmap.mmap(fd, 16, mmap.MAP_SHARED,
                          prot=mmap.PROT_READ | mmap.PROT_WRITE)
-        _shm[8:12] = struct.pack(">I", count)
+        _shm[8:12] = struct.pack("=I", count)
     finally:
         if _shm is not None:
             _shm.close()

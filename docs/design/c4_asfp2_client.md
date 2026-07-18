@@ -366,6 +366,11 @@ func readBlock(shmPtr unsafe.Pointer, shmID uint32) (dataType uint8,
 Reader 频率 10 倍于 Writer（`timer ≤ 100` → Reader ≥ 10Hz），确保不漏数据。
 `write_seq` 在奇数时跳过（概率 ≈ 1/10），下一轮必定拿到完成值。
 
+**Seqlock 安全约束**：`readBlock` 使用无界 `for` 循环重试 seqlock 读取。在 Writer 1Hz /
+Reader ≥10Hz 的频率比下，seqlock 奇数窗口（~µs）与 Reader 轮询间隔（≤100ms）相差 5 个
+数量级，**碰撞需要重试的概率 < 0.01%**。若违反此频率约束（如 `timer > 100` 或 Writer 频率 > 1Hz），
+重试次数可能急剧增加。代码中以 `runtime.Gosched()` + 100 次上限作为防御性兜底保护。
+
 ### 4.3 属性开关自动检测
 
 三个 Attribute 开关中，`KEY_SEQUENCE` 的发生概率最高——同一转发目标的点通常按连续 addr 分配，

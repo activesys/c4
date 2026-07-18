@@ -47,13 +47,13 @@ def read_shm_header(full_path: str) -> dict:
         shm = mmap.mmap(fd, 32, mmap.MAP_SHARED, mmap.PROT_READ)
         data = shm.read(32)
         return {
-            "magic": struct.unpack(">I", data[0:4])[0],
-            "version": struct.unpack(">H", data[4:6])[0],
-            "reserved": struct.unpack(">H", data[6:8])[0],
-            "point_count": struct.unpack(">I", data[8:12])[0],
-            "max_points": struct.unpack(">I", data[12:16])[0],
-            "global_write_seq": struct.unpack(">Q", data[16:24])[0],
-            "reserved": struct.unpack(">Q", data[24:32])[0],
+            "magic": struct.unpack("=I", data[0:4])[0],
+            "version": struct.unpack("=H", data[4:6])[0],
+            "reserved": struct.unpack("=H", data[6:8])[0],
+            "point_count": struct.unpack("=I", data[8:12])[0],
+            "max_points": struct.unpack("=I", data[12:16])[0],
+            "global_write_seq": struct.unpack("=Q", data[16:24])[0],
+            "reserved": struct.unpack("=Q", data[24:32])[0],
         }
     finally:
         if shm is not None:
@@ -71,13 +71,13 @@ def read_shm_block(full_path: str, shm_id: int) -> dict:
         shm.seek(offset)
         data = shm.read(32)
         return {
-            "magic": struct.unpack(">I", data[0:4])[0],
+            "magic": struct.unpack("=I", data[0:4])[0],
             "state": data[4],
-            "reserved": struct.unpack(">H", data[5:7])[0],
+            "reserved": struct.unpack("=H", data[5:7])[0],
             "type": data[7],
-            "write_seq": struct.unpack(">Q", data[8:16])[0],
-            "timestamp": struct.unpack(">Q", data[16:24])[0],
-            "value": struct.unpack(">Q", data[24:32])[0],
+            "write_seq": struct.unpack("=Q", data[8:16])[0],
+            "timestamp": struct.unpack("=Q", data[16:24])[0],
+            "value": struct.unpack("=Q", data[24:32])[0],
         }
     finally:
         if shm is not None:

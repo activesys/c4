@@ -47,6 +47,9 @@ type HeaderInfo struct {
 	Reserved       uint64
 }
 
+// BlockInfo is a convenience container. Fields are populated from raw bytes
+// using explicit BlkOff* offsets — do NOT use this struct for direct memory
+// mapping via unsafe.Pointer; Go's padding does not match the SHM layout.
 type BlockInfo struct {
 	Magic     uint32
 	State     uint8
@@ -60,7 +63,7 @@ type BlockInfo struct {
 type StatusInfo struct {
 	Magic          string `json:"magic"`
 	Version        int    `json:"version"`
-	Reserved2   int    `json:"reserved"`
+	Reserved2     uint16 `json:"reserved"`
 	PointCount     int    `json:"point_count"`
 	MaxPoints      int    `json:"max_points"`
 	FreeBlocks     int    `json:"free_blocks"`
@@ -103,14 +106,14 @@ func Create(instanceID string, maxPoints int) (*SharedMemory, error) {
 	}
 
 	for i := 1; i <= maxPoints; i++ {
-		binary.BigEndian.PutUint32(data[i*BlockSize+BlkOffMagic:], Magic)
+		binary.NativeEndian.PutUint32(data[i*BlockSize+BlkOffMagic:], Magic)
 	}
 
-	binary.BigEndian.PutUint16(data[HdrOffVersion:], Version)
-	binary.BigEndian.PutUint32(data[HdrOffMaxPoints:], uint32(maxPoints))
+	binary.NativeEndian.PutUint16(data[HdrOffVersion:], Version)
+	binary.NativeEndian.PutUint32(data[HdrOffMaxPoints:], uint32(maxPoints))
 
 	/* WRITE MAGIC LAST as the commit point */
-	binary.BigEndian.PutUint32(data[HdrOffMagic:], Magic)
+	binary.NativeEndian.PutUint32(data[HdrOffMagic:], Magic)
 
 	return &SharedMemory{
 		fd:        fd,
@@ -122,13 +125,13 @@ func Create(instanceID string, maxPoints int) (*SharedMemory, error) {
 
 func (s *SharedMemory) HeaderInfo() HeaderInfo {
 	return HeaderInfo{
-		Magic:          binary.BigEndian.Uint32(s.data[HdrOffMagic:]),
-		Version:        binary.BigEndian.Uint16(s.data[HdrOffVersion:]),
-		Reserved2:   binary.BigEndian.Uint16(s.data[HdrOffReserved2:]),
-		PointCount:     binary.BigEndian.Uint32(s.data[HdrOffPointCount:]),
-		MaxPoints:      binary.BigEndian.Uint32(s.data[HdrOffMaxPoints:]),
-		GlobalWriteSeq: binary.BigEndian.Uint64(s.data[HdrOffGlobalWriteSeq:]),
-		Reserved:       binary.BigEndian.Uint64(s.data[HdrOffReserved:]),
+		Magic:          binary.NativeEndian.Uint32(s.data[HdrOffMagic:]),
+		Version:        binary.NativeEndian.Uint16(s.data[HdrOffVersion:]),
+		Reserved2:  binary.NativeEndian.Uint16(s.data[HdrOffReserved2:]),
+		PointCount:     binary.NativeEndian.Uint32(s.data[HdrOffPointCount:]),
+		MaxPoints:      binary.NativeEndian.Uint32(s.data[HdrOffMaxPoints:]),
+		GlobalWriteSeq: binary.NativeEndian.Uint64(s.data[HdrOffGlobalWriteSeq:]),
+		Reserved:       binary.NativeEndian.Uint64(s.data[HdrOffReserved:]),
 	}
 }
 
@@ -139,13 +142,13 @@ func (s *SharedMemory) Path() string {
 func (s *SharedMemory) BlockInfo(shmID int) BlockInfo {
 	off := shmID * BlockSize
 	return BlockInfo{
-		Magic:     binary.BigEndian.Uint32(s.data[off+BlkOffMagic:]),
+		Magic:     binary.NativeEndian.Uint32(s.data[off+BlkOffMagic:]),
 		State:     s.data[off+BlkOffState],
-		Reserved:  binary.BigEndian.Uint16(s.data[off+BlkOffReserved:]),
+		Reserved:  binary.NativeEndian.Uint16(s.data[off+BlkOffReserved:]),
 		Type:      s.data[off+BlkOffType],
-		WriteSeq:  binary.BigEndian.Uint64(s.data[off+BlkOffWriteSeq:]),
-		Timestamp: binary.BigEndian.Uint64(s.data[off+BlkOffTimestamp:]),
-		Value:     binary.BigEndian.Uint64(s.data[off+BlkOffValue:]),
+		WriteSeq:  binary.NativeEndian.Uint64(s.data[off+BlkOffWriteSeq:]),
+		Timestamp: binary.NativeEndian.Uint64(s.data[off+BlkOffTimestamp:]),
+		Value:     binary.NativeEndian.Uint64(s.data[off+BlkOffValue:]),
 	}
 }
 
@@ -170,15 +173,15 @@ func (s *SharedMemory) Unlink() error {
 }
 
 func (s *SharedMemory) SetHeaderUint32(offset int, val uint32) {
-	binary.BigEndian.PutUint32(s.data[offset:], val)
+	binary.NativeEndian.PutUint32(s.data[offset:], val)
 }
 
 func (s *SharedMemory) SetHeaderUint16(offset int, val uint16) {
-	binary.BigEndian.PutUint16(s.data[offset:], val)
+	binary.NativeEndian.PutUint16(s.data[offset:], val)
 }
 
 func (s *SharedMemory) InitBlock(shmID int) {
-	binary.BigEndian.PutUint32(s.data[shmID*BlockSize+BlkOffMagic:], Magic)
+	binary.NativeEndian.PutUint32(s.data[shmID*BlockSize+BlkOffMagic:], Magic)
 }
 
 func (s *SharedMemory) SetBlockState(shmID int, state uint8) {
@@ -194,7 +197,7 @@ func (s *SharedMemory) Expand(newMaxPoints int) error {
 	}
 
 	/* write new max_points to old mmap (persisted to file via MAP_SHARED) */
-	binary.BigEndian.PutUint32(s.data[HdrOffMaxPoints:], uint32(newMaxPoints))
+	binary.NativeEndian.PutUint32(s.data[HdrOffMaxPoints:], uint32(newMaxPoints))
 
 	/* munmap old mapping */
 	if err := unix.Munmap(s.data); err != nil {
@@ -208,10 +211,6 @@ func (s *SharedMemory) Expand(newMaxPoints int) error {
 	}
 	s.data = data
 	s.maxPoints = newMaxPoints
-
-	/* increment remap_version AFTER new mmap */
-	ver := binary.BigEndian.Uint16(s.data[HdrOffReserved2:])
-	binary.BigEndian.PutUint16(s.data[HdrOffReserved2:], ver+1)
 
 	/* init new blocks (oldMax+1 .. newMaxPoints) */
 	for i := oldMax + 1; i <= newMaxPoints; i++ {
@@ -245,12 +244,12 @@ func ReadHeaderFromPath(path string) (HeaderInfo, error) {
 	defer unix.Munmap(data)
 
 	return HeaderInfo{
-		Magic:          binary.BigEndian.Uint32(data[HdrOffMagic:]),
-		Version:        binary.BigEndian.Uint16(data[HdrOffVersion:]),
-		Reserved2:   binary.BigEndian.Uint16(data[HdrOffReserved2:]),
-		PointCount:     binary.BigEndian.Uint32(data[HdrOffPointCount:]),
-		MaxPoints:      binary.BigEndian.Uint32(data[HdrOffMaxPoints:]),
-		GlobalWriteSeq: binary.BigEndian.Uint64(data[HdrOffGlobalWriteSeq:]),
-		Reserved:       binary.BigEndian.Uint64(data[HdrOffReserved:]),
+		Magic:          binary.NativeEndian.Uint32(data[HdrOffMagic:]),
+		Version:        binary.NativeEndian.Uint16(data[HdrOffVersion:]),
+		Reserved2:  binary.NativeEndian.Uint16(data[HdrOffReserved2:]),
+		PointCount:     binary.NativeEndian.Uint32(data[HdrOffPointCount:]),
+		MaxPoints:      binary.NativeEndian.Uint32(data[HdrOffMaxPoints:]),
+		GlobalWriteSeq: binary.NativeEndian.Uint64(data[HdrOffGlobalWriteSeq:]),
+		Reserved:       binary.NativeEndian.Uint64(data[HdrOffReserved:]),
 	}, nil
 }

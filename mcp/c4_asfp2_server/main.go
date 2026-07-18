@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"math"
 	"net"
 	"os"
 	"strings"
@@ -16,92 +15,38 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"golang.org/x/sys/unix"
 
-	"c4/mcp/c4_asfp2_server/internal/shm"
+	"c4/mcp/internal/shm"
+	"c4/mcp/internal/protocol"
 )
 
 // ──────────────────────────────────────────────
 //  Configuration types
 // ──────────────────────────────────────────────
 
-type pointCfg struct {
+type serverPoint struct {
 	ID    string `json:"id"`
 	Addr  uint32 `json:"addr"`
 	ShmID int    `json:"shm_id"`
 }
 
-type instanceCfg struct {
-	Name        string     `json:"name"`
-	ID          string     `json:"id"`
-	Port        int        `json:"port"`
-	T1          int        `json:"t1"`
-	T2          int        `json:"t2"`
-	ForwardKack uint8      `json:"forward_kack"`
-	InverseKeep uint8      `json:"inverse_keep"`
-	Points      []pointCfg `json:"points"`
+type serverInstance struct {
+	Name        string        `json:"name"`
+	ID          string        `json:"id"`
+	Port        int           `json:"port"`
+	T1          int           `json:"t1"`
+	T2          int           `json:"t2"`
+	ForwardKack uint8         `json:"forward_kack"`
+	InverseKeep uint8         `json:"inverse_keep"`
+	Points      []serverPoint `json:"points"`
 }
 
 type serverConfig struct {
-	C4ASFP2Server []instanceCfg `json:"c4_asfp2_server"`
+	C4ASFP2Server []serverInstance `json:"c4_asfp2_server"`
 }
 
 // ──────────────────────────────────────────────
-//  Protocol constants
+//  Protocol constants (shared via c4/mcp/internal/protocol)
 // ──────────────────────────────────────────────
-
-const (
-	// version flags
-	flagV200 = "ASFPV200"
-	flagV210 = "ASFPV210"
-	flagV211 = "ASFPV211"
-
-	// data types
-	asfpTypeBoolean        uint8 = 0
-	asfpTypeInt8           uint8 = 1
-	asfpTypeUint8          uint8 = 2
-	asfpTypeInt16          uint8 = 3
-	asfpTypeUint16         uint8 = 4
-	asfpTypeInt32          uint8 = 5
-	asfpTypeUint32         uint8 = 6
-	asfpTypeInt64          uint8 = 7
-	asfpTypeUint64         uint8 = 8
-	asfpTypeFloat16        uint8 = 9
-	asfpTypeFloat32        uint8 = 10
-	asfpTypeFloat64        uint8 = 11
-	asfpTypeString         uint8 = 12
-	asfpTypeBlob           uint8 = 13
-	asfpTypeBitstring      uint8 = 14
-	asfpTypeBit            uint8 = 15
-	asfpTypeLargeDataBlock uint8 = 16
-
-	// attribute bits
-	attrKeySequence     = 0x00000001
-	attrSameDataType    = 0x00000002
-	attrSameTimestamp   = 0x00000004
-)
-
-var variableTypes = map[uint8]bool{
-	asfpTypeString:         true,
-	asfpTypeBlob:           true,
-	asfpTypeBitstring:      true,
-	asfpTypeLargeDataBlock: true,
-}
-
-func typeByteSize(t uint8) int {
-	switch t {
-	case asfpTypeBoolean, asfpTypeBit:
-		return 1
-	case asfpTypeInt8, asfpTypeUint8:
-		return 1
-	case asfpTypeInt16, asfpTypeUint16, asfpTypeFloat16:
-		return 2
-	case asfpTypeInt32, asfpTypeUint32, asfpTypeFloat32:
-		return 4
-	case asfpTypeInt64, asfpTypeUint64, asfpTypeFloat64:
-		return 8
-	default:
-		return 0
-	}
-}
 
 // ──────────────────────────────────────────────
 //  Server state
@@ -116,11 +61,12 @@ type instanceStats struct {
 }
 
 type instanceState struct {
-	cfg       instanceCfg
-	listener  net.Listener
-	addrMap   map[uint32]int // addr → shm_id
-	stats     instanceStats
-	quit      chan struct{}
+	cfg      serverInstance
+	listener net.Listener
+	addrMap  map[uint32]int // addr → shm_id
+	stats    instanceStats
+	quit     chan struct{}
+	wg       sync.WaitGroup // tracks runServer goroutine
 }
 
 type serverState struct {
@@ -137,7 +83,7 @@ var state = &serverState{}
 //  Config loading
 // ──────────────────────────────────────────────
 
-func loadConfig(req *mcp.CallToolRequest) ([]instanceCfg, string, error) {
+func loadConfig(req *mcp.CallToolRequest) ([]serverInstance, string, error) {
 	rootRes, err := req.Session.ListRoots(context.Background(), nil)
 	if err != nil || rootRes == nil || len(rootRes.Roots) == 0 {
 		return nil, "", fmt.Errorf("CONFIG_PATH_MISSING: roots/list protocol call failed, Agent may not be responding")
@@ -164,7 +110,7 @@ func loadConfig(req *mcp.CallToolRequest) ([]instanceCfg, string, error) {
 	}
 
 	rawJSON, _ := json.Marshal(section)
-	var instances []instanceCfg
+	var instances []serverInstance
 	if err := json.Unmarshal(rawJSON, &instances); err != nil {
 		return nil, "", fmt.Errorf("CONFIG_PARSE_ERROR: failed to parse 'c4_asfp2_server' section: %v", err)
 	}
@@ -172,7 +118,7 @@ func loadConfig(req *mcp.CallToolRequest) ([]instanceCfg, string, error) {
 	return instances, configPath, nil
 }
 
-func validateConfig(instances []instanceCfg) error {
+func validateConfig(instances []serverInstance) error {
 	ports := make(map[int]string)
 	for _, inst := range instances {
 		if inst.Port <= 0 || inst.Port > 65535 {
@@ -186,8 +132,8 @@ func validateConfig(instances []instanceCfg) error {
 			return fmt.Errorf("CONFIG_PARSE_ERROR: instance has empty id field")
 		}
 		for _, pt := range inst.Points {
-			if pt.Addr > 16777215 {
-				return fmt.Errorf("CONFIG_PARSE_ERROR: addr %d exceeds max 16777215", pt.Addr)
+			if pt.Addr > protocol.MaxAddr {
+				return fmt.Errorf("CONFIG_PARSE_ERROR: addr %d exceeds max protocol.MaxAddr", pt.Addr)
 			}
 		}
 	}
@@ -198,18 +144,7 @@ func validateConfig(instances []instanceCfg) error {
 //  Shared memory
 // ──────────────────────────────────────────────
 
-func attachShm(configPath string) ([]byte, int, error) {
-	// Find shm instance ID from config
-	data, err := os.ReadFile(configPath)
-	if err != nil {
-		return nil, 0, fmt.Errorf("SHM_OPEN_FAILED: cannot read config: %v", err)
-	}
-
-	var fullCfg map[string]any
-	json.Unmarshal(data, &fullCfg)
-
-	// find shm path: /dev/shm/c4_{id}
-	// We scan /dev/shm for c4_* files
+func attachShm() ([]byte, int, error) {
 	entries, err := os.ReadDir("/dev/shm")
 	if err != nil {
 		return nil, 0, fmt.Errorf("SHM_OPEN_FAILED: cannot read /dev/shm: %v", err)
@@ -237,17 +172,17 @@ func attachShm(configPath string) ([]byte, int, error) {
 		unix.Close(fd)
 		return nil, 0, fmt.Errorf("SHM_OPEN_FAILED: mmap header failed: %v", err)
 	}
-	magic := binary.BigEndian.Uint32(hdrData[0:])
+	magic := binary.NativeEndian.Uint32(hdrData[0:])
 	if magic != shm.Magic {
 		unix.Munmap(hdrData)
 		unix.Close(fd)
 		return nil, 0, fmt.Errorf("SHM_CORRUPTED: header magic is invalid (got 0x%08X, expected 0x%08X)", magic, shm.Magic)
 	}
-	maxPoints := binary.BigEndian.Uint32(hdrData[shm.HdrOffMaxPoints:])
+	maxPoints := binary.NativeEndian.Uint32(hdrData[shm.HdrOffMaxPoints:])
 	unix.Munmap(hdrData)
 
 	totalSize := int64(int(maxPoints)+1) * shm.BlockSize
-	data, err = unix.Mmap(fd, 0, int(totalSize), unix.PROT_READ|unix.PROT_WRITE, unix.MAP_SHARED)
+	data, err := unix.Mmap(fd, 0, int(totalSize), unix.PROT_READ|unix.PROT_WRITE, unix.MAP_SHARED)
 	if err != nil {
 		unix.Close(fd)
 		return nil, 0, fmt.Errorf("SHM_OPEN_FAILED: mmap failed: %v", err)
@@ -260,12 +195,18 @@ func attachShm(configPath string) ([]byte, int, error) {
 //  ASFP2 Parser
 // ──────────────────────────────────────────────
 
+var bufPool = sync.Pool{New: func() any { return make([]byte, 65536) }}
+
 func parseASFP2Data(conn net.Conn, inst *instanceState, shmData []byte) {
 	defer conn.Close()
 
-	buf := make([]byte, 65536)
+	tmp := bufPool.Get().([]byte)
+	defer bufPool.Put(tmp)
+
+	var remain []byte
+
 	for {
-		n, err := conn.Read(buf)
+		n, err := conn.Read(tmp)
 		if err != nil {
 			return
 		}
@@ -273,24 +214,25 @@ func parseASFP2Data(conn net.Conn, inst *instanceState, shmData []byte) {
 			continue
 		}
 
+		remain = append(remain, tmp[:n]...)
+		if len(remain) > 1<<20 {
+			return
+		}
 		pos := 0
-		for pos < n {
-			firstByte := buf[pos]
+		for pos < len(remain) {
+			firstByte := remain[pos]
 
 			// Heartbeat: 'K' prefix
 			if firstByte == 'K' {
-				if pos+4 <= n && string(buf[pos:pos+4]) == "KEEP" {
-					// Forward KA: reply with forward_kack
+				if pos+4 <= len(remain) && string(remain[pos:pos+4]) == "KEEP" {
 					conn.Write([]byte{inst.cfg.ForwardKack})
 					pos += 4
 					continue
 				}
-				if pos+4 <= n && string(buf[pos:pos+4]) == "KACK" {
-					// Reverse KA Ack — acknowledge
+				if pos+4 <= len(remain) && string(remain[pos:pos+4]) == "KACK" {
 					pos += 4
 					continue
 				}
-				// Unknown, skip
 				pos++
 				continue
 			}
@@ -303,19 +245,19 @@ func parseASFP2Data(conn net.Conn, inst *instanceState, shmData []byte) {
 			}
 
 			// Need at least 8B flag
-			if pos+8 > n {
+			if pos+8 > len(remain) {
 				break
 			}
 			pktStart := pos
-			flag := string(buf[pos : pos+8])
+			flag := string(remain[pos : pos+8])
 			var versionStr string
 			switch flag {
-			case flagV200:
-				versionStr = flagV200
-			case flagV210:
-				versionStr = flagV210
-			case flagV211:
-				versionStr = flagV211
+			case protocol.FlagV200:
+				versionStr = protocol.FlagV200
+			case protocol.FlagV210:
+				versionStr = protocol.FlagV210
+			case protocol.FlagV211:
+				versionStr = protocol.FlagV211
 			default:
 				pos++
 				atomic.AddUint64(&inst.stats.parseErrors, 1)
@@ -324,30 +266,30 @@ func parseASFP2Data(conn net.Conn, inst *instanceState, shmData []byte) {
 			pos += 8
 
 			// Parse header: Length + Count + Attribute
-			if pos+8 > n {
+			if pos+8 > len(remain) {
+				pos = pktStart
 				break
 			}
 
 			var length, count int
 			var attribute uint32
 
-			if versionStr == flagV200 {
-				length = int(binary.BigEndian.Uint16(buf[pos : pos+2]))
-				count = int(binary.BigEndian.Uint16(buf[pos+2 : pos+4]))
-				attribute = binary.BigEndian.Uint32(buf[pos+4 : pos+8])
+			if versionStr == protocol.FlagV200 {
+				length = int(binary.BigEndian.Uint16(remain[pos : pos+2]))
+				count = int(binary.BigEndian.Uint16(remain[pos+2 : pos+4]))
+				attribute = binary.BigEndian.Uint32(remain[pos+4 : pos+8])
 			} else {
-				// v2.1.0/v2.1.1: Length 4B (high 2B from attribute slot)
-				lengthLow := int(binary.BigEndian.Uint16(buf[pos : pos+2]))
-				lengthExt := int(binary.BigEndian.Uint16(buf[pos+4 : pos+6]))
+				lengthLow := int(binary.BigEndian.Uint16(remain[pos : pos+2]))
+				lengthExt := int(binary.BigEndian.Uint16(remain[pos+4 : pos+6]))
 				length = lengthLow | (lengthExt << 16)
-				count = int(binary.BigEndian.Uint16(buf[pos+2 : pos+4]))
-				attribute = binary.BigEndian.Uint32(buf[pos+4 : pos+8])
-				// Fix attribute: high 2B already extracted for length
+				count = int(binary.BigEndian.Uint16(remain[pos+2 : pos+4]))
+				attribute = binary.BigEndian.Uint32(remain[pos+4 : pos+8])
 				attribute = (attribute & 0x0000FFFF) | (uint32(lengthExt) << 16)
 			}
 			pos += 8
 
-			if length < 16 || pktStart+length > n {
+			if length < 16 || pktStart+length > len(remain) {
+				pos = pktStart
 				break
 			}
 
@@ -355,43 +297,41 @@ func parseASFP2Data(conn net.Conn, inst *instanceState, shmData []byte) {
 			var mutableKey uint32
 			var mutableType uint8
 			var mutableTimestamp uint64
-			hasKey := (attribute & attrKeySequence) != 0
-			hasType := (attribute & attrSameDataType) != 0
-			hasTs := (attribute & attrSameTimestamp) != 0
+			hasKey := (attribute & protocol.AttrKeySequence) != 0
+			hasType := (attribute & protocol.AttrSameDataType) != 0
+			hasTs := (attribute & protocol.AttrSameTimestamp) != 0
 
-			if hasKey && hasType && hasTs {
-				// Mutable order: type(1B), key(3B), timestamp(8B)
-			}
 			if hasType {
-				mutableType = buf[pos]
+				mutableType = remain[pos]
 				pos++
 			}
 			if hasKey {
-				mutableKey = uint32(buf[pos])<<16 | uint32(buf[pos+1])<<8 | uint32(buf[pos+2])
+				mutableKey = uint32(remain[pos])<<16 | uint32(remain[pos+1])<<8 | uint32(remain[pos+2])
 				pos += 3
 			}
 			if hasTs {
-				mutableTimestamp = binary.BigEndian.Uint64(buf[pos : pos+8])
+				mutableTimestamp = binary.BigEndian.Uint64(remain[pos : pos+8])
 				pos += 8
 			}
 
 			// Drop entire packet if same data type is variable-length
-			if hasType && variableTypes[mutableType] {
+			if hasType && protocol.VariableTypes[mutableType] {
 				atomic.AddUint64(&inst.stats.parseErrors, 1)
-				pos = pos - 8 - len(flag) - 8 + length // skip to end of this packet
+				pos = pktStart + length
 				continue
 			}
 
 			// BIT compression mode
-			if hasKey && hasType && hasTs && (mutableType == asfpTypeBoolean || mutableType == asfpTypeBit) {
+			if hasKey && hasType && hasTs && (mutableType == protocol.TypeBoolean || mutableType == protocol.TypeBit) {
 				compressedBytes := (count + 7) / 8
-				if pos+compressedBytes > n {
+				if pos+compressedBytes > len(remain) {
+					pos = pktStart
 					break
 				}
 				for i := 0; i < count; i++ {
 					byteIdx := i / 8
 					bitIdx := i % 8
-					bit := (buf[pos+byteIdx] >> bitIdx) & 1
+					bit := (remain[pos+byteIdx] >> bitIdx) & 1
 					addr := mutableKey + uint32(i)
 					shmID, ok := inst.addrMap[addr]
 					if ok {
@@ -414,83 +354,45 @@ func parseASFP2Data(conn net.Conn, inst *instanceState, shmData []byte) {
 				itemTs := mutableTimestamp
 
 				if !hasType {
-					if pos >= n {
+					if pos >= len(remain) {
+						pos = pktStart
 						break
 					}
-					itemType = buf[pos]
+					itemType = remain[pos]
 					pos++
 				}
 				if !hasKey {
-					if pos+3 > n {
+					if pos+3 > len(remain) {
+						pos = pktStart
 						break
 					}
-					itemKey = uint32(buf[pos])<<16 | uint32(buf[pos+1])<<8 | uint32(buf[pos+2])
+					itemKey = uint32(remain[pos])<<16 | uint32(remain[pos+1])<<8 | uint32(remain[pos+2])
 					pos += 3
 				}
 				if !hasTs {
-					if pos+8 > n {
+					if pos+8 > len(remain) {
+						pos = pktStart
 						break
 					}
-					itemTs = binary.BigEndian.Uint64(buf[pos : pos+8])
+					itemTs = binary.BigEndian.Uint64(remain[pos : pos+8])
 					pos += 8
 				}
 
 				atomic.AddUint64(&inst.stats.itemsReceived, 1)
 
 				// Skip variable-length items
-				if variableTypes[itemType] {
+				if protocol.VariableTypes[itemType] {
 					atomic.AddUint64(&inst.stats.itemsDropped, 1)
 					continue
 				}
 
-				valueSize := typeByteSize(itemType)
-				if pos+valueSize > n {
+				valueSize := protocol.TypeByteSize(itemType)
+				if pos+valueSize > len(remain) {
+					pos = pktStart
 					break
 				}
 
-				var value uint64
-				swapFlt := versionStr == flagV211 && (itemType == asfpTypeFloat16 || itemType == asfpTypeFloat32 || itemType == asfpTypeFloat64)
-
-				switch itemType {
-				case asfpTypeBoolean, asfpTypeBit:
-					value = uint64(buf[pos] & 1)
-				case asfpTypeInt8:
-					v := int8(buf[pos])
-					value = uint64(int64(v))
-				case asfpTypeUint8:
-					value = uint64(buf[pos])
-				case asfpTypeInt16:
-					v := int16(binary.BigEndian.Uint16(buf[pos : pos+2]))
-					value = uint64(int64(v))
-				case asfpTypeUint16:
-					value = uint64(binary.BigEndian.Uint16(buf[pos : pos+2]))
-				case asfpTypeInt32:
-					v := int32(binary.BigEndian.Uint32(buf[pos : pos+4]))
-					value = uint64(int64(v))
-				case asfpTypeUint32:
-					value = uint64(binary.BigEndian.Uint32(buf[pos : pos+4]))
-				case asfpTypeInt64, asfpTypeUint64:
-					value = binary.BigEndian.Uint64(buf[pos : pos+8])
-				case asfpTypeFloat16:
-					bits := binary.BigEndian.Uint16(buf[pos : pos+2])
-					if swapFlt {
-						bits = bits<<8 | bits>>8 // swap BE to LE for native shm storage
-					}
-					value = uint64(float16ToFloat32(bits))
-				case asfpTypeFloat32:
-					bits := binary.BigEndian.Uint32(buf[pos : pos+4])
-					if swapFlt {
-						bits = bits>>24 | (bits>>8)&0xFF00 | (bits<<8)&0xFF0000 | bits<<24
-					}
-					value = uint64(math.Float32bits(math.Float32frombits(bits)))
-				case asfpTypeFloat64:
-					bits := binary.BigEndian.Uint64(buf[pos : pos+8])
-					if swapFlt {
-						bits = bits>>56 | (bits>>40)&0xFF00 | (bits>>24)&0xFF0000 | (bits>>8)&0xFF000000 |
-							(bits<<8)&0xFF00000000 | (bits<<24)&0xFF0000000000 | (bits<<40)&0xFF000000000000 | bits<<56
-					}
-					value = math.Float64bits(math.Float64frombits(bits))
-				}
+				value, valueSize := decodePacketValue(remain, pos, itemType, versionStr)
 				pos += valueSize
 
 				shmID, ok := inst.addrMap[itemKey]
@@ -499,12 +401,16 @@ func parseASFP2Data(conn net.Conn, inst *instanceState, shmData []byte) {
 					atomic.AddUint64(&inst.stats.itemsWritten, 1)
 				} else {
 					atomic.AddUint64(&inst.stats.itemsDropped, 1)
-					if !ok {
-					}
 				}
+			}
+
+			// Check if data loop exited early (partial item)
+			if pos == pktStart {
+				break
 			}
 			atomic.AddUint64(&inst.stats.packetsReceived, 1)
 		}
+		remain = remain[pos:]
 	}
 }
 
@@ -518,19 +424,70 @@ func float16ToFloat32(h uint16) uint32 {
 		if m == 0 {
 			return s << 31
 		}
-		// Subnormal
 		for (m & 0x400) == 0 {
 			m <<= 1
 			e++
 		}
 		m &= 0x3FF
-		e = 1
+		// e holds shift count. biased float32 exponent = 113 - e
+		// (subnormal effective = -14 - e, bias 127 → -14 - e + 127 = 113 - e)
+		e = 113 - e
+		return (s << 31) | (e << 23) | (m << 13)
 	} else if e == 0x1F {
 		return (s << 31) | (0xFF << 23) | (m << 13)
 	}
 
 	e = e - 15 + 127
 	return (s << 31) | (e << 23) | (m << 13)
+}
+
+func decodePacketValue(buf []byte, pos int, itemType uint8, versionStr string) (uint64, int) {
+	valueSize := protocol.TypeByteSize(itemType)
+	isV211 := versionStr == protocol.FlagV211
+
+	var value uint64
+	switch itemType {
+	case protocol.TypeBoolean, protocol.TypeBit:
+		value = uint64(buf[pos] & 1)
+	case protocol.TypeInt8:
+		v := int8(buf[pos])
+		value = uint64(int64(v))
+	case protocol.TypeUint8:
+		value = uint64(buf[pos])
+	case protocol.TypeInt16:
+		v := int16(binary.BigEndian.Uint16(buf[pos : pos+2]))
+		value = uint64(int64(v))
+	case protocol.TypeUint16:
+		value = uint64(binary.BigEndian.Uint16(buf[pos : pos+2]))
+	case protocol.TypeInt32:
+		v := int32(binary.BigEndian.Uint32(buf[pos : pos+4]))
+		value = uint64(int64(v))
+	case protocol.TypeUint32:
+		value = uint64(binary.BigEndian.Uint32(buf[pos : pos+4]))
+	case protocol.TypeInt64, protocol.TypeUint64:
+		value = binary.BigEndian.Uint64(buf[pos : pos+8])
+	case protocol.TypeFloat16:
+		if isV211 {
+			bits := binary.BigEndian.Uint16(buf[pos : pos+2])
+			value = uint64(float16ToFloat32(bits))
+		} else {
+			bits := binary.NativeEndian.Uint16(buf[pos : pos+2])
+			value = uint64(float16ToFloat32(bits))
+		}
+	case protocol.TypeFloat32:
+		if isV211 {
+			value = uint64(binary.BigEndian.Uint32(buf[pos : pos+4]))
+		} else {
+			value = uint64(binary.NativeEndian.Uint32(buf[pos : pos+4]))
+		}
+	case protocol.TypeFloat64:
+		if isV211 {
+			value = binary.BigEndian.Uint64(buf[pos : pos+8])
+		} else {
+			value = binary.NativeEndian.Uint64(buf[pos : pos+8])
+		}
+	}
+	return value, valueSize
 }
 
 // ──────────────────────────────────────────────
@@ -544,7 +501,7 @@ func writeBlock(shmData []byte, shmID int, dataType uint8, timestamp uint64, val
 	}
 
 	// Verify magic
-	magic := binary.BigEndian.Uint32(shmData[off+shm.BlkOffMagic:])
+	magic := binary.NativeEndian.Uint32(shmData[off+shm.BlkOffMagic:])
 	if magic != shm.Magic {
 		return
 	}
@@ -552,20 +509,20 @@ func writeBlock(shmData []byte, shmID int, dataType uint8, timestamp uint64, val
 	// Activate block on first write
 	if shmData[off+shm.BlkOffState] == 0 {
 		shmData[off+shm.BlkOffState] = 1
-		binary.BigEndian.PutUint64(shmData[off+shm.BlkOffWriteSeq:], 0)
+		binary.NativeEndian.PutUint64(shmData[off+shm.BlkOffWriteSeq:], 0)
 	}
 
 	// Seqlock: increment to odd
-	writeSeq := binary.BigEndian.Uint64(shmData[off+shm.BlkOffWriteSeq:])
-	binary.BigEndian.PutUint64(shmData[off+shm.BlkOffWriteSeq:], writeSeq+1)
+	writeSeq := binary.NativeEndian.Uint64(shmData[off+shm.BlkOffWriteSeq:])
+	binary.NativeEndian.PutUint64(shmData[off+shm.BlkOffWriteSeq:], writeSeq+1)
 
 	// Write data
-	binary.BigEndian.PutUint64(shmData[off+shm.BlkOffTimestamp:], timestamp)
+	binary.NativeEndian.PutUint64(shmData[off+shm.BlkOffTimestamp:], timestamp)
 	shmData[off+shm.BlkOffType] = dataType
-	binary.BigEndian.PutUint64(shmData[off+shm.BlkOffValue:], value)
+	binary.NativeEndian.PutUint64(shmData[off+shm.BlkOffValue:], value)
 
 	// Seqlock: increment to even
-	binary.BigEndian.PutUint64(shmData[off+shm.BlkOffWriteSeq:], writeSeq+2)
+	binary.NativeEndian.PutUint64(shmData[off+shm.BlkOffWriteSeq:], writeSeq+2)
 }
 
 // ──────────────────────────────────────────────
@@ -577,7 +534,7 @@ func startHandler(ctx context.Context, req *mcp.CallToolRequest, input struct{})
 		return newError("ALREADY_RUNNING: start has already been called and service is running, call stop first"), nil, nil
 	}
 
-	instances, configPath, err := loadConfig(req)
+	instances, _, err := loadConfig(req)
 	if err != nil {
 		return newError(err.Error()), nil, nil
 	}
@@ -592,14 +549,10 @@ func startHandler(ctx context.Context, req *mcp.CallToolRequest, input struct{})
 		return newResult("success"), nil, nil
 	}
 
-	shmData, shmFd, err := attachShm(configPath)
+	shmData, shmFd, err := attachShm()
 	if err != nil {
 		return newError(err.Error()), nil, nil
 	}
-
-	state.mu.Lock()
-	state.shmData = shmData
-	state.shmFd = shmFd
 
 	var instancesState []*instanceState
 	var lastErr string
@@ -631,16 +584,24 @@ func startHandler(ctx context.Context, req *mcp.CallToolRequest, input struct{})
 		for _, ist := range instancesState {
 			ist.listener.Close()
 		}
-		state.mu.Unlock()
+		unix.Munmap(shmData)
+		unix.Close(shmFd)
 		return newError(lastErr), nil, nil
 	}
 
 	// Start goroutines
 	for _, ist := range instancesState {
-		go runServer(ist, shmData)
+		ist.wg.Add(1)
+		go func() {
+			defer ist.wg.Done()
+			runServer(ist, shmData)
+		}()
 	}
 
+	state.mu.Lock()
 	state.instances = instancesState
+	state.shmData = shmData
+	state.shmFd = shmFd
 	state.started.Store(true)
 	state.mu.Unlock()
 
@@ -675,6 +636,7 @@ func stopHandler(ctx context.Context, req *mcp.CallToolRequest, input struct{}) 
 	for _, ist := range state.instances {
 		close(ist.quit)
 		ist.listener.Close()
+		ist.wg.Wait()
 	}
 	state.instances = nil
 
@@ -730,7 +692,10 @@ func statusHandler(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallTool
 		result = append(result, s)
 	}
 
-	jsonData, _ := json.Marshal(map[string]any{"instances": result})
+	jsonData, err := json.Marshal(map[string]any{"instances": result})
+	if err != nil {
+		return newError("INTERNAL_ERROR: failed to marshal status: " + err.Error()), nil
+	}
 	return newResult(string(jsonData)), nil
 }
 

@@ -9,6 +9,7 @@ import sys
 import struct
 import time
 import json
+import tempfile
 import subprocess
 
 import pytest  # type: ignore
@@ -31,18 +32,18 @@ from shm_helpers import shm_path, read_shm_block  # noqa: E402
 # ──────────────────────────────────────────────
 
 def _value_u16(value_int):
-    """Extract UINT16 from 8-byte big-endian value."""
-    return struct.unpack(">H", struct.pack(">Q", value_int)[6:8])[0]
+    """Extract UINT16 from 8-byte native-endian value."""
+    return struct.unpack("=H", struct.pack("=Q", value_int)[:2])[0]
 
 
 def _value_f32(value_int):
-    """Extract FLOAT32 from 8-byte value (native byte order, all versions)."""
-    return struct.unpack("f", struct.pack(">Q", value_int)[4:8])[0]
+    """Extract FLOAT32 from 8-byte native-endian value."""
+    return struct.unpack("f", struct.pack("=I", value_int & 0xFFFFFFFF))[0]
 
 
 def _value_u64(value_int):
-    """Extract UINT64 from 8-byte value."""
-    return struct.unpack(">Q", struct.pack(">Q", value_int))[0]
+    """Extract UINT64 from 8-byte native-endian value."""
+    return struct.unpack("=Q", struct.pack("=Q", value_int))[0]
 
 
 # ──────────────────────────────────────────────
@@ -555,3 +556,59 @@ class TestReceive:
         assert 100.0 <= _value_f32(b1["value"]) <= 200.0
 
         start_asfp2_server.call_tool("stop", {})
+
+
+# ──────────────────────────────────────────────
+#  Malformed config tests — graceful error, not panic
+# ──────────────────────────────────────────────
+
+
+def _create_shm_with_config(shm_mgr_client, config_dict, instance_id):
+    fd, config_path = tempfile.mkstemp(suffix=".json", prefix="malformed_")
+    with os.fdopen(fd, "w") as f:
+        json.dump(config_dict, f)
+    resp = shm_mgr_client.call_tool(
+        "create_shm", {"instance_id": instance_id},
+        on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+    )
+    os.unlink(config_path)
+    if resp["result"].get("isError", False):
+        return resp["result"]["content"][0]["text"]
+    return None
+
+
+def test_malformed_writer_not_array(shm_mgr_client, isolated_shm):
+    iid = "malformed_writer"
+    isolated_shm(iid)
+    err = _create_shm_with_config(shm_mgr_client, {
+        "c4_shm_manager": {"writer": ["c4_asfp2_server"], "reader": ["c4_asfp2_client"]},
+        "c4_asfp2_server": "not_an_array",
+    }, iid)
+    assert err is not None, "Expected error for non-array writer section"
+    assert "CONFIG_PARSE_ERROR" in err
+
+
+def test_malformed_instance_not_object(shm_mgr_client, isolated_shm):
+    iid = "malformed_inst"
+    isolated_shm(iid)
+    err = _create_shm_with_config(shm_mgr_client, {
+        "c4_shm_manager": {"writer": ["c4_asfp2_server"], "reader": ["c4_asfp2_client"]},
+        "c4_asfp2_server": ["this_is_a_string_not_an_object"],
+    }, iid)
+    assert err is not None, "Expected error for non-object instance"
+    assert "CONFIG_PARSE_ERROR" in err
+
+
+def test_malformed_point_not_object(shm_mgr_client, isolated_shm):
+    iid = "malformed_point"
+    isolated_shm(iid)
+    err = _create_shm_with_config(shm_mgr_client, {
+        "c4_shm_manager": {"writer": ["c4_asfp2_server"], "reader": ["c4_asfp2_client"]},
+        "c4_asfp2_server": [{
+            "id": "rx", "port": 9800, "t1": 0, "t2": 0,
+            "forward_kack": 255, "inverse_keep": 0,
+            "points": ["not_an_object"],
+        }],
+    }, iid)
+    assert err is not None, "Expected error for non-object point"
+    assert "CONFIG_PARSE_ERROR" in err

@@ -6,9 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	
 	"net"
 	"os"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -18,93 +18,37 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"golang.org/x/sys/unix"
 
-	"c4/mcp/c4_asfp2_client/internal/shm"
+	"c4/mcp/internal/shm"
+	"c4/mcp/internal/protocol"
 )
 
 // ──────────────────────────────────────────────
 //  Configuration types
 // ──────────────────────────────────────────────
 
-type pointCfg struct {
+type clientPoint struct {
 	Key   string `json:"key"`
 	Addr  uint32 `json:"addr"`
 	ShmID int    `json:"shm_id"`
 }
 
-type instanceCfg struct {
-	Name        string     `json:"name"`
-	IP          string     `json:"ip"`
-	Port        int        `json:"port"`
-	T0          int        `json:"t0"`
-	T1          int        `json:"t1"`
-	T2          int        `json:"t2"`
-	Smart       int        `json:"smart"`
-	ForwardKack uint8      `json:"forward_kack"`
-	InverseKeep uint8      `json:"inverse_keep"`
-	Timer       int        `json:"timer"`
-	Points      []pointCfg `json:"points"`
-}
-
-type clientConfig struct {
-	C4ASFP2Client []instanceCfg `json:"c4_asfp2_client"`
+type clientInstance struct {
+	Name        string        `json:"name"`
+	IP          string        `json:"ip"`
+	Port        int           `json:"port"`
+	T0          int           `json:"t0"`
+	T1          int           `json:"t1"`
+	T2          int           `json:"t2"`
+	Smart       int           `json:"smart"`
+	ForwardKack uint8         `json:"forward_kack"`
+	InverseKeep uint8         `json:"inverse_keep"`
+	Timer       int           `json:"timer"`
+	Points      []clientPoint `json:"points"`
 }
 
 // ──────────────────────────────────────────────
-//  Protocol constants
+//  Protocol constants (shared via c4/mcp/internal/protocol)
 // ──────────────────────────────────────────────
-
-const (
-	// version flag
-	flagV211 = "ASFPV211"
-
-	// data types
-	asfpTypeBoolean        uint8 = 0
-	asfpTypeInt8           uint8 = 1
-	asfpTypeUint8          uint8 = 2
-	asfpTypeInt16          uint8 = 3
-	asfpTypeUint16         uint8 = 4
-	asfpTypeInt32          uint8 = 5
-	asfpTypeUint32         uint8 = 6
-	asfpTypeInt64          uint8 = 7
-	asfpTypeUint64         uint8 = 8
-	asfpTypeFloat16        uint8 = 9
-	asfpTypeFloat32        uint8 = 10
-	asfpTypeFloat64        uint8 = 11
-	asfpTypeString         uint8 = 12
-	asfpTypeBlob           uint8 = 13
-	asfpTypeBitstring      uint8 = 14
-	asfpTypeBit            uint8 = 15
-	asfpTypeLargeDataBlock uint8 = 16
-
-	// attribute bits
-	attrKeySequence   = 0x00000001
-	attrSameDataType  = 0x00000002
-	attrSameTimestamp = 0x00000004
-)
-
-var variableTypes = map[uint8]bool{
-	asfpTypeString:         true,
-	asfpTypeBlob:           true,
-	asfpTypeBitstring:      true,
-	asfpTypeLargeDataBlock: true,
-}
-
-func typeByteSize(t uint8) int {
-	switch t {
-	case asfpTypeBoolean, asfpTypeBit:
-		return 1
-	case asfpTypeInt8, asfpTypeUint8:
-		return 1
-	case asfpTypeInt16, asfpTypeUint16, asfpTypeFloat16:
-		return 2
-	case asfpTypeInt32, asfpTypeUint32, asfpTypeFloat32:
-		return 4
-	case asfpTypeInt64, asfpTypeUint64, asfpTypeFloat64:
-		return 8
-	default:
-		return 0
-	}
-}
 
 // ──────────────────────────────────────────────
 //  Float conversion helpers
@@ -154,13 +98,20 @@ type instanceStats struct {
 }
 
 type instanceState struct {
-	cfg      instanceCfg
-	conn     net.Conn
-	quit     chan struct{}
-	shmIDs   map[int]uint32 // shmID → addr
-	lastSeen map[int]uint64 // shmID → last write_seq
-	stats    instanceStats
-	mu       sync.Mutex // guards conn
+	cfg         clientInstance
+	conn        net.Conn
+	quit        chan struct{}
+	shmIDs      map[int]uint32 // shmID → addr
+	sortedPts   []shmIDAddr    // addr-sorted iteration order
+	lastSeen    map[int]uint64 // shmID → last write_seq
+	stats       instanceStats
+	mu          sync.Mutex     // guards conn
+	wg          sync.WaitGroup // tracks runSender goroutine
+}
+
+type shmIDAddr struct {
+	shmID int
+	addr  uint32
 }
 
 type clientState struct {
@@ -177,7 +128,7 @@ var state = &clientState{}
 //  Config loading
 // ──────────────────────────────────────────────
 
-func loadConfig(req *mcp.CallToolRequest) ([]instanceCfg, error) {
+func loadConfig(req *mcp.CallToolRequest) ([]clientInstance, error) {
 	rootRes, err := req.Session.ListRoots(context.Background(), nil)
 	if err != nil || rootRes == nil || len(rootRes.Roots) == 0 {
 		return nil, fmt.Errorf("CONFIG_PATH_MISSING: roots/list protocol call failed, Agent may not be responding")
@@ -204,7 +155,7 @@ func loadConfig(req *mcp.CallToolRequest) ([]instanceCfg, error) {
 	}
 
 	rawJSON, _ := json.Marshal(section)
-	var instances []instanceCfg
+	var instances []clientInstance
 	if err := json.Unmarshal(rawJSON, &instances); err != nil {
 		return nil, fmt.Errorf("CONFIG_PARSE_ERROR: failed to parse 'c4_asfp2_client' section: %v", err)
 	}
@@ -212,7 +163,7 @@ func loadConfig(req *mcp.CallToolRequest) ([]instanceCfg, error) {
 	return instances, nil
 }
 
-func validateConfig(instances []instanceCfg) error {
+func validateConfig(instances []clientInstance) error {
 	for _, inst := range instances {
 		if inst.IP == "" {
 			return fmt.Errorf("CONFIG_PARSE_ERROR: instance '%s' has empty ip field", inst.Name)
@@ -221,8 +172,8 @@ func validateConfig(instances []instanceCfg) error {
 			return fmt.Errorf("CONFIG_PARSE_ERROR: instance '%s' has invalid port %d", inst.Name, inst.Port)
 		}
 		for _, pt := range inst.Points {
-			if pt.Addr > 16777215 {
-				return fmt.Errorf("CONFIG_PARSE_ERROR: addr %d exceeds max 16777215", pt.Addr)
+			if pt.Addr > protocol.MaxAddr {
+				return fmt.Errorf("CONFIG_PARSE_ERROR: addr %d exceeds max protocol.MaxAddr", pt.Addr)
 			}
 			if pt.ShmID == 0 {
 				return fmt.Errorf("SHM_ID_NOT_ASSIGNED: point '%s' has shm_id=0, must be assigned by c4_shm_manager first", pt.Key)
@@ -264,13 +215,13 @@ func attachShm() ([]byte, int, error) {
 		unix.Close(fd)
 		return nil, 0, fmt.Errorf("SHM_OPEN_FAILED: mmap header failed: %v", err)
 	}
-	magic := binary.BigEndian.Uint32(hdrData[0:])
+	magic := binary.NativeEndian.Uint32(hdrData[0:])
 	if magic != shm.Magic {
 		unix.Munmap(hdrData)
 		unix.Close(fd)
 		return nil, 0, fmt.Errorf("SHM_CORRUPTED: header magic is invalid (got 0x%08X, expected 0x%08X)", magic, shm.Magic)
 	}
-	maxPoints := binary.BigEndian.Uint32(hdrData[shm.HdrOffMaxPoints:])
+	maxPoints := binary.NativeEndian.Uint32(hdrData[shm.HdrOffMaxPoints:])
 	unix.Munmap(hdrData)
 
 	totalSize := int64(int(maxPoints)+1) * shm.BlockSize
@@ -296,7 +247,7 @@ func readBlock(shmData []byte, shmID int) (uint8, uint64, uint64, uint64, bool) 
 	}
 
 	// Check magic
-	magic := binary.BigEndian.Uint32(shmData[off+shm.BlkOffMagic:])
+	magic := binary.NativeEndian.Uint32(shmData[off+shm.BlkOffMagic:])
 	if magic != shm.Magic {
 		return 0, 0, 0, 0, false
 	}
@@ -306,21 +257,24 @@ func readBlock(shmData []byte, shmID int) (uint8, uint64, uint64, uint64, bool) 
 		return 0, 0, 0, 0, false
 	}
 
-	for {
-		s1 := binary.BigEndian.Uint64(shmData[off+shm.BlkOffWriteSeq:])
+	for i := 0; i < 100; i++ {
+		s1 := binary.NativeEndian.Uint64(shmData[off+shm.BlkOffWriteSeq:])
 		if s1&1 != 0 {
 			// Writer in progress, skip
 			return 0, 0, 0, 0, false
 		}
 		dt := shmData[off+shm.BlkOffType]
-		ts := binary.BigEndian.Uint64(shmData[off+shm.BlkOffTimestamp:])
-		val := binary.BigEndian.Uint64(shmData[off+shm.BlkOffValue:])
-		s2 := binary.BigEndian.Uint64(shmData[off+shm.BlkOffWriteSeq:])
+		ts := binary.NativeEndian.Uint64(shmData[off+shm.BlkOffTimestamp:])
+		val := binary.NativeEndian.Uint64(shmData[off+shm.BlkOffValue:])
+		s2 := binary.NativeEndian.Uint64(shmData[off+shm.BlkOffWriteSeq:])
 		if s1 == s2 {
 			return dt, ts, val, s1, true
 		}
-		// retry
+		if i > 10 {
+			runtime.Gosched()
+		}
 	}
+	return 0, 0, 0, 0, false
 }
 
 // ──────────────────────────────────────────────
@@ -329,60 +283,59 @@ func readBlock(shmData []byte, shmID int) (uint8, uint64, uint64, uint64, bool) 
 
 // shmItem represents a data item read from shared memory, ready for encoding.
 type shmItem struct {
+	shmID     int
 	addr      uint32
 	dataType  uint8
 	timestamp uint64
 	value     uint64
+	seq       uint64
 }
 
 // encodeASFPV211 builds a single ASFPV211 data packet for a subgroup of items.
 // The subgroup is guaranteed to have consecutive addrs (KEY_SEQUENCE=1).
 // Returns the encoded byte slice.
-func encodeASFPV211(items []shmItem, smart int) []byte {
-	count := len(items)
-	if count == 0 {
-		return nil
-	}
-
-	// Apply smart timestamp zeroing
+func detectAttributes(items []shmItem, smart int) (attr uint32, hasKey, hasType, hasTs bool) {
 	for i := range items {
 		if smart == 1 {
 			items[i].timestamp = (items[i].timestamp / 1000) * 1000
 		}
 	}
 
-	// Detect attribute flags for this subgroup
-	var attr uint32 = attrKeySequence // guaranteed by subgrouping
+	attr = protocol.AttrKeySequence
 
-	// SAME_DATA_TYPE: all types identical
 	sameDataType := true
-	for i := 1; i < count; i++ {
+	for i := 1; i < len(items); i++ {
 		if items[i].dataType != items[0].dataType {
 			sameDataType = false
 			break
 		}
 	}
 	if sameDataType {
-		attr |= attrSameDataType
+		attr |= protocol.AttrSameDataType
 	}
 
-	// SAME_TIMESTAMP: all timestamps identical (after smart zeroing)
 	sameTimestamp := true
-	for i := 1; i < count; i++ {
+	for i := 1; i < len(items); i++ {
 		if items[i].timestamp != items[0].timestamp {
 			sameTimestamp = false
 			break
 		}
 	}
 	if sameTimestamp {
-		attr |= attrSameTimestamp
+		attr |= protocol.AttrSameTimestamp
 	}
 
-	hasKey := (attr & attrKeySequence) != 0
-	hasType := (attr & attrSameDataType) != 0
-	hasTs := (attr & attrSameTimestamp) != 0
+	return attr, true, (attr&protocol.AttrSameDataType) != 0, (attr&protocol.AttrSameTimestamp) != 0
+}
 
-	// Calculate sizes
+func encodeASFPV211(items []shmItem, smart int) []byte {
+	count := len(items)
+	if count == 0 {
+		return nil
+	}
+
+	attr, hasKey, hasType, hasTs := detectAttributes(items, smart)
+
 	mutableSize := 0
 	if hasType {
 		mutableSize += 1
@@ -397,7 +350,7 @@ func encodeASFPV211(items []shmItem, smart int) []byte {
 	dataType := items[0].dataType
 
 	// Check BIT compression: all 3 flags on + type is BOOLEAN or BIT
-	bitCompression := hasKey && hasType && hasTs && (dataType == asfpTypeBoolean || dataType == asfpTypeBit)
+	bitCompression := hasKey && hasType && hasTs && (dataType == protocol.TypeBoolean || dataType == protocol.TypeBit)
 
 	var dataSize int
 	if bitCompression {
@@ -413,7 +366,7 @@ func encodeASFPV211(items []shmItem, smart int) []byte {
 			if !hasTs {
 				dataSize += 8 // timestamp
 			}
-			dataSize += typeByteSize(items[i].dataType)
+			dataSize += protocol.TypeByteSize(items[i].dataType)
 		}
 	}
 
@@ -424,7 +377,7 @@ func encodeASFPV211(items []shmItem, smart int) []byte {
 	buf := make([]byte, totalLength)
 
 	// ── Header (16 bytes) ──
-	copy(buf[0:8], flagV211)
+	copy(buf[0:8], protocol.FlagV211)
 	binary.BigEndian.PutUint16(buf[8:10], uint16(lengthLow))
 	binary.BigEndian.PutUint16(buf[10:12], uint16(count))
 	// Attribute field at offset 12: (attrHigh << 16) | attr (v2.1.x format)
@@ -480,34 +433,34 @@ func encodeASFPV211(items []shmItem, smart int) []byte {
 			}
 
 			// Value encoding (network/big-endian for all types)
-			valueSize := typeByteSize(item.dataType)
+			valueSize := protocol.TypeByteSize(item.dataType)
 			switch item.dataType {
-			case asfpTypeBoolean, asfpTypeBit:
+			case protocol.TypeBoolean, protocol.TypeBit:
 				buf[pos] = byte(item.value & 1)
-			case asfpTypeInt8:
+			case protocol.TypeInt8:
 				buf[pos] = byte(int8(item.value))
-			case asfpTypeUint8:
+			case protocol.TypeUint8:
 				buf[pos] = byte(item.value)
-			case asfpTypeInt16:
+			case protocol.TypeInt16:
 				binary.BigEndian.PutUint16(buf[pos:pos+2], uint16(int16(item.value)))
-			case asfpTypeUint16:
+			case protocol.TypeUint16:
 				binary.BigEndian.PutUint16(buf[pos:pos+2], uint16(item.value))
-			case asfpTypeFloat16:
+			case protocol.TypeFloat16:
 				// SHM stores float16 as float32 bit pattern; convert back to float16
 				f16 := float32ToFloat16(uint32(item.value))
 				binary.BigEndian.PutUint16(buf[pos:pos+2], f16)
-			case asfpTypeInt32:
+			case protocol.TypeInt32:
 				binary.BigEndian.PutUint32(buf[pos:pos+4], uint32(int32(item.value)))
-			case asfpTypeUint32:
+			case protocol.TypeUint32:
 				binary.BigEndian.PutUint32(buf[pos:pos+4], uint32(item.value))
-			case asfpTypeFloat32:
+			case protocol.TypeFloat32:
 				// SHM stores float32 bit pattern in native byte order as uint64.
 				// The uint32 numeric value contains the IEEE 754 bits in canonical form;
 				// binary.BigEndian.PutUint32 writes them in BE (network) order — correct for v211.
 				binary.BigEndian.PutUint32(buf[pos:pos+4], uint32(item.value))
-			case asfpTypeInt64, asfpTypeUint64:
+			case protocol.TypeInt64, protocol.TypeUint64:
 				binary.BigEndian.PutUint64(buf[pos:pos+8], item.value)
-			case asfpTypeFloat64:
+			case protocol.TypeFloat64:
 				binary.BigEndian.PutUint64(buf[pos:pos+8], item.value)
 			}
 			pos += valueSize
@@ -522,16 +475,17 @@ func encodeASFPV211(items []shmItem, smart int) []byte {
 // ──────────────────────────────────────────────
 
 func sendRound(ist *instanceState, shmData []byte) {
-	// 1. Scan all configured shm_ids → read blocks via seqlock
+	// 1. Scan all configured shm_ids in addr-sorted order → read blocks via seqlock
 	var items []shmItem
-	for shmID, addr := range ist.shmIDs {
+	for _, pt := range ist.sortedPts {
+		shmID, addr := pt.shmID, pt.addr
 		dt, ts, val, seq, ok := readBlock(shmData, shmID)
 		if !ok {
 			continue
 		}
 
 		// Skip non-numeric types
-		if variableTypes[dt] {
+		if protocol.VariableTypes[dt] {
 			atomic.AddUint64(&ist.stats.itemsSkipped, 1)
 			continue
 		}
@@ -543,10 +497,12 @@ func sendRound(ist *instanceState, shmData []byte) {
 		}
 
 		items = append(items, shmItem{
+			shmID:     shmID,
 			addr:      addr,
 			dataType:  dt,
 			timestamp: ts,
 			value:     val,
+			seq:       seq,
 		})
 	}
 
@@ -554,12 +510,7 @@ func sendRound(ist *instanceState, shmData []byte) {
 		return
 	}
 
-	// 2. Sort by addr ascending
-	sort.Slice(items, func(i, j int) bool {
-		return items[i].addr < items[j].addr
-	})
-
-	// 3. Split by addr continuity into subgroups
+	// 2. Split by addr continuity into subgroups
 	var subgroups [][]shmItem
 	current := []shmItem{items[0]}
 	for i := 1; i < len(items); i++ {
@@ -597,7 +548,12 @@ func sendRound(ist *instanceState, shmData []byte) {
 				ist.conn = nil
 			}
 			ist.mu.Unlock()
-			// Try reconnect
+			// Try reconnect only if not stopping
+			select {
+			case <-ist.quit:
+				return
+			default:
+			}
 			newConn, dialErr := net.Dial("tcp", fmt.Sprintf("%s:%d", ist.cfg.IP, ist.cfg.Port))
 			if dialErr == nil {
 				ist.mu.Lock()
@@ -614,13 +570,7 @@ func sendRound(ist *instanceState, shmData []byte) {
 
 	// 5. Update last_seen
 	for _, item := range items {
-		// Find shmID for this addr
-		for shmID, addr := range ist.shmIDs {
-			if addr == item.addr {
-				ist.lastSeen[shmID] = binary.BigEndian.Uint64(shmData[shmID*shm.BlockSize+shm.BlkOffWriteSeq:])
-				break
-			}
-		}
+		ist.lastSeen[item.shmID] = item.seq
 	}
 }
 
@@ -667,15 +617,10 @@ func startHandler(ctx context.Context, req *mcp.CallToolRequest, input struct{})
 		return newError(err.Error()), nil, nil
 	}
 
-	state.mu.Lock()
-	state.shmData = shmData
-	state.shmFd = shmFd
-
 	var instancesState []*instanceState
 	var lastErr string
 
 	for _, cfg := range instances {
-		// Build shmID → addr map
 		shmIDs := make(map[int]uint32)
 		lastSeen := make(map[int]uint64)
 		for _, pt := range cfg.Points {
@@ -685,7 +630,6 @@ func startHandler(ctx context.Context, req *mcp.CallToolRequest, input struct{})
 			}
 		}
 
-		// Verify all shm_ids are within range
 		for shmID := range shmIDs {
 			off := shmID * shm.BlockSize
 			if off+shm.BlockSize > len(shmData) {
@@ -697,7 +641,6 @@ func startHandler(ctx context.Context, req *mcp.CallToolRequest, input struct{})
 			break
 		}
 
-		// Connect to target
 		addr := fmt.Sprintf("%s:%d", cfg.IP, cfg.Port)
 		conn, err := net.Dial("tcp", addr)
 		if err != nil {
@@ -712,25 +655,35 @@ func startHandler(ctx context.Context, req *mcp.CallToolRequest, input struct{})
 			shmIDs:   shmIDs,
 			lastSeen: lastSeen,
 		}
+
+		for shmID, addr := range shmIDs {
+			ist.sortedPts = append(ist.sortedPts, shmIDAddr{shmID: shmID, addr: addr})
+		}
+		sort.Slice(ist.sortedPts, func(i, j int) bool { return ist.sortedPts[i].addr < ist.sortedPts[j].addr })
+
 		instancesState = append(instancesState, ist)
 	}
 
 	if lastErr != "" {
-		// Tear down: close all opened connections
 		for _, ist := range instancesState {
 			ist.conn.Close()
 		}
 		unix.Munmap(shmData)
 		unix.Close(shmFd)
-		state.mu.Unlock()
 		return newError(lastErr), nil, nil
 	}
 
-	// Start goroutines
 	for _, ist := range instancesState {
-		go runSender(ist, shmData)
+		ist.wg.Add(1)
+		go func() {
+			defer ist.wg.Done()
+			runSender(ist, shmData)
+		}()
 	}
 
+	state.mu.Lock()
+	state.shmData = shmData
+	state.shmFd = shmFd
 	state.instances = instancesState
 	state.started.Store(true)
 	state.mu.Unlock()
@@ -753,6 +706,7 @@ func stopHandler(ctx context.Context, req *mcp.CallToolRequest, input struct{}) 
 			ist.conn.Close()
 		}
 		ist.mu.Unlock()
+		ist.wg.Wait()
 	}
 	state.instances = nil
 
@@ -814,7 +768,10 @@ func statusHandler(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallTool
 		result = append(result, s)
 	}
 
-	jsonData, _ := json.Marshal(map[string]any{"instances": result})
+	jsonData, err := json.Marshal(map[string]any{"instances": result})
+	if err != nil {
+		return newError("INTERNAL_ERROR: failed to marshal status: " + err.Error()), nil
+	}
 	return newResult(string(jsonData)), nil
 }
 

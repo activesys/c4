@@ -6,6 +6,7 @@ from conftest import (
     _make_smart0_config, _make_3points_config,
     start_asfp2_server, start_asfp2_client, start_sut,
     run_asfp2_server, run_asfp2_client_inject, parse_asfp2_server_output,
+    send_fragmented_packet,
 )
 
 
@@ -149,7 +150,8 @@ class TestSend:
 
             sut.call_tool("stop", {})
             vp2, rp2, rf2 = run_asfp2_server(9810)
-            sut.call_tool("start", {}, on_request=None)
+            time.sleep(0.5)  # let verify server start listening
+            start_sut(sut, config_path)
             time.sleep(5)  # t0 reconnect + data
             run_asfp2_client_inject(9710, 1000, 1001, 4, val_begin=300, val_end=400)
             time.sleep(WAIT_SLOW)
@@ -185,7 +187,8 @@ class TestSend:
 
             sut.call_tool("stop", {})
             vp2, rp2, rf2 = run_asfp2_server(9811)
-            sut.call_tool("start", {}, on_request=None)
+            time.sleep(0.5)  # let verify server start listening
+            start_sut(sut, config_path)
             time.sleep(12)  # KeepAlive: t1=2s + T2=1s + t0=5s + data
             run_asfp2_client_inject(9711, 1000, 1001, 4, val_begin=300, val_end=400)
             time.sleep(WAIT_SLOW)
@@ -220,3 +223,21 @@ class TestSend:
         srv.call_tool("stop", {})
         sut.call_tool("stop", {})
         assert len(recs2) == 0, f"Expected 0 on round 2, got {len(recs2)}"
+
+    # ── TC15: TCP fragmented packet ──
+    def test_tc15_fragmented_packet(self, prepare_environment, isolated_shm):
+        _, sut, srv, vp, rp, rf, port, wait = self._setup(
+            prepare_environment, isolated_shm, "tc15", _make_3points_config, 9714
+        )
+        send_fragmented_packet(
+            port=port,
+            addr_start=1000,
+            count=3,
+            data_type=4,
+            val_start=100,
+            ts=int(time.time() * 1000),
+            split_at=30,
+        )
+        time.sleep(wait)
+        recs = self._check(vp, rp, rf, 3, sut, srv)
+        assert len(recs) == 3, f"Expected 3 records after fragmented packet, got {len(recs)}"
