@@ -231,11 +231,11 @@ sequenceDiagram
 
     A->>S: stop()
     S->>S: 关闭所有 listener，销毁实例
+    S->>S: munmap + close shm
     S-->>A: "success"
     A->>SM: adjust_shm()
     SM-->>A: 完成
     A->>S: start()
-    S->>S: munmap + close shm
     S->>S: shm_open + mmap
     S->>S: 加载配置 → 启动所有实例
     S-->>A: "success"
