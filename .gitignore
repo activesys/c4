@@ -51,3 +51,4 @@ mcp/*/c4_shm_manager
 __pycache__/
 .pytest_cache/
 *.pyc
+mcp/*/c4_asfp2_server

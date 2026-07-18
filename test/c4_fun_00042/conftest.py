@@ -1,23 +1,30 @@
 import os
 import sys
-import struct
 import subprocess
-import time
-import json
-import socket
-import tempfile
-
-import pytest  # type: ignore
+import importlib.util
 
 # Reuse c4_fun_00057 fixtures
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../c4_fun_00057"))
-from conftest import (  # noqa: E402
-    prepare_environment,
-    start_asfp2_server,
-    isolated_shm,
-    _roots_callback,
-)
-from shm_helpers import read_shm_block, shm_path, read_shm_header  # noqa: E402
+_src_path = os.path.join(os.path.dirname(__file__), "../c4_fun_00057/conftest.py")
+_spec = importlib.util.spec_from_file_location("c4_fun_00057_conftest", _src_path)
+_c57 = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_c57)
+
+prepare_environment = _c57.prepare_environment
+start_asfp2_server = _c57.start_asfp2_server
+isolated_shm = _c57.isolated_shm
+_roots_callback = _c57._roots_callback
+shm_mgr_client = _c57.shm_mgr_client
+mcp = _c57.mcp
+
+# Reuse shm_helpers from c4_fun_00057
+_shm_path = os.path.join(os.path.dirname(__file__), "../c4_fun_00057/shm_helpers.py")
+_shm_spec = importlib.util.spec_from_file_location("shm_helpers", _shm_path)
+_shm = importlib.util.module_from_spec(_shm_spec)
+_shm_spec.loader.exec_module(_shm)
+
+read_shm_block = _shm.read_shm_block
+shm_path = _shm.shm_path
+read_shm_header = _shm.read_shm_header
 
 # asfp2_client binary path constant
 ASFP2_CLIENT = "/usr/local/bin/asfp2_client"
@@ -41,9 +48,9 @@ def _run_asfp2_client(
     server_ip="127.0.0.1",
     port=9000,
     times=1,
-    packet_size=1,
+    packet_size=0,
     key_begin=1000,
-    key_end=1001,
+    key_end=1002,
     data_begin=100,
     data_end=200,
     data_type=4,

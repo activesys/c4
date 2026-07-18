@@ -36,7 +36,7 @@ def _value_u16(value_int):
 
 
 def _value_f32(value_int):
-    """Extract FLOAT32 from 8-byte value (native-endian for v2.0.0/v2.1.0)."""
+    """Extract FLOAT32 from 8-byte value (native byte order, all versions)."""
     return struct.unpack("f", struct.pack(">Q", value_int)[4:8])[0]
 
 
@@ -175,7 +175,7 @@ class TestReceive:
         # TC3 does not set -z (uses default max).  Use -z 0 (asfp2_client treats 0 as max).
         rc, _, _ = _run_asfp2_client(
             port=9200, data_type=4, packet_size=0,
-            key_begin=1000, key_end=1004,
+            key_begin=1000, key_end=1005,
             data_begin=100, data_end=500,
         )
         assert rc == 0
@@ -231,7 +231,7 @@ class TestReceive:
 
         rc, _, _ = _run_asfp2_client(
             port=9400, data_type=0, packet_size=5,
-            key_begin=1000, key_end=1004,
+            key_begin=1000, key_end=1005,
         )
         assert rc == 0
         time.sleep(0.5)
@@ -260,7 +260,7 @@ class TestReceive:
 
         rc, _, _ = _run_asfp2_client(
             port=9500, data_type=15, packet_size=5,
-            key_begin=1000, key_end=1004,
+            key_begin=1000, key_end=1005,
         )
         assert rc == 0
         time.sleep(0.5)
@@ -389,9 +389,9 @@ class TestReceive:
 
         with ThreadPoolExecutor(max_workers=3) as executor:
             futures = [
-                executor.submit(run_client, 9900, 1000, 1001, 100, 200),
-                executor.submit(run_client, 9900, 2000, 2001, 300, 400),
-                executor.submit(run_client, 9900, 3000, 3001, 500, 600),
+                executor.submit(run_client, 9900, 1000, 1002, 100, 200),
+                executor.submit(run_client, 9900, 2000, 2002, 300, 400),
+                executor.submit(run_client, 9900, 3000, 3002, 500, 600),
             ]
             for f in futures:
                 rc, _, _ = f.result()
@@ -473,5 +473,85 @@ class TestReceive:
         b1 = _assert_block_written(shm, 1, 8)
         _assert_block_written(shm, 2, 8)
         assert 100 <= _value_u64(b1["value"]) <= 200
+
+        start_asfp2_server.call_tool("pause", {})
+
+    # ── TC13: v2.1.1 整数类型 — 基本解析 ──
+
+    def test_tc13_v211_uint16(self, prepare_environment, start_asfp2_server, isolated_shm):
+        iid = "test_tc13"
+        isolated_shm(iid)
+
+        config = _standard_config(10300)
+        config_path, iid = prepare_environment(config, iid)
+
+        resp = start_asfp2_server.call_tool(
+            "start", {},
+            on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+        )
+        assert resp["result"].get("isError", False) is False
+        assert resp["result"]["content"][0]["text"] == "success"
+
+        rc, _, _ = _run_asfp2_client(port=10300, data_type=4, protocol=8)
+        assert rc == 0
+        time.sleep(0.5)
+
+        shm = shm_path(iid)
+        _assert_block_written(shm, 1, 4)
+        _assert_block_written(shm, 2, 4)
+
+        start_asfp2_server.call_tool("pause", {})
+
+    # ── TC14: v2.1.1 FLOAT32 网络序 ──
+
+    def test_tc14_v211_float32(self, prepare_environment, start_asfp2_server, isolated_shm):
+        iid = "test_tc14"
+        isolated_shm(iid)
+
+        config = _standard_config(10400)
+        config_path, iid = prepare_environment(config, iid)
+
+        resp = start_asfp2_server.call_tool(
+            "start", {},
+            on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+        )
+        assert resp["result"].get("isError", False) is False
+        assert resp["result"]["content"][0]["text"] == "success"
+
+        rc, _, _ = _run_asfp2_client(port=10400, data_type=10, protocol=8)
+        assert rc == 0
+        time.sleep(0.5)
+
+        shm = shm_path(iid)
+        b1 = _assert_block_written(shm, 1, 10)
+        _assert_block_written(shm, 2, 10)
+        assert 100.0 <= _value_f32(b1["value"]) <= 200.0
+
+        start_asfp2_server.call_tool("pause", {})
+
+    # ── TC15: v2.1.0 FLOAT32 ──
+
+    def test_tc15_v210_float32(self, prepare_environment, start_asfp2_server, isolated_shm):
+        iid = "test_tc15"
+        isolated_shm(iid)
+
+        config = _standard_config(10500)
+        config_path, iid = prepare_environment(config, iid)
+
+        resp = start_asfp2_server.call_tool(
+            "start", {},
+            on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+        )
+        assert resp["result"].get("isError", False) is False
+        assert resp["result"]["content"][0]["text"] == "success"
+
+        rc, _, _ = _run_asfp2_client(port=10500, data_type=10, protocol=7)
+        assert rc == 0
+        time.sleep(0.5)
+
+        shm = shm_path(iid)
+        b1 = _assert_block_written(shm, 1, 10)
+        _assert_block_written(shm, 2, 10)
+        assert 100.0 <= _value_f32(b1["value"]) <= 200.0
 
         start_asfp2_server.call_tool("pause", {})

@@ -118,11 +118,13 @@ func createFromConfig(configPath string, instanceID string) (*shm.SharedMemory, 
 	}
 
 	totalPoints := 0
+	writerFound := false
 	for _, wType := range writers {
 		section, ok := config[wType]
 		if !ok {
 			continue
 		}
+		writerFound = true
 		instances, ok := section.([]any)
 		if !ok {
 			continue
@@ -137,7 +139,15 @@ func createFromConfig(configPath string, instanceID string) (*shm.SharedMemory, 
 		}
 	}
 	if totalPoints == 0 {
-		return nil, fmt.Errorf("CONFIG_MISSING_SECTION: writer points total is 0 after counting")
+		if !writerFound {
+			return nil, fmt.Errorf("CONFIG_MISSING_SECTION: writer type(s) not found in config")
+		}
+		maxPoints := shm.DefaultMaxPoints
+		sm, err := shm.Create(instanceID, maxPoints)
+		if err != nil {
+			return nil, err
+		}
+		return sm, nil
 	}
 
 	maxPoints := totalPoints * 2
