@@ -37,6 +37,7 @@ class McpClient:
         self._stdin = self.process.stdin
         self._stdout = self.process.stdout
         self._next_id = 0
+        self._closed = False
         self._initialize()
 
     def _send(self, msg: dict) -> None:
@@ -127,6 +128,8 @@ class McpClient:
                     self._send(response)
 
     def close(self) -> None:
+        if self._closed:
+            return
         try:
             self._stdin.close()
         except Exception:
@@ -141,6 +144,7 @@ class McpClient:
         except subprocess.TimeoutExpired:
             self.process.kill()
             self.process.wait()
+        self._closed = True
 
 
 # ──────────────────────────────────────────────
