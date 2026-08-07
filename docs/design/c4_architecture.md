@@ -774,6 +774,7 @@ Agent（TypeScript）与 MCP Server（Go）的交互分为两部分：**运行�
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `name` | string | 转发实例名称 |
+| `id` | string | 实例标识符，全局唯一。用于 modify/delete 时匹配目标实例 |
 | `ip` | string | 目标服务器 IP |
 | `port` | int | ASFP2 服务端口 |
 | `t0` | int | 连接超时（秒） |
@@ -793,9 +794,6 @@ Agent（TypeScript）与 MCP Server（Go）的交互分为两部分：**运行�
 |------|------|------|
 | `key` | string | 引用的 Writer 采集点标识，格式为 `{service_id}.{point_id}`（如 `hnals_1_scada.windspeed`）。`c4_shm_manager` 根据此 key 填入与 Writer 端相同的 shm_id |
 | `addr` | integer | ASFP2 地址（协议中的 key） |
-| `valid` | integer | ASFP2 倍率和偏移量开关 |
-| `coeff` | real | ASFP2 数值倍率（raw × coeff + base） |
-| `base` | real | ASFP2 数值偏移量 |
 | `shm_id` | integer | 全局 shm_id，默认 0（未分配），由 `c4_shm_manager` 通过 key 匹配 Writer 后填入 |
 
 ### 3.2.5 c4_shm_manager 与 Writer/Reader 分类
@@ -919,6 +917,7 @@ IEC104 采集（2 个主变 RTU）和 ASFP2 转发（到中心侧数据库和第
     "c4_asfp2_client": [
         {
             "name": "转发到中心测数据库服务器",
+            "id": "hnals_asfp2_center",
             "ip": "172.16.109.11",
             "port": 9999,
             "t0": 30,
@@ -932,14 +931,15 @@ IEC104 采集（2 个主变 RTU）和 ASFP2 转发（到中心侧数据库和第
             "inverse_keep": 0,
             "timer": 100,
             "points": [
-                {"key": "hnals_1_scada.windspeed", "addr": 1000, "shm_id": 1, "valid": 1, "coeff": 0.38, "base": 0},
-                {"key": "hnals_1_scada.temperature", "addr": 1001, "shm_id": 2, "valid": 1, "coeff": 0.38, "base": 0},
-                {"key": "hnals_2_scada.windspeed", "addr": 1002, "shm_id": 3, "valid": 1, "coeff": 1, "base": 0},
-                {"key": "hnals_2_scada.temperature", "addr": 1003, "shm_id": 4, "valid": 1, "coeff": 1, "base": 0}
+                {"key": "hnals_1_scada.windspeed", "addr": 1000, "shm_id": 1},
+                {"key": "hnals_1_scada.temperature", "addr": 1001, "shm_id": 2},
+                {"key": "hnals_2_scada.windspeed", "addr": 1002, "shm_id": 3},
+                {"key": "hnals_2_scada.temperature", "addr": 1003, "shm_id": 4}
             ]
         },
         {
             "name": "转发到第三方数据服务器",
+            "id": "hnals_asfp2_third",
             "ip": "172.16.109.13",
             "port": 9999,
             "t0": 30,
@@ -953,8 +953,8 @@ IEC104 采集（2 个主变 RTU）和 ASFP2 转发（到中心侧数据库和第
             "inverse_keep": 0,
             "timer": 100,
             "points": [
-                {"key": "hnals_2_scada.windspeed", "addr": 8002, "shm_id": 3, "valid": 1, "coeff": 1, "base": 0},
-                {"key": "hnals_2_scada.temperature", "addr": 8003, "shm_id": 4, "valid": 1, "coeff": 1, "base": 0}
+                {"key": "hnals_2_scada.windspeed", "addr": 8002, "shm_id": 3},
+                {"key": "hnals_2_scada.temperature", "addr": 8003, "shm_id": 4}
             ]
         }
     ]
@@ -1022,7 +1022,30 @@ IEC104 采集（2 个主变 RTU）和 ASFP2 转发（到中心侧数据库和第
 {"jsonrpc": "2.0", "id": 11, "result": {"content": [{"type": "text", "text": "SHM_CORRUPTED: header magic invalid"}], "isError": true}}
 ```
 
-**stop/start 相关错误码**：
+#### Tool: `status`
+
+查询当前服务运行状态。区别于进程存活：即使进程存在，调用 `stop` 后服务处于"已停止"状态
+（数据路径关闭、实例销毁），此时 `status` 返回 `"stopped"`。
+
+**参数**：无
+
+**返回值**：`"running"` 或 `"stopped"`。
+
+**MCP 应答示例**：
+
+```json
+// ========== 已启动 ==========
+// --> 请求
+{"jsonrpc": "2.0", "id": 12, "method": "tools/call", "params": {"name": "status", "arguments": {}}}
+// <-- 应答
+{"jsonrpc": "2.0", "id": 12, "result": {"content": [{"type": "text", "text": "running"}], "isError": false}}
+
+// ========== 已停止 ==========
+// <-- 应答
+{"jsonrpc": "2.0", "id": 12, "result": {"content": [{"type": "text", "text": "stopped"}], "isError": false}}
+```
+
+**stop/start/status 相关错误码**：
 
 | 错误码 | 含义 | 触发工具 |
 |--------|------|---------|
