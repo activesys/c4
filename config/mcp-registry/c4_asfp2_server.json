@@ -1,0 +1,32 @@
+{
+  "service_type": "c4_asfp2_server",
+  "display_name": "ASFP2 数据接收",
+  "role": "writer",
+  "protocols": [{
+    "protocol": "asfp2",
+    "description": "ASFP2 协议接收服务端，接收远端推送的实时数据并写入共享内存",
+    "selection_rules": [
+      { "condition": "device.role == 'receiver'", "description": "数据接收场景（作为 ASFP2 服务端）" }
+    ]
+  }],
+  "config_schema": {
+    "required": ["id", "port"],
+    "fields": {
+      "id":   { "type": "string",  "source": "plan",    "default": null, "description": "实例唯一标识" },
+      "name": { "type": "string",  "source": "plan",    "default": null, "description": "实例名称" },
+      "ip":   { "type": "string",  "source": "default", "default": "0.0.0.0", "description": "绑定 IP（默认所有网卡）" },
+      "port": { "type": "integer", "source": "plan",    "default": null, "description": "监听端口" }
+    }
+  },
+  "binary_path": "/usr/local/bin/c4_asfp2_server",
+  "error_mappings": {
+    "SERVICE_NOT_READY": "服务尚未就绪，请稍后再试",
+    "CONFIG_PARSE_ERROR": "配置文件格式错误，请检查配置内容",
+    "CONFIG_PATH_MISSING": "配置文件路径无效，请检查 Agent 部署是否正确",
+    "ALREADY_RUNNING": "服务已在运行中，无需重复启动",
+    "PORT_CONFLICT": "端口已被占用，请检查端口配置",
+    "SHM_CORRUPTED": "数据存储异常，请联系管理员检查共享内存状态",
+    "SHM_OPEN_FAILED": "无法访问数据存储，请检查共享内存配置",
+    "SHM_ID_NOT_ASSIGNED": "数据点未分配通道，请重新生成接入方案"
+  }
+}

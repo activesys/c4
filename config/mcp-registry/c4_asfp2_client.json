@@ -1,0 +1,41 @@
+{
+  "service_type": "c4_asfp2_client",
+  "display_name": "ASFP2 数据转发",
+  "role": "reader",
+  "protocols": [{
+    "protocol": "asfp2",
+    "description": "ASFP2 协议转发客户端，从共享内存读取数据后推送至远端服务器",
+    "selection_rules": [
+      { "condition": "target.role == 'forward'", "description": "数据转发场景（作为 ASFP2 客户端）" }
+    ]
+  }],
+  "config_schema": {
+    "required": ["id", "ip", "port"],
+    "fields": {
+      "id":         { "type": "string",  "source": "plan",    "default": null,  "description": "实例唯一标识" },
+      "name":       { "type": "string",  "source": "plan",    "default": null,  "description": "实例名称" },
+      "ip":         { "type": "string",  "source": "plan",    "default": null,  "description": "目标服务器 IP" },
+      "port":       { "type": "integer", "source": "plan",    "default": null,  "description": "目标服务器端口" },
+      "t0":         { "type": "integer", "source": "default", "default": 30,    "description": "连接超时（秒）" },
+      "t1":         { "type": "integer", "source": "default", "default": 20,    "description": "心跳发送间隔（秒）" },
+      "t2":         { "type": "integer", "source": "default", "default": 10,    "description": "心跳应答超时（秒）" },
+      "timer":      { "type": "integer", "source": "default", "default": 100,   "description": "转发周期（毫秒）" },
+      "key_sequence":    { "type": "integer", "source": "default", "default": 1,  "description": "key 是否连续（1=连续）" },
+      "same_data_type":  { "type": "integer", "source": "default", "default": 1,  "description": "同类型压缩（1=开启）" },
+      "same_timestamp":  { "type": "integer", "source": "default", "default": 1,  "description": "同时刻压缩（1=开启）" },
+      "smart":       { "type": "integer", "source": "default", "default": 1,     "description": "时间戳毫秒归零（1=归零）" },
+      "forward_kack":{ "type": "integer", "source": "default", "default": 255,   "description": "正向 KeepAlive Ack 值" },
+      "inverse_keep":{ "type": "integer", "source": "default", "default": 0,     "description": "反向 KeepAlive 值" }
+    }
+  },
+  "binary_path": "/usr/local/bin/c4_asfp2_client",
+  "error_mappings": {
+    "SERVICE_NOT_READY": "服务尚未就绪，请稍后再试",
+    "CONFIG_PARSE_ERROR": "配置文件格式错误，请检查配置内容",
+    "CONFIG_PATH_MISSING": "配置文件路径无效，请检查 Agent 部署是否正确",
+    "ALREADY_RUNNING": "服务已在运行中，无需重复启动",
+    "SHM_CORRUPTED": "数据存储异常，请联系管理员检查共享内存状态",
+    "SHM_OPEN_FAILED": "无法访问数据存储，请检查共享内存配置",
+    "SHM_ID_NOT_ASSIGNED": "数据点未分配通道，请重新生成接入方案"
+  }
+}

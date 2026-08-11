@@ -1,0 +1,30 @@
+{
+  "service_type": "c4_modbus_client",
+  "display_name": "Modbus 数据采集",
+  "role": "writer",
+  "protocols": [{
+    "protocol": "modbus",
+    "description": "Modbus TCP 数据采集客户端，从工业设备读取数据后写入共享内存",
+    "selection_rules": [
+      { "condition": "device.protocol == 'modbus'", "description": "Modbus 协议设备数据采集" }
+    ]
+  }],
+  "config_schema": {
+    "required": ["id", "ip", "port"],
+    "fields": {
+      "id":         { "type": "string",  "source": "plan",    "default": null,  "description": "实例唯一标识" },
+      "name":       { "type": "string",  "source": "plan",    "default": null,  "description": "实例名称" },
+      "ip":         { "type": "string",  "source": "plan",    "default": null,  "description": "设备 IP 地址" },
+      "port":       { "type": "integer", "source": "plan",    "default": 502,   "description": "Modbus 端口（默认 502）" },
+      "poll_interval": { "type": "integer", "source": "default", "default": 1000, "description": "轮询间隔（毫秒）" },
+      "timeout":    { "type": "integer", "source": "default", "default": 3000,  "description": "通信超时（毫秒）" },
+      "retries":    { "type": "integer", "source": "default", "default": 3,     "description": "失败重试次数" },
+      "unit_id":    { "type": "integer", "source": "plan",    "default": 1,     "description": "Modbus 单元标识" }
+    }
+  },
+  "binary_path": "/usr/local/bin/c4_modbus_client",
+  "error_mappings": {
+    "CONNECTION_REFUSED": "设备连接被拒绝，请检查设备 IP 和端口",
+    "TIMEOUT": "设备通信超时，请检查网络连接"
+  }
+}

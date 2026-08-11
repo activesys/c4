@@ -1,0 +1,30 @@
+{
+  "model": {
+    "provider": "deepseek",
+    "name": "deepseek-chat",
+    "temperature": 0,
+    "max_tokens": 4096,
+    "api_key_env": "DEEPSEEK_API_KEY"
+  },
+  "server": {
+    "host": "0.0.0.0",
+    "port": 3000,
+    "cors_origin": "*"
+  },
+  "mcp_registry": {
+    "path": "/etc/c4/mcp-registry"
+  },
+  "shm_manager": {
+    "binary": "/usr/local/bin/c4_shm_manager",
+    "instance_id": "c4_default",
+    "config_path": "/etc/c4/config.json"
+  },
+  "state": {
+    "backend": "filesystem",
+    "path": "/var/lib/c4/state"
+  },
+  "logging": {
+    "level": "info",
+    "dir": "/var/log/c4"
+  }
+}
