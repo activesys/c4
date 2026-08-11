@@ -1,8 +1,12 @@
 # C4 Agent 系统架构设计
 
-> **版本**：v0.3.0 | **最后更新**：2026-08-06 | **父文档**：[c4_architecture.md](c4_architecture.md)
+> **版本**：v0.4.0 | **最后更新**：2026-08-11 | **父文档**：[c4_architecture.md](c4_architecture.md)
 >
 > **设计范围**：C4 Agent 系统的数据接入架构，覆盖从用户输入到 MCP 服务启动的完整数据接入流程。监控自愈等功能不在本次设计范围内。
+>
+> **当前实现**：因 `createDeepAgent` + deepseek-chat 的工具绑定不稳定，当前的实现使用
+> `createAgent`（LangChain）+ 扁平工具 + `responseFormat` 的降级方案（详见 §2.1 的 [目标 vs 实现](#21-目标架构-vs-当前实现)）。
+> 设计文档中的 SuperWorker + Subagent 三层分工为**目标架构**，待 LangChain tool binding 稳定后恢复。
 
 ---
 
@@ -13,37 +17,134 @@
 C4 Agent 是 C4 实例的智能决策层。它运行在工业数据服务器上，通过 Web 界面与用户交互，
 通过 MCP 协议管理和监控 Go 编写的 MCP 服务集群。**Agent 不进入实时数据路径。**
 
-Agent 是一个**单一系统**，不是多个独立 Agent 的集合。它使用 **SuperWorker + Subagent** 模式：
-一个主代理（SuperWorker）承担主要的理解和推理工作，必要时将需要隔离上下文的专项任务委托给子代理（Subagent）。
+Agent 是一个**单一系统**，不是多个独立 Agent 的集合。它使用 **SuperWorker + Subagent**
+模式作为目标架构，当前实现为 **单 Agent + 扁平工具** 的过渡方案（见 §2.1）。
 
 ### 1.2 功能覆盖
 
 Agent 系统覆盖数据接入流程中 Agent 侧的全部职能：
 
-| 阶段 | 功能 | 承担方式 |
-|------|------|---------|
-| **理解** | C4_FUN_00001 理解自然语言、C4_FUN_00002/00003 解析文档 | SuperWorker 直接处理 + 委托 doc-parser 子代理 |
-| **规划** | C4_FUN_00004 生成接入方案、C4_FUN_00044 分解为可执行配置 | SuperWorker → plan-generator → step-decomposer |
-| **执行** | C4_FUN_00006 MCP 生命周期管理、C4_FUN_00007 常规操作自主执行 | SuperWorker 直接执行（Stop-Start 为确定性代码逻辑） |
-| **交互** | C4_FUN_00041 Web 界面、C4_FUN_00005 非技术语言 | Express + React（SuperWorker 对话能力） |
-| **扩展** | C4_FUN_00017 新协议 MCP 服务可插拔 | MCP Service Registry（基础设施） |
+| 阶段 | 功能 | 目标承担方式 | 当前实现 |
+|------|------|---------|---------|
+| **理解** | C4_FUN_00001 理解自然语言、C4_FUN_00002/00003 解析文档 | SuperWorker + doc-parser 子代理 | SuperWorker + csv/xlsx/txt parser 工具 + `responseFormat` |
+| **规划** | C4_FUN_00004 生成接入方案、C4_FUN_00044 分解为可执行配置 | SuperWorker → plan-generator → step-decomposer | SuperWorker + `output_plan_steps` 工具 |
+| **执行** | C4_FUN_00006 MCP 生命周期管理、C4_FUN_00007 常规操作自主执行 | SuperWorker 直接执行 | 同（确定性代码，不受架构影响） |
+| **交互** | C4_FUN_00041 Web 界面、C4_FUN_00005 非技术语言 | Express + React | 同 |
+| **扩展** | C4_FUN_00017 新协议 MCP 服务可插拔 | MCP Service Registry | 同 |
+
+#### 1.2.1 已实现功能清单
+
+本设计文档覆盖的功能点及实现方式：
+
+| 功能码 | 功能名称 | 当前实现 | 设计章节 | 可确定性测试 |
+|--------|---------|---------|---------|:--:|
+| C4_FUN_00001 | 理解自然语言 | SuperWorker 系统提示 + 对话能力 | §3.1 | ❌（LLM 推理） |
+| C4_FUN_00002 | 解析结构化文档 | csv_parser / xlsx_parser 工具 + `responseFormat` | §3.2 | ❌（LLM 推理） |
+| C4_FUN_00003 | 解析非结构化文档 | txt_parser 工具 + `responseFormat` | §3.2 | ❌（LLM 推理） |
+| C4_FUN_00004 | 生成接入方案 | LLM 推理 + 自然语言输出（待添加 `output_access_plan` 工具） | §3.2 | ❌（LLM 推理） |
+| C4_FUN_00044 | 分解为可执行配置 | `output_plan_steps` 工具 + Zod 校验 | §3.2.1 | ❌（LLM 推理） |
+| C4_FUN_00005 | 非技术语言交互 | SuperWorker 系统提示硬约束 | §3.1 | ❌（LLM 行为） |
+| C4_FUN_00006 | MCP 生命周期管理 | 执行模块：Stop-Start 协议 + 启动恢复 | §3.2, §3.2.3 | ✅ mergeConfigFromSteps |
+| C4_FUN_00007 | 常规操作自主执行 | 执行模块：config 合并 + 幂等 stop | §3.2 | ✅ 同 C4_FUN_00006 |
+| C4_FUN_00017 | 新协议可插拔扩展 | MCP Service Registry + 双层注入 | §3.3 | ✅ Registry 加载 |
+| C4_FUN_00041 | Web 界面交互 | Express + SSE streaming（streamEvents v3） | §3.5 | ❌（UI） |
+
+> **确定性测试**：标记 ✅ 的功能不依赖 LLM 推理，可在 Python 黑盒测试（`test/c4_fun_XXXXX/`）中
+> 通过操作真实 MCP 服务验证。标记 ❌ 的功能需要 TypeScript 侧单元测试（`GenericFakeChatModel` mock LLM）。
 
 ### 1.3 框架选型
 
-| 组件 | 选型 | 理由 |
-|------|------|------|
-| Agent 框架 | `deepagents` v1.11.1（LangChain/LangGraph） | 原生 SuperWorker + Subagent、中间件栈、记忆 |
-| LLM | `@langchain/deepseek` v1.1.5 | 已预置 `DEEPSEEK_API_KEY` |
-| MCP 客户端 | `@modelcontextprotocol/sdk` | Go MCP 服务使用 stdio 传输 |
-| 服务端 | `express` v5 | 文件上传、REST API、静态托管、中间件 |
-| 前端 | `@langchain/react`（`useStream`） | 子代理流式渲染、todo、中断，deepagents 原生支持 |
-| 类型 | `zod` v4 | Schema + API 校验 |
+| 组件 | 目标选型 | 当前实现 | 理由 |
+|------|------|------|------|
+| Agent 框架 | `deepagents` v1.11.1（LangChain/LangGraph） | `createAgent`（LangChain v1.5）| `createDeepAgent` + deepseek-chat 工具绑定不稳定，降级为扁平 `createAgent` |
+| LLM | `@langchain/deepseek` v1.1.5 | 同 | 已预置 `DEEPSEEK_API_KEY` |
+| MCP 客户端 | `@modelcontextprotocol/sdk` | 同 | Go MCP 服务使用 stdio 传输 |
+| 服务端 | `express` v5 | 同 | 文件上传、REST API、SSE streaming |
+| 流式传输 | `streamMode="messages"`（Pregel） | `streamEvents({version:"v3"})` | v3 typed projections：`stream.messages` / `stream.output` |
+| 结构化输出 | — | `responseFormat: toolStrategy(schema)` | LangChain 内置 Zod 校验 + 自动重试 |
+| 类型 | `zod` v4 | 同 | Schema + API 校验 |
+| 工具定义 | `StructuredTool` 子类 | `tool()` helper | 更简洁的函数式工具定义 |
+
+### 1.4 LLM 交互原则（ReAct 模式）
+
+> **核心原则**：在与大模型的交互过程中，不要假设大模型的行为是确定的。Agent
+> 必须**适配 LLM**，而不是假设 LLM 的行为符合预期。
+
+具体原则：
+
+1. **明确每步的最终结果，而非假设工具调用路径**：Agent 的每个步骤应明确需要什么
+   最终结果（如"获得设备信息"、"生成 config.json"），而非依赖 LLM 按预设顺序
+   调用特定工具。当 LLM 产出文本而非工具调用，或调用了错误的工具时，Agent 应
+   检测到结果未达成并采取纠正措施。
+
+2. **结果未达成则持续交互（ReAct 模式）**：如果与 LLM 的一轮交互没有得到期望的
+   最终结果，Agent 应向 LLM 提供更明确的指令（如"你必须调用 X 工具，不要用文字回答"），
+   重新发起交互，直到结果达成或达到最大重试次数。这是典型的 **ReAct（Reasoning + Acting）**
+   模式——Agent 观察 LLM 的输出，判断是否需要进一步行动，循环此过程。
+
+3. **Agent 适配 LLM，而非假设 LLM 的行为**：不同的 LLM（如 DeepSeek、GPT-4、Claude）
+   对同一提示词的响应行为不同。提示词、工具描述、参数格式都应该针对具体的 LLM 进行
+   优化。如果更换了 LLM，应重新评估和调整交互策略。不要假设 LLM 会"自动"理解意图
+   并采取正确的行动。
+
+4. **工具调用是不可靠的，必须有兜底逻辑**：LLM 可能将工具调用输出为纯文本（而非
+   结构化的 tool_call），可能提前终止（不调用工具直接结束），可能产生无效 JSON 参数。
+   Agent 必须在代码层面对这些失败模式进行检测和纠正，而不是依赖提示词工程完全消除它们。
+
+5. **验证循环优于单次尝试**：Agent 的实现应采用验证循环模式——执行 → 检查结果 →
+   若不满足则纠正重试——而非假设单次 LLM 调用就能得到正确结果。
+
+```typescript
+// ReAct 验证循环模式（概念示例）
+while (!resultAchieved && retries < maxRetries) {
+    const response = await llm.invoke(messages, tools)
+    
+    if (noExpectedToolCalled(response)) {
+        messages.push({ role: "user", content: `你必须调用 ${expectedTool} 工具。不要用文字回答。` })
+        retries++
+        continue
+    }
+    
+    const result = executeToolCall(response)
+    if (result.success) {
+        resultAchieved = true
+    } else {
+        messages.push({ role: "user", content: `调用失败: ${result.error}。请修正参数后重试。` })
+        retries++
+    }
+}
+```
 
 ---
 
 ## 2. 整体架构
 
-### 2.1 SuperWorker + Subagent 模式
+### 2.1 目标架构 vs 当前实现
+
+**目标架构**（设计文档原意）—— SuperWorker + Subagent 三层分工：
+
+```
+SuperWorker (createDeepAgent)
+  ├─ doc-parser 子代理     (文件解析 → 结构化设备信息)
+  ├─ plan-generator 子代理  (设备信息 → AccessPlan)
+  └─ step-decomposer 子代理 (AccessPlan → ServiceStep[])
+```
+
+**当前实现**（v0.4.0）—— 单 Agent + 扁平工具 + responseFormat：
+
+```
+SuperWorker (createAgent)
+  ├─ csv_parser / xlsx_parser / txt_parser 工具  (纯格式提取)
+  ├─ responseFormat: deviceInfoSchema              (结构化设备信息)
+  ├─ output_plan_steps 工具                        (结构化 ServiceStep[])
+  └─ 确定性自动执行 (merge_config_from_steps)        (config.json 写入)
+```
+
+**降级原因**：`createDeepAgent` 在 deepseek-chat 上存在工具绑定失效问题（工具不被调用，或产出文本而非 tool_call），降级为 `createAgent` + 扁平工具 + `responseFormat`。
+
+**恢复条件**：LangChain 的 `createDeepAgent` 在 deepseek-chat 上稳定工作后，恢复子代理模式。
+
+### 2.2 当前架构图
 
 ```
 用户浏览器 (React SPA)
@@ -56,120 +157,41 @@ Agent 系统覆盖数据接入流程中 Agent 侧的全部职能：
                          │
                          ▼
 ┌─────────────────────────────────────────────────────────────┐
-│              SuperWorker (createDeepAgent)                     │
+│              SuperWorker (createAgent)                        │
 │                                                               │
-│  System Prompt: C4 Agent 角色 + 可用子代理清单                │
-│  Middleware: Memory + Summarization                           │
-│  Tools: task（子代理委托），MCP 工具                           │
+│  System Prompt: C4 Agent 角色 + 工具调用规则                  │
+│  Streaming: streamEvents({version:"v3"})                      │
+│  responseFormat: toolStrategy(deviceInfoSchema)               │
 │                                                               │
-│  直接能力: 理解意图 · 引导澄清 · 回答咨询 · 判断委托时机       │
+│  工具:                                                        │
+│  ┌──────────────────────────────────────────────────────┐   │
+│  │ csv_parser  │ xlsx_parser │ txt_parser               │   │
+│  │ 读取 CSV/XLSX/TXT，返回 raw tabular data              │   │
+│  ├──────────────────────────────────────────────────────┤   │
+│  │ output_plan_steps                                     │   │
+│  │ 输出结构化 ServiceStep[]，含 Zod + 业务校验            │   │
+│  ├──────────────────────────────────────────────────────┤   │
+│  │ query_registry                                        │   │
+│  │ 按 service_type 查询 RegistryEntry (config_schema)    │   │
+│  └──────────────────────────────────────────────────────┘   │
 │                                                               │
-│  ┌───────────────────────────────────────────────────────┐  │
-│  │ Subagent: doc-parser    │ Subagent: plan-generator    │  │
-│  │ 解析文档提取设备信息     │ 生成结构化 AccessPlan       │  │
-│  │ C4_FUN_00002/00003     │ C4_FUN_00004               │  │
-│  ├─────────────────────────┼─────────────────────────────┤  │
-│  │ Subagent: step-        │ Subagent: —                │  │
-│  │ decomposer             │ （执行阶段由 SuperWorker    │  │
-│  │ AccessPlan → 服务配置   │  直接调用确定性代码，        │  │
-│  │ C4_FUN_00044           │  不需要子代理）              │  │
-│  │                        │                             │  │
-│  ├─────────────────────────┼─────────────────────────────┤  │
-│  │                          SuperWorker 直接处理              │  │
-│  │                          一般性问题、澄清追问等             │  │
-│  └───────────────────────────────────────────────────────┘  │
+│  ┌──────────────────────────────────────────────────────┐   │
+│  │  C4Agent wrapper（createC4Agent）                       │   │
+│  │  · 确认消息检测 + tool 指令前缀注入                      │   │
+│  │  · 验证循环 (ReAct，无 tool call → 纠正重试)            │   │
+│  │  · stream.output.structuredResponse 捕获 deviceInfo     │   │
+│  │  · 确定性自动执行 (confirm → planSteps → config.json)   │   │
+│  └──────────────────────────────────────────────────────┘   │
 │                                                               │
-│  ┌───────────────────────────────────────────────────────┐  │
-│  │              MCP Client Bridge                          │  │
-│  │  Stdio Transport · Tool Converter · Permission         │  │
-│  └───────────────────────────────────────────────────────┘  │
-│  ┌───────────────────────────────────────────────────────┐  │
-│  │              MCP Service Registry                       │  │
-│  │  动态协议映射 · 配置 Schema · C4_FUN_00017 扩展         │  │
-│  └───────────────────────────────────────────────────────┘  │
+│  ┌──────────────────────────────────────────────────────┐   │
+│  │              MCP Service Registry                       │   │
+│  │              动态协议映射 · 配置 Schema                 │   │
+│  └──────────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────┘
          │                  │                  │
          ▼                  ▼                  ▼
-┌──────────────┐  ┌──────────────┐  ┌──────────────┐
-│ c4_shm       │  │ c4_modbus    │  │ c4_iec104    │  ...
-│ _manager     │  │ _client      │  │ _client      │
-│   (Go,常驻)  │  │   (Go)       │  │   (Go)       │
-└──────────────┘  └──────────────┘  └──────────────┘
-         ▲                  ▲                  ▲
-         └──────────────────┼──────────────────┘
-                            │ 浏览器
-                 React SPA (@langchain/react)
-                 useStream() → 流式 Agent 交互
-```
-
-```mermaid
-flowchart TB
-    subgraph Browser["浏览器"]
-        React["React SPA<br/>@langchain/react<br/>useStream()"]
-    end
-
-    subgraph Server["Express"]
-        Chat["POST /api/chat"]
-        Upload["POST /api/upload"]
-        Status["GET /api/services"]
-    end
-
-    subgraph Agent["Agent Core"]
-        SW["SuperWorker<br/>createDeepAgent()"]
-
-        subgraph Subagents["Subagents"]
-            DP["doc-parser"]
-            PG["plan-generator"]
-            SD["step-decomposer"]
-        end
-
-        Bridge["MCP Client Bridge"]
-        Registry["MCP Service Registry"]
-    end
-
-    subgraph MCPServers["MCP 服务集群 (Go)"]
-        SHM["c4_shm_manager"]
-        Other["c4_modbus / c4_iec104 / ..."]
-    end
-
-    React -->|"SSE"| Server
-    Server --> SW
-    SW -->|"task()"| Subagents
-    SW --> Bridge --> MCPServers
-    Subagents -.->|"查询"| Registry
-```
-
-### 2.2 SuperWorker
-
-SuperWorker 是用户对话的**唯一入口**，承担两方面职责：
-
-**直接处理**（无需委托）：
-- 理解用户自然语言意图（C4_FUN_00001）
-- 引导用户澄清不明确的信息（C4_FUN_00005）
-- 回答一般性咨询问题
-- 判断何时需要委托子代理
-
-**委托子代理**（需要专用工具或隔离上下文时）：
-- 上传文件需解析 → 委托 doc-parser
-- 需生成结构化方案 → 委托 plan-generator
-- 需将方案分解为配置 → 委托 step-decomposer
-- 配置生成后 → 直接执行 Stop-Start 协议（确定性代码，非子代理）
-
-```mermaid
-flowchart TD
-    User["用户输入<br/>自然语言 / 上传文件"] --> SW["SuperWorker"]
-
-    SW --> Decide{"判断任务"}
-
-    Decide -->|"上传了文档"| DP["doc-parser<br/>提取设备信息"]
-    Decide -->|"描述接入需求"| PG["plan-generator<br/>生成 AccessPlan"]
-    Decide -->|"确认方案"| SD["step-decomposer<br/>分解为服务配置"]
-    Decide -->|"直接回答"| SW
-
-    DP --> SW
-    PG --> SW
-    SD --> SW
-    SW -->|"汇总呈现"| User
+    c4_shm_manager    c4_modbus_client    c4_iec104_client  ...
+       (Go,常驻)          (Go)               (Go)
 ```
 
 ### 2.3 完整请求流程
@@ -177,98 +199,73 @@ flowchart TD
 以"用户上传 Modbus 点表并提出接入需求"为例：
 
 ```
-用户: "接入华能阿拉善1#风机，这是点表" + 上传 Excel
+用户: "接入华能阿拉善1#风机" + 上传 CSV
          │
          ▼
 ┌─────────────────────────────────────────────────────┐
-│ SuperWorker                                          │
-│ "用户上传了文件，需要先解析"                           │
-│ → task(subagent_type="doc-parser",                   │
-│        prompt="解析此 Excel 点表提取设备信息")         │
+│ Step 1: doc-parser                                   │
+│                                                       │
+│ LLM 发现 path=...csv → 调用 csv_parser({filePath})    │
+│ csv_parser 返回 raw tabular data (headers + rows)     │
+│ LLM 分析 raw data + 对话上下文                         │
+│ responseFormat 强制产出结构化 deviceInfo:             │
+│   { devices: [{ name:"1#风机", protocol:"modbus_tcp", │
+│                 connection:{ip,port}, points:[...] }]} │
+│                                                       │
+│ → deviceInfo 被 C4Agent wrapper 捕获                  │
+│ → SS E 输出自然语言摘要:"解析完成，设备名：1#风机..."  │
 └───────────┬─────────────────────────────────────────┘
             │
             ▼
 ┌─────────────────────────────────────────────────────┐
-│ doc-parser (C4_FUN_00002)                            │
-│ 工具: xlsx 解析                                       │
-│ → 输出: { name:"1#风机", protocol:"modbus_tcp",       │
-│           points:[{name:"windspeed",addr:1000},...]}  │
-└───────────┬─────────────────────────────────────────┘
-            │
-            ▼
-┌─────────────────────────────────────────────────────┐
-│ SuperWorker                                          │
-│ "文件解析完成。检测到 Modbus TCP 设备，生成接入方案"    │
-│ → task(subagent_type="plan-generator",               │
-│        prompt="为设备生成 AccessPlan...")              │
-└───────────┬─────────────────────────────────────────┘
-            │
-            ▼
-┌─────────────────────────────────────────────────────┐
-│ plan-generator (C4_FUN_00004)                        │
-│ 查询 Registry → 输出: AccessPlan                      │
-│ （格式定义见 §3.2.1.2a）                               │
-└───────────┬─────────────────────────────────────────┘
-            │
-            ▼
-┌─────────────────────────────────────────────────────┐
-│ SuperWorker                                          │
-│ "方案已生成：Modbus TCP → ASFP2 转发，请确认"         │
-│ → 等待用户确认 (interrupt)                             │
+│ Step 2: plan-generator                               │
+│                                                       │
+│ 用户: "生成接入方案"                                   │
+│ LLM 根据 deviceInfo + service_catalog                 │
+│ → 自然语言展示方案 + 确认信号                          │
+│ "方案：Modbus TCP 采集 → ASFP2 转发到中心侧"          │
+│ "是否确认执行？"                                       │
 └───────────┬─────────────────────────────────────────┘
             │ 用户确认
             ▼
 ┌─────────────────────────────────────────────────────┐
-│ SuperWorker                                          │
-│ 自动链式执行：先委托 step-decomposer → 取得          │
-│ AccessPlanSteps → 直接执行 Stop-Start 协议             │
-│ （确定性代码：合并配置 → stop → adjust_shm → start）    │
-│ （Agent 保证配置正确性，无需用户审核细节参数）          │
-└───────────┬─────────────────────────────────────────┘
-            │
-            ▼
-┌─────────────────────────────────────────────────────┐
-│ step-decomposer (C4_FUN_00044)                       │
-│ 查询 Registry 获取每类服务的 config_schema            │
-│ 从 AccessPlan 提取 plan 值 + 填充默认值                │
-│ → 输出 AccessPlanSteps（本次接入任务的增量配置）        │
-│   每项含 action: add / modify / delete                 │
-└───────────┬─────────────────────────────────────────┘
-            │ 返回 SuperWorker
-            ▼
-┌─────────────────────────────────────────────────────┐
-│ Step 3: 执行（确定性代码，非 LLM）                     │
-│ ① 合并 AccessPlanSteps → config.json                 │
-│ ② Stop 所有数据路径 MCP → adjust_shm → Start         │
-└───────────┬─────────────────────────────────────────┘
-            │
-            ▼
-         "接入完成！"
+│ Step 3: confirm + execute                             │
+│                                                       │
+│ C4Agent wrapper 检测确认消息 → 注入 tool 指令          │
+│ LLM 调用 output_plan_steps({ steps: [...] })          │
+│ → stream.toolCalls 捕获 planSteps                     │
+│ → 确定性执行: merge_config_from_steps()               │
+│ → config.json 写入                                    │
+│                                                       │
+│ "接入方案已执行，配置已写入。"                          │
+└─────────────────────────────────────────────────────┘
 ```
 
 ```mermaid
 sequenceDiagram
     participant U as 用户
-    participant C as SuperWorker
-    participant DP as doc-parser
-    participant PG as plan-generator
-    participant SD as step-decomposer
+    participant SW as SuperWorker
+    participant Tool as csv/xlsx/txt parser
+    participant Exec as 执行模块
 
-    U->>C: "接入1#风机" + 上传 Excel
-    C->>DP: task(doc-parser)
-    DP-->>C: {devices, points}
+    U->>SW: "接入1#风机" + 上传 CSV
+    SW->>Tool: csv_parser(filePath)
+    Tool-->>SW: raw tabular data
+    Note over SW: responseFormat<br/>→ deviceInfo
 
-    C->>PG: task(plan-generator)
-    PG-->>C: AccessPlan
+    SW->>U: "解析完成：1#风机<br/>Modbus TCP, 5个数据点<br/>是否生成方案？"
 
-    C->>U: "方案已生成：Modbus → ASFP2 转发，确认？"
-    U->>C: 确认
+    U->>SW: "生成接入方案"
+    SW->>U: "方案：Modbus → ASFP2<br/>是否确认执行？"
 
-    C->>SD: task(step-decomposer)
-    SD-->>C: AccessPlanSteps<br/>（增量, 含 action）
-    Note over C: 确定性代码执行<br/>合并 config.json<br/>Stop → adjust_shm → Start
+    U->>SW: 确认
+    Note over SW: C4Agent 检测确认<br/>→ 注入 tool 指令
+    SW->>SW: output_plan_steps
+    Note over SW: 捕获 planSteps
+    SW->>Exec: merge_config_from_steps()
+    Exec-->>SW: config.json 已写入
 
-    C->>U: "接入完成！"
+    SW->>U: "接入完成！"
 ```
 
 ---
@@ -277,20 +274,17 @@ sequenceDiagram
 
 ### 3.1 SuperWorker
 
+**目标实现**（待 `createDeepAgent` + deepseek-chat 稳定后启用）：
+
 ```typescript
 const superWorker = createDeepAgent({
   model: new ChatDeepSeek({ apiKey: process.env.DEEPSEEK_API_KEY }),
-  // 注：示例代码，实际实现从 /etc/c4/agent.json 读取 model.provider/name/api_key_env
   systemPrompt: SUPERWORKER_SYSTEM_PROMPT,
-
-  // 多轮对话需要记忆 + 摘要
   middleware: [
     createMemoryMiddleware({ backend: new StateBackend() }),
     createSummarizationMiddleware(),
   ],
-
   tools: [/* MCP 工具运行时注入 */],
-
   subagents: [
     docParserSubagent,
     planGeneratorSubagent,
@@ -299,178 +293,83 @@ const superWorker = createDeepAgent({
 })
 ```
 
-**AgentState 与防 SummarizationMiddleware 丢上下文**：
-
-`SummarizationMiddleware` 长对话时压缩 `messages` 字段，但 **LangGraph 的结构化状态字段不受压缩影响**。
-利用此特性，在 AgentState 中维护流程关键信息，确保 SuperWorker 即使对话历史被压缩也不会"失忆"。
+**当前实现**（`createAgent` + 扁平工具 + `responseFormat`）：
 
 ```typescript
-// LangGraph graph state annotation — 定义流程关键字段
-const C4AgentState = Annotation.Root({
-  // ===== 消息（唯一被 SummarizationMiddleware 压缩的字段） =====
-  messages: Annotation<BaseMessage[]>({
-    reducer: messagesStateReducer,
-  }),
-
-  // ===== 流程阶段（不被压缩，始终精确） =====
-  phase: Annotation<"idle" | "parsing" | "parsed" | "plan_ready" | "confirmed" | "configuring" | "starting">({
-    default: () => "idle",
-  }),
-
-  // ===== 当前阶段结果（不被压缩） =====
-  status: Annotation<"success" | "error">({
-    default: () => "error",
-  }),
-
-  // ===== 当前接入方案（用户确认后冻结，不被压缩） =====
-  accessPlan: Annotation<object | null>({
-    default: () => null,
-  }),
-
-  // ===== 等待中的子代理（崩溃恢复用） =====
-  pendingSubagent: Annotation<string | null>({
-    default: () => null,
-  }),
-
-  // ===== 用户原始请求（长对话中追溯） =====
-  userRequest: Annotation<string | null>({
-    default: () => null,
-  }),
+const agent = createAgent({
+    model: new ChatDeepSeek({ ... }),
+    tools: [csvParser, xlsxParser, txtParser, outputPlanSteps, queryRegistry],
+    systemPrompt: SUPERWORKER_SYSTEM_PROMPT,
+    responseFormat: toolStrategy(deviceInfoSchema),
 })
 ```
 
-**写入时机**（SuperWorker 在关键流转点更新 state）：
+**C4Agent wrapper**（`createC4Agent`）在 `createAgent` 之上增加：
 
-| 触发事件 | 写入 |
-|----------|------|
-| 用户发起新接入请求 | `userRequest = msg`, `phase = "parsing"`, `status = "success"` |
-| doc-parser 返回 | `phase = "parsed"` |
-| plan-generator 返回 | `phase = "plan_ready"`, `accessPlan = result` |
-| 用户确认方案 | `phase = "confirmed"` |
-| 委托 step-decomposer | `phase = "configuring"`, `pendingSubagent = taskId` |
-| step-decomposer 返回 | `phase = "starting"` |
-| Stop-Start 执行完成 | `phase = "idle"`, `accessPlan = null`, `pendingSubagent = null` |
-| 任一子代理或执行模块失败 | `status = "error"`（phase 保持不变，保留 userRequest + accessPlan 供具体步骤重试） |
+| 机制 | 说明 |
+|------|------|
+| 确认检测 | 正则匹配 `确认/好的/执行/按方案` → 自动注入 `"立即调用 output_plan_steps"` 指令 |
+| 验证循环 | ReAct 模式：流结束后检测 `hasToolCall`，无工具调用时注入纠正提示重试（最多 3 次） |
+| 结构化捕获 | `stream.output.structuredResponse` → `deviceInfo`；`stream.toolCalls` → `planSteps` |
+| 确定性执行 | confirm + 无 `planSteps` → 从 `deviceInfo` 自动构造 `ServiceStep[]` → `merge_config_from_steps` |
+| 流式传输 | `streamEvents({version:"v3"})` — `stream.messages` 投影像（text + tool names）
 
-SuperWorker 每个推理周期开始时，先读取 `state.phase` 判断当前阶段——不需要从压缩后的对话历史中推断。
+### 3.2 工具定义与执行模块
 
-**SuperWorker 系统提示结构**：
+> **注意**：以下定义的 `doc-parser`、`plan-generator`、`step-decomposer` 在目标架构中为子代理，
+> 当前实现中为 SuperWorker 的扁平工具。此处以工具形式描述当前实现，子代理形式为目标架构预留。
 
-```
-你是 C4 Agent，运行于工业数据服务器上，帮助用户完成数据接入工作。
+**doc-parser 工具集**（C4_FUN_00002 / 00003）：
 
-## 核心原则
-- 不进入实时数据路径。你负责理解、规划、配置和执行。
-- c4_shm_manager 始终运行，作为共享内存基础设施。
-- 涉及数据路径变更的操作必须在用户确认接入方案后执行 (C4_RS_00066)。
-- 遵守以下非技术语言规则（硬约束）。
+| 工具 | 职责 | 输入 | 输出 |
+|------|------|------|------|
+| `csv_parser` | 读取 CSV，返回 raw tabular data | `filePath` | `{headers, rows, rowCount, formatted}` |
+| `xlsx_parser` | 读取 Excel，转 CSV 后同 csv_parser | `filePath` | 同上 |
+| `txt_parser` | 读取纯文本文件 | `filePath` | `{content}` |
 
-## 可用子代理
-| 子代理 | 使用场景 |
-| doc-parser | 用户上传了 Excel/CSV/PDF 文档，提取设备信息 |
-| plan-generator | 从设备信息生成结构化的接入方案 |
-| step-decomposer | 将接入方案分解为 MCP 服务配置 |
-
-配置生成后，由 SuperWorker 直接调用确定性代码执行 Stop-Start 协议（合并 config.json → stop → adjust_shm → start），不需要子代理。
-
-任何未匹配上述子代理的任务由 SuperWorker 直接处理。
-
-## 非技术语言规则（硬约束）
-与用户交流时，必须将以下内容自行转换为自然语言描述，不得直接展示：
-
-**1. 协议与通信术语**
-- "Modbus TCP"、"IEC104"、"ASFP2" → 用 "数据采集"、"设备通信"、"数据转发" 替代
-  （例外：在向用户展示接入方案等待确认时，可用协议名 + 通俗解释，如"通过 Modbus 通信采集风机数据，转发到中心侧数据库"）
-- "波特率 9600, 8 数据位, 1 停止位, 偶校验" → "串口通信参数已配置"
-
-**2. 共享内存与内部标识**
-- "shm_id"、"shm"、"共享内存" → "数据通道"
-- "point_count"、"max_points" → 不提，只描述"数据点容量"
-- "adjust_shm" → "调整数据管道"
-- "Stop-Start 协议" → "重启服务"
-
-**3. 错误与内部标识**
-- 永远不向用户展示：错误码（如 SHM_CORRUPTED）、MCP 工具名（如 output_plan_steps）、
-  内部状态码、JSON 字段名、枚举值、端口号
-- 收到任何错误信息时，自行转换为用户可理解的自然语言描述
-- 如果无法判断错误的准确含义，使用通用描述"操作遇到问题"并建议稍后重试，不猜测原因
-- 已知的关键错误码（如 CONNECTION_REFUSED）在传入 SuperWorker 之前已由 MCP Client Bridge
-  转换为自然语言，无需 SuperWorker 再次翻译
-
-**4. 永远不向用户直接展示**
-- JSON 结构 / 原始错误消息 / MCP 工具名 / 端口号 / 内部状态码 / 枚举值
-
-## 可用 MCP 服务类型（动态生成）
-{{ service_catalog }}
-
-（`service_catalog` 仅含服务名、角色、协议、简介——不含 config_schema。
- 完整字段定义见 [§3.3 Registry 双层注入](#33-mcp-service-registryc4_fun_00017)）
-
-## 工作指南
-- 上传文件 → 自动委托 doc-parser 解析
-- 解析完成 → 展示结果，询问是否生成方案
-- 方案生成 → 展示方案（非技术语言），等待用户确认
-- 用户确认 → 自动执行 step-decomposer，然后直接调用 Stop-Start 协议
-  （Agent 保证从方案到配置的转化正确性，用户无需审核技术参数）
-```
-
-### 3.2 子代理定义与执行模块
-
-**doc-parser**（C4_FUN_00002 / 00003）：
+工具只做**纯格式提取**，不做语义推断。LLM 拿到 raw data 后，由 `responseFormat: deviceInfoSchema` 强制产出结构化设备信息：
 
 ```typescript
-const docParserSubagent = {
-  name: "doc-parser",
-  description: "解析 Excel/CSV/PDF/Word/图片，提取设备地址、寄存器映射、数据类型、通信参数。工具接收文件路径字符串，自行打开文件读取内容。",
-  systemPrompt: "从文档中提取接入所需关键信息。支持 .xlsx .csv .pdf .docx .png .jpg。工具参数是文件路径，收到后调用对应解析工具。输出结构化数据。信息不完整时列出缺失字段。",
-  tools: [xlsxParserTool, csvParserTool, pdfParserTool, imageAnalyzerTool],
-}
+const deviceInfoSchema = z.object({
+    devices: z.array(z.object({
+        name: z.string(),            // 从对话上下文提取
+        protocol: z.string(),        // 根据数据特征推断
+        connection: z.object({
+            ip: z.string(),          // 缺失时填 ""
+            port: z.number(),
+        }),
+        points: z.array(z.object({
+            name: z.string(), addr: z.number(),
+            uid: z.number().optional(), fun: z.number().optional(),
+            type: z.number().optional(), swap: z.number().optional(),
+        })),
+        missing_fields: z.array(z.string()).optional(),
+    })),
+});
 ```
 
 **plan-generator**（C4_FUN_00004）：
 
-plan-generator 通过系统提示中的 L1 服务摘要（`{{ service_catalog }}`）获知可用服务
-及其支持协议，无需调用工具查询——协议选择所需信息全部在 L1 层。完整 config_schema
-在后续 step-decomposer 环节按需拉取。
+当前实现中，plan-generator 是 LLM 的隐式推理步骤。LLM 根据 `deviceInfo` + `service_catalog` 在自然语言中描述接入方案并等待确认。待添加 `output_access_plan` 结构化输出工具后，此步骤可产出结构化的 `AccessPlan`。
+
+**step-decomposer**（C4_FUN_00044）—— `output_plan_steps` 工具：
 
 ```typescript
-const planGeneratorSubagent = {
-  name: "plan-generator",
-  description: "从设备信息生成结构化接入方案 (AccessPlan)，包含协议选择、设备清单、数据点映射、转发目标",
-  systemPrompt: "根据设备连接参数推断协议，从以下可用服务中选择匹配的服务类型生成 AccessPlan。\n\n## 可用 MCP 服务\n{{ service_catalog }}",
-  tools: [],
-}
+const outputPlanStepsTool = tool(
+    async ({ steps }) => {
+        const vr = validate_plan_steps(steps);
+        if (!vr.valid) return JSON.stringify({ success: false, errors: vr.errors });
+        return JSON.stringify({ success: true, steps });
+    },
+    {
+        name: "output_plan_steps",
+        description: "将接入方案分解为增量 MCP 服务配置步骤...",
+        schema: z.object({ steps: z.array(serviceStepSchema) }),
+    },
+);
 ```
 
-**step-decomposer**（C4_FUN_00044）：
-
-step-decomposer 为**本次接入任务**生成增量配置。它不关心 config.json 中已有哪些服务——
-只根据当前请求的 AccessPlan 输出需要新增、修改或删除的 MCP 服务条目。每条输出带有 `action`
-字段（`add` / `modify` / `delete`），由执行模块负责合并到全量 config.json。
-
-```typescript
-const stepDecomposerSubagent = {
-  name: "step-decomposer",
-  description: "将本次接入的 AccessPlan 分解为增量 MCP 服务配置。输出带 action（add/modify/delete）的 AccessPlanSteps，告知执行模块如何更新 config.json。",
-  systemPrompt: [
-    "你负责将本次接入方案转化为增量 MCP 服务配置。",
-    "只需输出本次请求涉及的服务，不需要关心 config.json 中已有的其他服务。",
-    "每条配置用 action 标注操作类型：",
-    "  add    — 本次新增的 MCP 服务",
-    "  modify — 修改已有服务的参数（如添加新转发目标）",
-    "  delete — 本次要移除的 MCP 服务",
-    "",
-    "流程：1) 查 Registry 获取每类服务的 config_schema",
-    "      2) 从 AccessPlan 提取设备/转发信息填入 plan 来源字段",
-    "      3) 对 source=default 的字段填充 config_schema 中的默认值",
-    "c4_shm_manager 已在运行，不在输出范围。",
-    registry.generateServiceCatalog(),
-    registry.generateConfigHints(),
-    "所有服务在同一 Stop-Start 周期统一处理。用 output_plan_steps 输出。",
-  ].join("\n"),
-  tools: [outputPlanStepsTool, queryRegistryTool],
-}
-```
+双层校验：Zod schema 校验（结构） + `validate_plan_steps()` 业务校验（id 格式、去重）。
 
 **执行模块（确定性代码，非子代理）**：
 

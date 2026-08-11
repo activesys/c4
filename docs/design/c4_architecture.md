@@ -1022,30 +1022,7 @@ IEC104 采集（2 个主变 RTU）和 ASFP2 转发（到中心侧数据库和第
 {"jsonrpc": "2.0", "id": 11, "result": {"content": [{"type": "text", "text": "SHM_CORRUPTED: header magic invalid"}], "isError": true}}
 ```
 
-#### Tool: `status`
-
-查询当前服务运行状态。区别于进程存活：即使进程存在，调用 `stop` 后服务处于"已停止"状态
-（数据路径关闭、实例销毁），此时 `status` 返回 `"stopped"`。
-
-**参数**：无
-
-**返回值**：`"running"` 或 `"stopped"`。
-
-**MCP 应答示例**：
-
-```json
-// ========== 已启动 ==========
-// --> 请求
-{"jsonrpc": "2.0", "id": 12, "method": "tools/call", "params": {"name": "status", "arguments": {}}}
-// <-- 应答
-{"jsonrpc": "2.0", "id": 12, "result": {"content": [{"type": "text", "text": "running"}], "isError": false}}
-
-// ========== 已停止 ==========
-// <-- 应答
-{"jsonrpc": "2.0", "id": 12, "result": {"content": [{"type": "text", "text": "stopped"}], "isError": false}}
-```
-
-**stop/start/status 相关错误码**：
+**stop/start 相关错误码**：
 
 | 错误码 | 含义 | 触发工具 |
 |--------|------|---------|
