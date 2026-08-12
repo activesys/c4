@@ -389,26 +389,27 @@ step-decomposer 输出 AccessPlanSteps 后，后续操作全部是确定性代�
 
 **executeStopAndStart()**：Stop-Start 安全协议。`stop` 是幂等操作（对已停止的服务调用
 仍返回 success），此属性是启动恢复（§3.2.3 无条件 Stop-Start）的基础。
+`config.json` 的绝对路径通过工具参数直接传递，不依赖 MCP roots/list 协议。
 
 ```
 Stop 阶段:
   for 每个数据路径 MCP 服务（不含 c4_shm_manager）: call stop()
   if 任一失败:                                  ← stop 不读 config，非 config 类失败
-    for 已停止的服务: call start() 恢复          ← 回滚：只 restart，不恢复 config
+    for 已停止的服务: call start(config_path)     ← 回滚：只 restart，不恢复 config
     abort 操作
 
 adjust_shm 阶段:
-  call adjust_shm()
+  call adjust_shm(config_path)                  ← config.json 路径作为工具参数传入
   if 失败:
     if 错误码为 CONFIG_MISSING_SECTION / DUPLICATE_KEY / UNKNOWN_READER_KEY:
       将 config.json.bak 恢复为 config.json      ← config 有问题，回退配置
-    for 已停止的服务: call start() 恢复           ← 统一 restart
+    for 已停止的服务: call start(config_path)     ← 统一 restart
     abort 操作
   （SHM_NOT_CREATED / SHM_SYSCALL_FAILED 等非 config 类失败：
     不恢复 config，后续用户解决 shm 问题后只需重试 adjust_shm → start）
 
 Start 阶段:
-  for 每个 MCP 服务: call start()
+  for 每个 MCP 服务: call start(config_path)    ← config.json 路径作为工具参数传入
   部分失败 → 不回滚已成功的，只报告哪些失败
 ```
 
@@ -884,7 +885,8 @@ Agent 启动
   │     └─ 进程不存在 → spawn 进程 + 建立 MCP stdio 连接（不启动数据路径）
   │        进程已存在 → MCP stdio 重连（不重启进程，数据路径不受影响）
   │
-  ├─ 4. 无条件执行 stop → c4_shm_manager.adjust_shm() → start
+  ├─ 4. 无条件执行 stop → c4_shm_manager.adjust_shm(config_path) → start(config_path)
+  │     · config_path 为 config.json 的绝对路径，作为工具参数直接传入
   │     · 首次启动：shm 通过 adjust_shm 间接创建（create_shm），服务初始化
   │     · 正常重启：config 与 shm 一致，adjust_shm 为 no-op；stop/start 重新加载
   │     · 崩溃后：无论崩溃在 stop/adjust_shm/start 哪一步，全路径重走一致化三者

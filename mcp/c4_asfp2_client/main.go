@@ -128,17 +128,7 @@ var state = &clientState{}
 //  Config loading
 // ──────────────────────────────────────────────
 
-func loadConfig(req *mcp.CallToolRequest) ([]clientInstance, error) {
-	rootRes, err := req.Session.ListRoots(context.Background(), nil)
-	if err != nil || rootRes == nil || len(rootRes.Roots) == 0 {
-		return nil, fmt.Errorf("CONFIG_PATH_MISSING: roots/list protocol call failed, Agent may not be responding")
-	}
-
-	configPath := rootRes.Roots[0].URI
-	if len(configPath) > 7 && configPath[:7] == "file://" {
-		configPath = configPath[7:]
-	}
-
+func loadConfig(configPath string) ([]clientInstance, error) {
 	data, err := os.ReadFile(configPath)
 	if err != nil {
 		return nil, fmt.Errorf("CONFIG_PATH_MISSING: cannot read config file: %v", err)
@@ -592,29 +582,41 @@ func runSender(ist *instanceState, shmData []byte) {
 //  MCP Tool Handlers
 // ──────────────────────────────────────────────
 
-func startHandler(ctx context.Context, req *mcp.CallToolRequest, input struct{}) (*mcp.CallToolResult, any, error) {
+type ClientStartInput struct {
+	ConfigPath string `json:"config_path" jsonschema:"required,absolute path to config.json"`
+}
+
+func startHandler(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	if state.started.Load() {
-		return newError("ALREADY_RUNNING: start has already been called and service is running, call stop first"), nil, nil
+		return newError("ALREADY_RUNNING: start has already been called and service is running, call stop first"), nil
 	}
 
-	instances, err := loadConfig(req)
+	var args map[string]any
+	if err := json.Unmarshal(req.Params.Arguments, &args); err != nil {
+		return newError("CONFIG_PATH_MISSING: cannot parse arguments"), nil
+	}
+	configPath, _ := args["config_path"].(string)
+	if configPath == "" {
+		return newError("CONFIG_PATH_MISSING: config_path is required"), nil
+	}
+	instances, err := loadConfig(configPath)
 	if err != nil {
-		return newError(err.Error()), nil, nil
+		return newError(err.Error()), nil
 	}
 
 	if err := validateConfig(instances); err != nil {
-		return newError(err.Error()), nil, nil
+		return newError(err.Error()), nil
 	}
 
 	// Empty instances array is valid — start succeeds with no senders
 	if len(instances) == 0 {
 		state.started.Store(true)
-		return newResult("success"), nil, nil
+		return newResult("success"), nil
 	}
 
 	shmData, shmFd, err := attachShm()
 	if err != nil {
-		return newError(err.Error()), nil, nil
+		return newError(err.Error()), nil
 	}
 
 	var instancesState []*instanceState
@@ -670,10 +672,10 @@ func startHandler(ctx context.Context, req *mcp.CallToolRequest, input struct{})
 		}
 		unix.Munmap(shmData)
 		unix.Close(shmFd)
-		return newError(lastErr), nil, nil
-	}
+	return newError(lastErr), nil
+}
 
-	for _, ist := range instancesState {
+for _, ist := range instancesState {
 		ist.wg.Add(1)
 		go func() {
 			defer ist.wg.Done()
@@ -688,12 +690,12 @@ func startHandler(ctx context.Context, req *mcp.CallToolRequest, input struct{})
 	state.started.Store(true)
 	state.mu.Unlock()
 
-	return newResult("success"), nil, nil
+	return newResult("success"), nil
 }
 
 func stopHandler(ctx context.Context, req *mcp.CallToolRequest, input struct{}) (*mcp.CallToolResult, any, error) {
 	if !state.started.Load() {
-		return newError("SERVICE_NOT_READY: start has not been called"), nil, nil
+		return newResult("success"), nil, nil
 	}
 
 	state.mu.Lock()
@@ -719,60 +721,6 @@ func stopHandler(ctx context.Context, req *mcp.CallToolRequest, input struct{}) 
 	state.started.Store(false)
 
 	return newResult("success"), nil, nil
-}
-
-func statusHandler(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	if !state.started.Load() {
-		return newError("SERVICE_NOT_READY: start has not been called"), nil
-	}
-
-	type instStatus struct {
-		Name        string `json:"name"`
-		Target      string `json:"target"`
-		State       string `json:"state"`
-		PointsCount int    `json:"points_count"`
-		Stats       struct {
-			PacketsSent  uint64 `json:"packets_sent"`
-			ItemsSent    uint64 `json:"items_sent"`
-			ItemsSkipped uint64 `json:"items_skipped"`
-			SendErrors   uint64 `json:"send_errors"`
-			Reconnects   uint64 `json:"reconnects"`
-		} `json:"stats"`
-	}
-
-	state.mu.Lock()
-	defer state.mu.Unlock()
-
-	var result []instStatus
-	for _, ist := range state.instances {
-		s := instStatus{
-			Name:        ist.cfg.Name,
-			Target:      fmt.Sprintf("%s:%d", ist.cfg.IP, ist.cfg.Port),
-			PointsCount: len(ist.cfg.Points),
-		}
-
-		// Determine state
-		ist.mu.Lock()
-		if ist.conn != nil {
-			s.State = "running"
-		} else {
-			s.State = "disconnected"
-		}
-		ist.mu.Unlock()
-
-		s.Stats.PacketsSent = atomic.LoadUint64(&ist.stats.packetsSent)
-		s.Stats.ItemsSent = atomic.LoadUint64(&ist.stats.itemsSent)
-		s.Stats.ItemsSkipped = atomic.LoadUint64(&ist.stats.itemsSkipped)
-		s.Stats.SendErrors = atomic.LoadUint64(&ist.stats.sendErrors)
-		s.Stats.Reconnects = atomic.LoadUint64(&ist.stats.reconnects)
-		result = append(result, s)
-	}
-
-	jsonData, err := json.Marshal(map[string]any{"instances": result})
-	if err != nil {
-		return newError("INTERNAL_ERROR: failed to marshal status: " + err.Error()), nil
-	}
-	return newResult(string(jsonData)), nil
 }
 
 // ──────────────────────────────────────────────
@@ -802,8 +750,12 @@ func main() {
 		nil,
 	)
 
-	mcp.AddTool(server,
-		&mcp.Tool{Name: "start", Description: "Start ASFP2 client sender instances"},
+	server.AddTool(
+		&mcp.Tool{
+			Name:        "start",
+			Description: "Start ASFP2 client sender instances",
+			InputSchema: json.RawMessage(`{"type":"object","properties":{"config_path":{"type":"string"}},"required":["config_path"]}`),
+		},
 		startHandler,
 	)
 
@@ -814,15 +766,6 @@ func main() {
 			InputSchema: json.RawMessage(`{"type":"object","properties":{},"required":[]}`),
 		},
 		stopHandler,
-	)
-
-	server.AddTool(
-		&mcp.Tool{
-			Name:        "status",
-			Description: "Query per-instance runtime status and statistics",
-			InputSchema: json.RawMessage(`{"type":"object","properties":{},"required":[]}`),
-		},
-		statusHandler,
 	)
 
 	if err := server.Run(context.Background(), &mcp.StdioTransport{}); err != nil {

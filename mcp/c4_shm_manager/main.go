@@ -22,26 +22,23 @@ type serverState struct {
 
 type CreateShmInput struct {
 	InstanceID string `json:"instance_id" jsonschema:"required"`
+	ConfigPath string `json:"config_path,omitempty" jsonschema:"optional,absolute path to config.json for config-based sizing"`
 }
 
 func createShmHandler(ctx context.Context, req *mcp.CallToolRequest, input CreateShmInput) (
 	*mcp.CallToolResult, any, error,
 ) {
-	rootRes, err := req.Session.ListRoots(ctx, nil)
-	if err != nil {
-		return newError("CONFIG_PATH_MISSING: roots/list protocol call failed, Agent may not be responding"), nil, nil
-	}
-
 	var sm *shm.SharedMemory
+	var err error
 
-	if shouldUseDefault(rootRes) {
-		sm, err = shm.Create(input.InstanceID, shm.DefaultMaxPoints)
-	} else {
-		configPath := rootRes.Roots[0].URI
-		if len(configPath) > 7 && configPath[:7] == "file://" {
-			configPath = configPath[7:]
+	if input.ConfigPath != "" {
+		if _, statErr := os.Stat(input.ConfigPath); statErr == nil {
+			sm, err = createFromConfig(input.ConfigPath, input.InstanceID)
+		} else {
+			sm, err = shm.Create(input.InstanceID, shm.DefaultMaxPoints)
 		}
-		sm, err = createFromConfig(configPath, input.InstanceID)
+	} else {
+		sm, err = shm.Create(input.InstanceID, shm.DefaultMaxPoints)
 	}
 	if err != nil {
 		return newError(err.Error()), nil, nil
@@ -313,41 +310,37 @@ func queryStatusHandler(ctx context.Context, req *mcp.CallToolRequest) (*mcp.Cal
 	return newResult(string(data)), nil
 }
 
-func adjustShmHandler(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func adjustShmHandler(ctx context.Context, req *mcp.CallToolRequest, input struct{ ConfigPath string `json:"config_path"` }) (*mcp.CallToolResult, any, error) {
 	if state.sm == nil {
-		return newError("SHM_NOT_CREATED: shared memory not initialized, call create_shm first"), nil
+		return newError("SHM_NOT_CREATED: shared memory not initialized, call create_shm first"), nil, nil
 	}
 
 	if _, err := os.Stat(state.sm.Path()); os.IsNotExist(err) {
 		state.sm = nil
 		state.currentInstanceID = ""
-		return newError("SHM_NOT_CREATED: shared memory not initialized, call create_shm first"), nil
+		return newError("SHM_NOT_CREATED: shared memory not initialized, call create_shm first"), nil, nil
 	}
 
-	rootRes, err := req.Session.ListRoots(ctx, nil)
-	if err != nil || rootRes == nil || len(rootRes.Roots) == 0 {
-		return newError("CONFIG_PATH_MISSING: roots/list protocol call failed, Agent may not be responding"), nil
+	if input.ConfigPath == "" {
+		return newError("CONFIG_PATH_MISSING: config_path is required"), nil, nil
 	}
 
-	configPath := rootRes.Roots[0].URI
-	if len(configPath) > 7 && configPath[:7] == "file://" {
-		configPath = configPath[7:]
-	}
+	configPath := input.ConfigPath
 
 	config, writers, readers, err := loadConfigSection(configPath)
 	if err != nil {
-		return newError(err.Error()), nil
+		return newError(err.Error()), nil, nil
 	}
 
 	writersEmpty := len(writers) == 0
 	readersEmpty := len(readers) == 0
 	if writersEmpty != readersEmpty {
-		return newError("CONFIG_MISSING_SECTION: 'c4_shm_manager.writer' is empty but 'c4_shm_manager.reader' is not, both must be non-empty or both empty"), nil
+		return newError("CONFIG_MISSING_SECTION: 'c4_shm_manager.writer' is empty but 'c4_shm_manager.reader' is not, both must be non-empty or both empty"), nil, nil
 	}
 
 	requiredPoints, err := countPoints(config, writers)
 	if err != nil {
-		return newError(err.Error()), nil
+		return newError(err.Error()), nil, nil
 	}
 
 	h := state.sm.HeaderInfo()
@@ -362,25 +355,25 @@ func adjustShmHandler(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallT
 		}
 		instances, ok := section.([]any)
 		if !ok {
-			return newError(fmt.Sprintf("CONFIG_PARSE_ERROR: writer '%s' is not an array", wType)), nil
+			return newError(fmt.Sprintf("CONFIG_PARSE_ERROR: writer '%s' is not an array", wType)), nil, nil
 		}
 		for _, inst := range instances {
 			instMap, ok := inst.(map[string]any)
 			if !ok {
-				return newError(fmt.Sprintf("CONFIG_PARSE_ERROR: instance in '%s' is not an object", wType)), nil
+				return newError(fmt.Sprintf("CONFIG_PARSE_ERROR: instance in '%s' is not an object", wType)), nil, nil
 			}
 			serviceID, _ := instMap["id"].(string)
 			pts, _ := instMap["points"].([]any)
 			for _, pt := range pts {
 				ptMap, ok := pt.(map[string]any)
 				if !ok {
-					return newError(fmt.Sprintf("CONFIG_PARSE_ERROR: point in '%s' is not an object", wType)), nil
+					return newError(fmt.Sprintf("CONFIG_PARSE_ERROR: point in '%s' is not an object", wType)), nil, nil
 				}
 				pointID, _ := ptMap["id"].(string)
 				key := serviceID + "." + pointID
 
 				if existingID, exists := keyMap[key]; exists {
-					return newError(fmt.Sprintf("DUPLICATE_KEY: key '%s' already assigned to shm_id=%d", key, existingID)), nil
+					return newError(fmt.Sprintf("DUPLICATE_KEY: key '%s' already assigned to shm_id=%d", key, existingID)), nil, nil
 				}
 
 				shmID := 0
@@ -412,18 +405,18 @@ func adjustShmHandler(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallT
 		section := config[wType]
 		instances, ok := section.([]any)
 		if !ok {
-			return newError(fmt.Sprintf("CONFIG_PARSE_ERROR: writer '%s' is not an array", wType)), nil
+			return newError(fmt.Sprintf("CONFIG_PARSE_ERROR: writer '%s' is not an array", wType)), nil, nil
 		}
 		for _, inst := range instances {
 			instMap, ok := inst.(map[string]any)
 			if !ok {
-				return newError(fmt.Sprintf("CONFIG_PARSE_ERROR: instance in '%s' is not an object", wType)), nil
+				return newError(fmt.Sprintf("CONFIG_PARSE_ERROR: instance in '%s' is not an object", wType)), nil, nil
 			}
 			pts, _ := instMap["points"].([]any)
 			for _, pt := range pts {
 				ptMap, ok := pt.(map[string]any)
 				if !ok {
-					return newError(fmt.Sprintf("CONFIG_PARSE_ERROR: point in '%s' is not an object", wType)), nil
+					return newError(fmt.Sprintf("CONFIG_PARSE_ERROR: point in '%s' is not an object", wType)), nil, nil
 				}
 				shmID := 0
 				if sid, ok := ptMap["shm_id"].(float64); ok {
@@ -455,23 +448,23 @@ func adjustShmHandler(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallT
 		}
 		instances, ok := section.([]any)
 		if !ok {
-			return newError(fmt.Sprintf("CONFIG_PARSE_ERROR: reader '%s' is not an array", rType)), nil
+			return newError(fmt.Sprintf("CONFIG_PARSE_ERROR: reader '%s' is not an array", rType)), nil, nil
 		}
 		for _, inst := range instances {
 			instMap, ok := inst.(map[string]any)
 			if !ok {
-				return newError(fmt.Sprintf("CONFIG_PARSE_ERROR: instance in '%s' is not an object", rType)), nil
+				return newError(fmt.Sprintf("CONFIG_PARSE_ERROR: instance in '%s' is not an object", rType)), nil, nil
 			}
 			pts, _ := instMap["points"].([]any)
 			for _, pt := range pts {
 				ptMap, ok := pt.(map[string]any)
 				if !ok {
-					return newError(fmt.Sprintf("CONFIG_PARSE_ERROR: point in '%s' is not an object", rType)), nil
+					return newError(fmt.Sprintf("CONFIG_PARSE_ERROR: point in '%s' is not an object", rType)), nil, nil
 				}
 				key, _ := ptMap["key"].(string)
 				pid, exists := keyMap[key]
 				if !exists {
-					return newError(fmt.Sprintf("UNKNOWN_READER_KEY: reader key '%s' not found in any writer", key)), nil
+					return newError(fmt.Sprintf("UNKNOWN_READER_KEY: reader key '%s' not found in any writer", key)), nil, nil
 				}
 				ptMap["shm_id"] = float64(pid)
 			}
@@ -482,26 +475,26 @@ func adjustShmHandler(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallT
 	if needsExpand {
 		newMaxPoints := requiredPoints * 2
 		if err := state.sm.Expand(newMaxPoints); err != nil {
-			return newError(err.Error()), nil
+			return newError(err.Error()), nil, nil
 		}
 	}
 	state.sm.SetHeaderUint32(8, uint32(requiredPoints))
 
 	out, err := json.MarshalIndent(config, "", "  ")
 	if err != nil {
-		return newError(fmt.Sprintf("CONFIG_WRITE_FAILED: marshal failed: %v", err)), nil
+		return newError(fmt.Sprintf("CONFIG_WRITE_FAILED: marshal failed: %v", err)), nil, nil
 	}
 
 	tmpPath := configPath + ".tmp"
 	if err := os.WriteFile(tmpPath, out, 0644); err != nil {
-		return newError(fmt.Sprintf("CONFIG_WRITE_FAILED: write failed: %v", err)), nil
+		return newError(fmt.Sprintf("CONFIG_WRITE_FAILED: write failed: %v", err)), nil, nil
 	}
 	if err := os.Rename(tmpPath, configPath); err != nil {
 		os.Remove(tmpPath)
-		return newError(fmt.Sprintf("CONFIG_WRITE_FAILED: rename failed: %v", err)), nil
+		return newError(fmt.Sprintf("CONFIG_WRITE_FAILED: rename failed: %v", err)), nil, nil
 	}
 
-	return newResult("success"), nil
+	return newResult("success"), nil, nil
 }
 
 func newResult(text string) *mcp.CallToolResult {
@@ -537,11 +530,11 @@ func main() {
 		queryStatusHandler,
 	)
 
-	server.AddTool(
+	mcp.AddTool(server,
 		&mcp.Tool{
 			Name:        "adjust_shm",
 			Description: "Adjust shared memory capacity and point allocation based on config file",
-			InputSchema: json.RawMessage(`{"type":"object","properties":{},"required":[]}`),
+			InputSchema: json.RawMessage(`{"type":"object","properties":{"config_path":{"type":"string","description":"Absolute path to config.json"}},"required":["config_path"]}`),
 		},
 		adjustShmHandler,
 	)

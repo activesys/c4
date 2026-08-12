@@ -95,6 +95,11 @@ export class C4McpManager {
         return this._client.getClient(name);
     }
 
+    /** 获取底层 MultiServerMCPClient（用于 callToolViaMultiClient 等 LangChain 工具调用） */
+    getMultiClient(): MultiServerMCPClient {
+        return this._client;
+    }
+
     /** 断开所有连接 */
     async close(): Promise<void> {
         await this._client.close();

@@ -193,10 +193,10 @@ ASFP2 发送实例。
   3. Agent 调用 c4_shm_manager.adjust_shm()
      → 计算所需点数 → 分配 shm_id → 回填配置文件中 c4_asfp2_client 的 shm_id 字段
   4. Agent 启动 c4_asfp2_client 进程（仅注册 MCP 工具，无其他初始化）
-  5. Agent 调用 c4_asfp2_client 的 `start` 工具
-     → client 在工具 handler 中完成：
-     a. 通过 roots/list 获取配置文件路径
-     b. 读取 c4_asfp2_client 配置段
+   5. Agent 调用 c4_asfp2_client 的 `start` 工具，传入 `config_path` 参数
+      → client 在工具 handler 中完成：
+      a. 从 config_path 参数获取配置文件绝对路径
+      b. 通过 loadConfig(configPath) 读取 c4_asfp2_client 配置段
      c. 校验配置有效性（shm_id 合法性、addr 合法性等）
      d. 以 O_RDONLY 模式 shm_open 已有共享内存
      e. mmap 共享内存，校验 magic
@@ -234,10 +234,8 @@ sequenceDiagram
     A->>C: 启动进程 → MCP initialize
     C-->>A: 工具列表（stop / status / start）
 
-    A->>C: start()
-    C->>A: roots/list
-    A-->>C: 配置文件路径
-    C->>C: 读取配置，校验有效性
+    A->>C: start(config_path="/etc/c4/config.json")
+    C->>C: loadConfig(configPath) 读取配置，校验有效性
     C->>C: shm_open(O_RDONLY) + mmap
     C->>C: 校验 magic
     C->>C: 构建 shm_id→addr 映射
@@ -253,9 +251,9 @@ sequenceDiagram
     C-->>A: "success"
     A->>SM: adjust_shm()
     SM-->>A: 完成
-    A->>C: start()
+    A->>C: start(config_path="/etc/c4/config.json")
     C->>C: shm_open + mmap
-    C->>C: 加载配置 → 启动所有实例
+    C->>C: loadConfig(configPath) → 启动所有实例
     C-->>A: "success"
 ```
 
@@ -265,11 +263,11 @@ Agent 在需要调整共享内存容量或变更发送配置时，执行 Stop-St
 
 1. Agent 调用 `stop` → 关闭所有 TCP 连接，销毁全部实例，munmap 并关闭共享内存
 2. Agent 调用 `c4_shm_manager.adjust_shm()` 完成共享内存调整
-3. Agent 调用 `start` → 重新 `shm_open` + `mmap` 共享内存，加载配置文件，启动所有实例
+3. Agent 调用 `start`（传入 `config_path` 参数）→ 重新 `shm_open` + `mmap` 共享内存，通过 `loadConfig(configPath)` 加载配置文件，启动所有实例
 
 `stop` 销毁所有实例并释放共享内存映射后，服务回到进程刚启动的状态。`start` 的执行流程与首次启动完全一致——无需区分"首次"和"重启"。
 
-> **接口一致性**：`stop` 和 `start` 均无参数。`stop` → `adjust_shm` → `start` 三步操作，Agent 无需在服务间传递 shm_id 列表或容量参数。`start` 在 `stop` 之后可再次调用——与首次启动复用同一逻辑。
+> **接口一致性**：`stop` 无参数；`start` 接受 `config_path` 参数。`stop` → `adjust_shm` → `start` 三步操作，Agent 无需在服务间传递 shm_id 列表或容量参数。`start` 在 `stop` 之后可再次调用——与首次启动复用同一逻辑。
 >
 > **数据语义**：Stop-Start 后 `last_seen` 归零（随进程状态重置），导致重启时可能重复发送 stop 前最近一次已成功发送的数据项。客户端提供 **at-least-once** 发送语义，接收端应具备幂等处理能力。
 
@@ -600,7 +598,7 @@ tear down 已建立的 goroutine（关闭连接、清理资源），恢复到调
 `start` 重新 `shm_open` + `mmap` 后加载最新配置并启动实例。与首次启动执行完全相同的流程。
 **若服务当前处于运行状态（已 start 且未 stop），返回 `ALREADY_RUNNING`。**
 
-**参数**：无
+**参数**：`config_path`（string，必填）—— 配置文件 config.json 的绝对路径
 
 **返回值**：成功返回 `"success"`，失败返回 `isError: true`。
 
@@ -609,7 +607,7 @@ tear down 已建立的 goroutine（关闭连接、清理资源），恢复到调
 | 错误码 | 含义 |
 |--------|------|
 | `ALREADY_RUNNING` | 服务当前处于运行状态，须先调用 `stop` |
-| `CONFIG_PATH_MISSING` | `roots/list` 超时或未返回配置文件路径 |
+| `CONFIG_PATH_MISSING` | `config_path` 参数缺失或无法读取指定文件 |
 | `CONFIG_PARSE_ERROR` | 配置文件格式错误或 `c4_asfp2_client` 段缺失 |
 | `SHM_CORRUPTED` | 共享内存 magic 校验失败 |
 | `SHM_OPEN_FAILED` | 无法打开共享内存（可能 `c4_shm_manager` 未创建） |
@@ -621,7 +619,7 @@ tear down 已建立的 goroutine（关闭连接、清理资源），恢复到调
 ```json
 // ========== 成功 ==========
 // --> 请求
-{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "start", "arguments": {}}}
+{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "start", "arguments": {"config_path": "/etc/c4/config.json"}}}
 // <-- 应答
 {"jsonrpc": "2.0", "id": 1, "result": {"content": [{"type": "text", "text": "success"}], "isError": false}}
 
@@ -636,7 +634,7 @@ tear down 已建立的 goroutine（关闭连接、清理资源），恢复到调
 
 关闭所有 TCP 连接，销毁全部实例，服务回到初始化完成但未启动的状态。
 `stop` 之后可调用 `start` 重新启动。
-**若 `start` 从未成功调用过，返回 `SERVICE_NOT_READY`。**
+**幂等：若 `start` 从未成功调用过（服务未运行），直接返回 `success`，不报错。**
 
 **参数**：无
 
@@ -700,8 +698,9 @@ tear down 已建立的 goroutine（关闭连接、清理资源），恢复到调
 | 场景 | 触发工具 | 处理方式 |
 |------|---------|---------|
 | `start` 在运行状态下再次调用 | `start` | 返回 `ALREADY_RUNNING` |
-| `start` 从未成功调用过时调用 `stop`/`status` | `stop`、`status` | 返回 `SERVICE_NOT_READY` |
-| `roots/list` 超时或路径缺失 | `start` | 返回 `CONFIG_PATH_MISSING` |
+| `stop` 在服务未运行（从未 start）时调用 | `stop` | 幂等：直接返回 `success`，不报错 |
+| `status` 在服务未运行（从未 start）时调用 | `status` | 返回 `SERVICE_NOT_READY` |
+| `config_path` 参数缺失或无法读取指定文件 | `start` | 返回 `CONFIG_PATH_MISSING` |
 | 配置文件格式错误 | `start` | 返回 `isError: true` + `CONFIG_PARSE_ERROR` |
 | 共享内存 magic 校验失败 | `start` | 返回 `SHM_CORRUPTED`，Agent 应重建共享内存后重试 |
 | 无法打开共享内存 | `start` | 返回 `SHM_OPEN_FAILED` |

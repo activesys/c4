@@ -630,7 +630,7 @@ flowchart TD
 
 # 第三章 Agent 和 MCP 接口规范
 
-Agent（TypeScript）与 MCP Server（Go）的交互分为两部分：**运行时 MCP 工具调用**（Agent 通过 MCP 协议操作 MCP Server）和**启动配置下发**（Agent 写入配置文件后启动各 MCP Server。`/etc/c4/config.json` 仅为示例路径，实际路径和文件名可通过 roots/list 配置）。各 MCP 工具的签名、参数 schema、MCP 应答格式及错误码详见 §3.3.2~§3.3.5。
+Agent（TypeScript）与 MCP Server（Go）的交互分为两部分：**运行时 MCP 工具调用**（Agent 通过 MCP 协议操作 MCP Server）和**启动配置下发**（Agent 写入配置文件后启动各 MCP Server。`/etc/c4/config.json` 仅为示例路径，配置文件的绝对路径通过 start(config_path)、adjust_shm(config_path) 等工具参数直接传入，不依赖 MCP roots/list 协议）。各 MCP 工具的签名、参数 schema、MCP 应答格式及错误码详见 §3.3.2~§3.3.5。
 
 ---
 
@@ -673,7 +673,7 @@ Agent（TypeScript）与 MCP Server（Go）的交互分为两部分：**运行�
   6. Agent 通过 MCP 工具监控各 MCP Server 状态（心跳、数据统计）
   7. 用户要求新增采集点 → Agent 更新配置文件，生成新的 points 列表
       → Agent 通过 Stop-Start 协议停止所有 MCP 数据路径
-      → Agent 调用 c4_shm_manager.adjust_shm() 完成容量调整和点分配
+      → Agent 调用 c4_shm_manager.adjust_shm(config_path) 完成容量调整和点分配
       → Agent 重新 start 所有 MCP
 
 停止/回收阶段：
@@ -685,7 +685,7 @@ Agent（TypeScript）与 MCP Server（Go）的交互分为两部分：**运行�
 
 ## 3.2 配置文件（示例：/etc/c4/config.json）
 
-配置文件是 Agent 启动各 MCP Server 的入口。路径和文件名可通过 `roots/list` 配置，以下以 `/etc/c4/config.json` 为例说明。每个 MCP Server 启动时读取
+配置文件是 Agent 启动各 MCP Server 的入口。配置文件的绝对路径由 Agent 通过工具参数 config_path 直接传入（start(config_path)、adjust_shm(config_path)），不依赖 MCP roots/list 协议。以下以 `/etc/c4/config.json` 为例说明。每个 MCP Server 启动时读取
 文件中同名的顶层 key 对应的配置数组（支持多实例）。Agent 负责生成和维护此文件。
 
 ### 3.2.1 通用结构
@@ -965,8 +965,8 @@ IEC104 采集（2 个主变 RTU）和 ASFP2 转发（到中心侧数据库和第
 
 ## 3.3 共享内存管理
 
-`c4_shm_manager` 通过 MCP 协议向 Agent 暴露 `create_shm`、`adjust_shm`
-三个工具，涵盖共享内存的创建、扩容、点分配和状态查询。Agent 不直接操作共享内存。
+`c4_shm_manager` 通过 MCP 协议向 Agent 暴露 `create_shm`、`adjust_shm(config_path)`
+三个工具，涵盖共享内存的创建、扩容、点分配和状态查询。`adjust_shm` 通过 `config_path` 参数接收配置文件的绝对路径。Agent 不直接操作共享内存。
 
 > 工具接口定义、配置文件解析算法、交互时序和错误码详见 [c4_shm_manager.md](c4_shm_manager.md)。
 
@@ -978,7 +978,7 @@ IEC104 采集（2 个主变 RTU）和 ASFP2 转发（到中心侧数据库和第
 `c4_iec104_client`、`c4_asfp2_server`、`c4_asfp2_client`、`c4_influxdb_client`）
 均应实现的通用生命周期接口，供 Agent 在 Stop-Start 协议和故障恢复中使用。
 
-**操作粒度**：`stop` 和 `start` 的操作对象是整个 MCP 服务进程。`stop` 关闭所有数据路径并销毁实例状态，`start` 重新加载配置并启动全部实例。共享内存级别的调整由 `c4_shm_manager` 的 `adjust_shm` 工具负责。
+**操作粒度**：`stop` 和 `start` 的操作对象是整个 MCP 服务进程。`stop` 关闭所有数据路径并销毁实例状态，`start` 重新加载配置并启动全部实例。共享内存级别的调整由 `c4_shm_manager` 的 `adjust_shm(config_path)` 工具负责。
 
 #### Tool: `stop`
 
@@ -1004,7 +1004,7 @@ IEC104 采集（2 个主变 RTU）和 ASFP2 转发（到中心侧数据库和第
 
 加载配置文件，附加共享内存，启动所有数据路径实例。首次调用完成服务初始化，后续调用（`stop` 之后）重新加载配置并重启实例。
 
-**参数**：无
+**参数**：`config_path`（必填，string）—— config.json 的绝对路径
 
 **返回值**：成功时返回 `"success"`。
 
@@ -1013,7 +1013,7 @@ IEC104 采集（2 个主变 RTU）和 ASFP2 转发（到中心侧数据库和第
 ```json
 // ========== 成功 ==========
 // --> 请求
-{"jsonrpc": "2.0", "id": 11, "method": "tools/call", "params": {"name": "start", "arguments": {}}}
+{"jsonrpc": "2.0", "id": 11, "method": "tools/call", "params": {"name": "start", "arguments": {"config_path": "/etc/c4/config.json"}}}
 // <-- 应答
 {"jsonrpc": "2.0", "id": 11, "result": {"content": [{"type": "text", "text": "success"}], "isError": false}}
 

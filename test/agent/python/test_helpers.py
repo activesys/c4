@@ -109,6 +109,23 @@ CSV_POINTS = [
     "temperature,1002,1,3,10,2",
 ]
 
+# ASFP2 数据点表 — 接收端设备 + 转发
+ASFP2_POINTS = [
+    "device_name,device_ip,protocol,port,point_name,addr",
+    "华能阿拉善ASFP2数据源,172.16.109.11,asfp2,9999,windspeed,1000",
+    "华能阿拉善ASFP2数据源,172.16.109.11,asfp2,9999,temperature,1002",
+    "华能阿拉善ASFP2数据源,172.16.109.11,asfp2,9999,power,1004",
+    "华能阿拉善ASFP2数据源,172.16.109.11,asfp2,9999,pressure,1006",
+    "华能阿拉善ASFP2数据源,172.16.109.11,asfp2,9999,vibration,1008",
+]
+
+
+def create_asfp2_csv(target_dir: Path, filename: str = "asfp2_points.csv") -> Path:
+    """创建 ASFP2 数据源点表 CSV。protocol=asfp2，port=9999。"""
+    filepath = target_dir / filename
+    filepath.write_text("\n".join(ASFP2_POINTS), encoding="utf-8")
+    return filepath
+
 
 def create_test_csv(target_dir: Path, filename: str = "test_points.csv") -> Path:
     """

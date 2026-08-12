@@ -83,39 +83,29 @@ var state = &serverState{}
 //  Config loading
 // ──────────────────────────────────────────────
 
-func loadConfig(req *mcp.CallToolRequest) ([]serverInstance, string, error) {
-	rootRes, err := req.Session.ListRoots(context.Background(), nil)
-	if err != nil || rootRes == nil || len(rootRes.Roots) == 0 {
-		return nil, "", fmt.Errorf("CONFIG_PATH_MISSING: roots/list protocol call failed, Agent may not be responding")
-	}
-
-	configPath := rootRes.Roots[0].URI
-	if len(configPath) > 7 && configPath[:7] == "file://" {
-		configPath = configPath[7:]
-	}
-
+func loadConfig(configPath string) ([]serverInstance, error) {
 	data, err := os.ReadFile(configPath)
 	if err != nil {
-		return nil, "", fmt.Errorf("CONFIG_PATH_MISSING: cannot read config file: %v", err)
+		return nil, fmt.Errorf("CONFIG_PATH_MISSING: cannot read config file: %v", err)
 	}
 
 	var fullCfg map[string]any
 	if err := json.Unmarshal(data, &fullCfg); err != nil {
-		return nil, "", fmt.Errorf("CONFIG_PARSE_ERROR: failed to parse config JSON: %v", err)
+		return nil, fmt.Errorf("CONFIG_PARSE_ERROR: failed to parse config JSON: %v", err)
 	}
 
 	section, ok := fullCfg["c4_asfp2_server"]
 	if !ok {
-		return nil, "", fmt.Errorf("CONFIG_PARSE_ERROR: 'c4_asfp2_server' section not found in config")
+		return nil, fmt.Errorf("CONFIG_PARSE_ERROR: 'c4_asfp2_server' section not found in config")
 	}
 
 	rawJSON, _ := json.Marshal(section)
 	var instances []serverInstance
 	if err := json.Unmarshal(rawJSON, &instances); err != nil {
-		return nil, "", fmt.Errorf("CONFIG_PARSE_ERROR: failed to parse 'c4_asfp2_server' section: %v", err)
+		return nil, fmt.Errorf("CONFIG_PARSE_ERROR: failed to parse 'c4_asfp2_server' section: %v", err)
 	}
 
-	return instances, configPath, nil
+	return instances, nil
 }
 
 func validateConfig(instances []serverInstance) error {
@@ -529,29 +519,41 @@ func writeBlock(shmData []byte, shmID int, dataType uint8, timestamp uint64, val
 //  MCP Tool Handlers
 // ──────────────────────────────────────────────
 
-func startHandler(ctx context.Context, req *mcp.CallToolRequest, input struct{}) (*mcp.CallToolResult, any, error) {
+type ServerStartInput struct {
+	ConfigPath string `json:"config_path" jsonschema:"required,absolute path to config.json"`
+}
+
+func startHandler(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	if state.started.Load() {
-		return newError("ALREADY_RUNNING: start has already been called and service is running, call stop first"), nil, nil
+		return newError("ALREADY_RUNNING: start has already been called and service is running, call stop first"), nil
 	}
 
-	instances, _, err := loadConfig(req)
+	var args map[string]any
+	if err := json.Unmarshal(req.Params.Arguments, &args); err != nil {
+		return newError("CONFIG_PATH_MISSING: cannot parse arguments"), nil
+	}
+	configPath, _ := args["config_path"].(string)
+	if configPath == "" {
+		return newError("CONFIG_PATH_MISSING: config_path is required"), nil
+	}
+	instances, err := loadConfig(configPath)
 	if err != nil {
-		return newError(err.Error()), nil, nil
+		return newError(err.Error()), nil
 	}
 
 	if err := validateConfig(instances); err != nil {
-		return newError(err.Error()), nil, nil
+		return newError(err.Error()), nil
 	}
 
 	// Empty instances array is valid — start succeeds with no port listeners
 	if len(instances) == 0 {
 		state.started.Store(true)
-		return newResult("success"), nil, nil
+		return newResult("success"), nil
 	}
 
 	shmData, shmFd, err := attachShm()
 	if err != nil {
-		return newError(err.Error()), nil, nil
+		return newError(err.Error()), nil
 	}
 
 	var instancesState []*instanceState
@@ -586,7 +588,7 @@ func startHandler(ctx context.Context, req *mcp.CallToolRequest, input struct{})
 		}
 		unix.Munmap(shmData)
 		unix.Close(shmFd)
-		return newError(lastErr), nil, nil
+		return newError(lastErr), nil
 	}
 
 	// Start goroutines
@@ -605,7 +607,7 @@ func startHandler(ctx context.Context, req *mcp.CallToolRequest, input struct{})
 	state.started.Store(true)
 	state.mu.Unlock()
 
-	return newResult("success"), nil, nil
+	return newResult("success"), nil
 }
 
 func runServer(ist *instanceState, shmData []byte) {
@@ -627,7 +629,7 @@ func runServer(ist *instanceState, shmData []byte) {
 
 func stopHandler(ctx context.Context, req *mcp.CallToolRequest, input struct{}) (*mcp.CallToolResult, any, error) {
 	if !state.started.Load() {
-		return newError("SERVICE_NOT_READY: start has not been called"), nil, nil
+		return newResult("success"), nil, nil
 	}
 
 	state.mu.Lock()
@@ -649,54 +651,6 @@ func stopHandler(ctx context.Context, req *mcp.CallToolRequest, input struct{}) 
 	state.started.Store(false)
 
 	return newResult("success"), nil, nil
-}
-
-func statusHandler(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	if !state.started.Load() {
-		return newError("SERVICE_NOT_READY: start has not been called"), nil
-	}
-
-	type instStatus struct {
-		ID          string `json:"id"`
-		Name        string `json:"name"`
-		Port        int    `json:"port"`
-		State       string `json:"state"`
-		Connections int    `json:"connections"`
-		PointsCount int    `json:"points_count"`
-		Stats       struct {
-			PacketsReceived uint64 `json:"packets_received"`
-			ItemsReceived   uint64 `json:"items_received"`
-			ItemsWritten    uint64 `json:"items_written"`
-			ItemsDropped    uint64 `json:"items_dropped"`
-			ParseErrors     uint64 `json:"parse_errors"`
-		} `json:"stats"`
-	}
-
-	state.mu.Lock()
-	defer state.mu.Unlock()
-
-	var result []instStatus
-	for _, ist := range state.instances {
-		s := instStatus{
-			ID:          ist.cfg.ID,
-			Name:        ist.cfg.Name,
-			Port:        ist.cfg.Port,
-			PointsCount: len(ist.cfg.Points),
-		}
-		s.State = "running"
-		s.Stats.PacketsReceived = atomic.LoadUint64(&ist.stats.packetsReceived)
-		s.Stats.ItemsReceived = atomic.LoadUint64(&ist.stats.itemsReceived)
-		s.Stats.ItemsWritten = atomic.LoadUint64(&ist.stats.itemsWritten)
-		s.Stats.ItemsDropped = atomic.LoadUint64(&ist.stats.itemsDropped)
-		s.Stats.ParseErrors = atomic.LoadUint64(&ist.stats.parseErrors)
-		result = append(result, s)
-	}
-
-	jsonData, err := json.Marshal(map[string]any{"instances": result})
-	if err != nil {
-		return newError("INTERNAL_ERROR: failed to marshal status: " + err.Error()), nil
-	}
-	return newResult(string(jsonData)), nil
 }
 
 // ──────────────────────────────────────────────
@@ -726,8 +680,12 @@ func main() {
 		nil,
 	)
 
-	mcp.AddTool(server,
-		&mcp.Tool{Name: "start", Description: "Start ASFP2 server instances"},
+	server.AddTool(
+		&mcp.Tool{
+			Name:        "start",
+			Description: "Start ASFP2 server instances",
+			InputSchema: json.RawMessage(`{"type":"object","properties":{"config_path":{"type":"string"}},"required":["config_path"]}`),
+		},
 		startHandler,
 	)
 
@@ -738,15 +696,6 @@ func main() {
 			InputSchema: json.RawMessage(`{"type":"object","properties":{},"required":[]}`),
 		},
 		stopHandler,
-	)
-
-	server.AddTool(
-		&mcp.Tool{
-			Name:        "status",
-			Description: "Query per-instance runtime status and statistics",
-			InputSchema: json.RawMessage(`{"type":"object","properties":{},"required":[]}`),
-		},
-		statusHandler,
 	)
 
 	if err := server.Run(context.Background(), &mcp.StdioTransport{}); err != nil {

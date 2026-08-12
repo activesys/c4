@@ -89,7 +89,7 @@ Phase 1 - Stop：
 Phase 2 - adjust_shm：
    a. Agent 确认所有 MCP 进程已停止 → 调用 c4_shm_manager.adjust_shm()
    b. c4_shm_manager 内部：
-      - 通过 roots/list 获取配置文件路径
+       - 读取 adjust_shm 的 config_path 参数指定的配置文件
       - 读取配置文件，按 §2.2 算法计算所需点数 (required_points)
          ┌ 回收孤儿块（扫描 state=1 block，按 key 匹配判定孤儿）：
          │   遍历配置文件中的所有 Writer point，构建 key → shm_id 映射
@@ -143,10 +143,8 @@ sequenceDiagram
 
     Note over A: 所有进程已暂停<br/>shm 无访问
 
-    A->>S: adjust_shm()
-    S->>A: roots/list
-    A-->>S: {roots: [{uri: "file:///etc/c4/config.json"}]}
-    S->>S: 读配置，算点数<br/>容量判断
+    A->>S: adjust_shm(config_path)
+    S->>S: 读取 config_path 指定的配置<br/>读配置，算点数<br/>容量判断
     Note over S: 先回收孤儿块<br/>（按 key 匹配，不按计数）
     alt 不超容量
         Note over S: 空闲块（含回收的）中分配<br/>已有点不变
@@ -441,13 +439,13 @@ Agent 与 `c4_shm_manager` 的交互遵循 MCP 标准协议。启动 `c4_shm_man
 ```
 1. Agent 启动 c4_shm_manager 进程
 2. Agent 使用 MCP 协议初始化 c4_shm_manager，获得工具列表
-   （Agent 须在 initialize 中声明 roots 能力，否则 c4_shm_manager 无法发送 roots/list 请求）
-3. Agent 调用 c4_shm_manager 的 create_shm 工具（传入 instance_id）
-4. c4_shm_manager 向 Agent 发送 roots/list 请求（MCP 协议中 server→client 的根目录查询）
-   → Agent 返回配置文件的绝对路径 URI（含文件名）。文件名和路径可配置，例如
+   （无需声明 roots 能力；配置路径通过工具参数 config_path 显式传入）
+3. Agent 调用 c4_shm_manager 的 create_shm 工具（传入 instance_id 和可选的 config_path）
+4. c4_shm_manager 直接按 config_path 参数读取配置文件。
+   路径由 Agent 通过 create_shm 的 config_path 参数显式传入，例如
    `/etc/c4/shm.json` 或 `~/.local/c4/shared_memory.json`
 5. c4_shm_manager 根据配置文件是否存在决定共享内存大小：
-   - **配置文件不存在或为 null**（roots/list 返回空、文件路径不存在、或文件内容为空 JSON）：
+    - **配置文件不存在或为 null**（config_path 为空（未传）、文件路径不存在、或文件内容为空 JSON）：
      创建默认 10 万点共享内存空间（max_points = 100000，point_count = 0），
      所有 Data Block 初始化为 magic=0xC4DA7A00、state=0，
      此时无 Writer/Reader 配置，不涉及 shm_id 分配和配置回填
@@ -469,16 +467,14 @@ sequenceDiagram
     participant FS as config.json
 
     A->>S: 启动进程
-    A->>S: initialize (MCP 握手, 声明 roots 能力)
+    A->>S: initialize (MCP 握手)
     S-->>A: 工具列表 (create_shm, adjust_shm, ...)
 
-    A->>S: tools/call (create_shm)<br/>params: {instance_id}
-    S->>A: roots/list (请求根目录)
-    A-->>S: {roots: [{uri: "file:///etc/c4/config.json"}]}
+    A->>S: tools/call (create_shm)<br/>params: {instance_id, config_path}
 
-    alt 配置文件存在
+    alt config_path 非空且文件存在
         S->>FS: 读取配置文件, 根据 points 总数计算 shm_size
-    else 配置文件不存在
+    else config_path 为空或文件不存在
         Note over S: max_points = 100000 (默认)
     end
     S->>S: shm_open + ftruncate + mmap<br/>初始化 Header + Data Block Array
@@ -550,9 +546,7 @@ sequenceDiagram
     participant S as c4_shm_manager
     participant CFG as config.json
 
-    A->>S: create_shm({instance_id})
-    S->>A: roots/list
-    A-->>S: {roots: [{uri: "file:///etc/c4/config.json"}]}
+    A->>S: create_shm({instance_id, config_path})
 
     S->>CFG: 读取配置文件
     Note over S: 遍历 Writer：<br/>modbus#1: [{id:windspeed},{id:temperature}]<br/>modbus#2: [{id:windspeed},{id:temperature}]<br/>iec104#1: [{id:uab},{id:ubc},{id:uac}]<br/>iec104#2: [{id:alarm1},{id:alarm2},{id:alarm3}]<br/>writer_points=10
@@ -608,6 +602,10 @@ sequenceDiagram
             "instance_id": {
                 "type": "string",
                 "description": "C4 实例标识符。共享内存命名为 /c4_{instance_id}"
+            },
+            "config_path": {
+                "type": "string",
+                "description": "配置文件路径（可选）。为空时使用默认 10 万点（max_points=100000）"
             }
         },
         "required": ["instance_id"]
@@ -617,8 +615,8 @@ sequenceDiagram
 
 **内部流程**：
 
-1. 向 Agent 发送 `roots/list` 请求，获取配置文件绝对路径 URI
-2. 若配置文件不存在或为 null（roots/list 返回空、路径无效、或文件内容为空 JSON）：
+1. 读取 `config_path` 参数
+2. 若 `config_path` 为空或文件不存在：
    a. `shm_open("/c4_{instance_id}", O_CREAT|O_EXCL|O_RDWR)` → `ftruncate` → `mmap`
    b. Header 字段：`magic = 0xC4DA7A00`、`version = 1`、`max_points = 100000`、`point_count = 0`；
       `global_write_seq` 及两个 `reserved` 字段保持 `ftruncate` 零填充后的默认值 `0`（参见 [c4_architecture.md §2.2.1](c4_architecture.md) 初始化规则）
@@ -644,13 +642,13 @@ sequenceDiagram
 ```json
 // ========== 成功：配置文件存在，按算法创建 ==========
 // --> 请求
-{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "create_shm", "arguments": {"instance_id": "hnals_farm_01"}}}
+{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "create_shm", "arguments": {"instance_id": "hnals_farm_01", "config_path": "/etc/c4/config.json"}}}
 // <-- 应答
 {"jsonrpc": "2.0", "id": 1, "result": {"content": [{"type": "text", "text": "success"}], "isError": false}}
 
-// ========== 成功：配置文件不存在，默认 10 万点 ==========
+// ========== 成功：config_path 为空，默认 10 万点 ==========
 // --> 请求
-{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "create_shm", "arguments": {"instance_id": "hnals_farm_01"}}}
+{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "create_shm", "arguments": {"instance_id": "hnals_farm_01", "config_path": ""}}}
 // <-- 应答
 {"jsonrpc": "2.0", "id": 1, "result": {"content": [{"type": "text", "text": "success"}], "isError": false}}
 
@@ -670,9 +668,9 @@ sequenceDiagram
 // <-- 应答
 {"jsonrpc": "2.0", "id": 1, "result": {"content": [{"type": "text", "text": "UNKNOWN_READER_KEY: reader 'c4_asfp2_client[0].points[3].key' = 'unknown_scada.windspeed' not found in any writer"}], "isError": true}}
 
-// ========== 业务错误：roots/list MCP 调用失败 ==========
+// ========== 业务错误：config_path 参数为空或无效 ==========
 // <-- 应答
-{"jsonrpc": "2.0", "id": 1, "result": {"content": [{"type": "text", "text": "CONFIG_PATH_MISSING: roots/list protocol call failed, Agent may not be responding"}], "isError": true}}
+{"jsonrpc": "2.0", "id": 1, "result": {"content": [{"type": "text", "text": "CONFIG_PATH_MISSING: config_path parameter is empty or invalid"}], "isError": true}}
 
 // ========== 业务错误：系统调用失败 ==========
 // <-- 应答
@@ -704,16 +702,21 @@ sequenceDiagram
     "description": "调整共享内存容量和点分配。根据配置文件计算所需点数：回收已删除点的 block，为新点在空闲块中分配，超容量时扩容至 2 倍。已有点地址不变",
     "inputSchema": {
         "type": "object",
-        "properties": {},
-        "required": []
+        "properties": {
+            "config_path": {
+                "type": "string",
+                "description": "配置文件路径（必填）"
+            }
+        },
+        "required": ["config_path"]
     }
 }
 ```
 
 **内部流程**：
 
-1. 向 Agent 发送 `roots/list` 请求，获取配置文件绝对路径 URI
-   ┌ 若 roots/list 失败或返回空 → 返回 `CONFIG_PATH_MISSING` 错误
+1. 读取 `config_path` 参数
+   ┌ 若 config_path 为空或文件不存在 → 返回 `CONFIG_PATH_MISSING` 错误
    └ 正常 → 继续
  2. 读取配置文件，按 §2.2 算法计算所需点数 (`required_points`)
     ┌ 若 `c4_shm_manager` 段缺失 → 返回 `CONFIG_MISSING_SECTION` 错误
@@ -759,7 +762,7 @@ sequenceDiagram
 ```json
 // ========== 成功 ==========
 // --> 请求
-{"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "adjust_shm", "arguments": {}}}
+{"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "adjust_shm", "arguments": {"config_path": "/etc/c4/config.json"}}}
 // <-- 应答
 {"jsonrpc": "2.0", "id": 2, "result": {"content": [{"type": "text", "text": "success"}], "isError": false}}
 
@@ -767,9 +770,9 @@ sequenceDiagram
 // <-- 应答
 {"jsonrpc": "2.0", "id": 2, "result": {"content": [{"type": "text", "text": "SHM_NOT_CREATED: shared memory not initialized, call create_shm first"}], "isError": true}}
 
-// ========== 业务错误：配置文件缺失 ==========
+// ========== 业务错误：config_path 参数为空或文件不存在 ==========
 // <-- 应答
-{"jsonrpc": "2.0", "id": 2, "result": {"content": [{"type": "text", "text": "CONFIG_PATH_MISSING: roots/list protocol call failed, Agent may not be responding"}], "isError": true}}
+{"jsonrpc": "2.0", "id": 2, "result": {"content": [{"type": "text", "text": "CONFIG_PATH_MISSING: config_path parameter is empty or configuration file not found"}], "isError": true}}
 
 // ========== 业务错误：c4_shm_manager 段缺失 ==========
 // <-- 应答
@@ -801,21 +804,20 @@ sequenceDiagram
     participant FS as 文件系统
 
     A->>S: 启动进程
-    A->>S: initialize (声明 roots 能力)
+    A->>S: initialize (MCP 握手)
     S-->>A: 工具列表
 
     Note over A: 创建共享内存
-    A->>S: tools/call create_shm({instance_id: "my_instance"})
-    S->>A: roots/list
-    A-->>S: {roots: [{uri: "file:///etc/c4/config.json"}]}
-    alt 配置文件存在
+    A->>S: tools/call create_shm({instance_id: "my_instance", config_path: "/etc/c4/config.json"})
+
+    alt config_path 非空且文件存在
         S->>FS: 读取 config → 按 §2.2 算法分配 shm_id
-    else 配置文件不存在
+    else config_path 为空或文件不存在
         Note over S: max_points = 100000 (默认)
     end
     S->>FS: shm_open /c4_my_instance (O_CREAT|O_EXCL)
     S->>FS: ftruncate + mmap + 初始化
-    alt 配置文件存在
+    alt config_path 非空且文件存在
         S->>FS: 写回 config（回填 shm_id）
     end
     S-->>A: "success"
@@ -842,9 +844,7 @@ sequenceDiagram
     Note over A: 所有进程已暂停
 
     Note over A,S: Phase 2 — adjust_shm
-    A->>S: tools/call adjust_shm()
-    S->>A: roots/list
-    A-->>S: {roots: [{uri: "file:///etc/c4/config.json"}]}
+    A->>S: tools/call adjust_shm({config_path: "/etc/c4/config.json"})
     S->>CFG: 读取配置，计算 required_points=25
     Note over S: required_points(25) > max_points(20)<br/>new_max = 25×2 = 50
     S->>S: ftruncate + mmap<br/>已有点保持原 shm_id，新点分配<br/>回填配置
@@ -880,9 +880,7 @@ sequenceDiagram
     M2-->>A: "success"
 
     Note over A,S: Phase 2 — adjust_shm
-    A->>S: tools/call adjust_shm()
-    S->>A: roots/list
-    A-->>S: {roots: [{uri: "file:///etc/c4/config.json"}]}
+    A->>S: tools/call adjust_shm({config_path: "/etc/c4/config.json"})
     S->>CFG: 读取配置，计算 required_points=15
     Note over S: required_points(15) ≤ max_points(20)<br/>空闲块足够，不扩容
     S->>S: 扫描空闲块<br/>为新点分配 shm_id<br/>已有点不变
@@ -919,9 +917,7 @@ sequenceDiagram
     M2-->>A: "success"
 
     Note over A,S: Phase 2 — adjust_shm（回收 + 分配）
-    A->>S: tools/call adjust_shm()
-    S->>A: roots/list
-    A-->>S: {roots: [{uri: "file:///etc/c4/config.json"}]}
+    A->>S: tools/call adjust_shm({config_path: "/etc/c4/config.json"})
     S->>CFG: 读取配置，计算 required_points=7
     Note over S: 回收阶段（key 匹配）：<br/>writer3 的 3 个 key 不在配置中<br/>→ block[5..7] state 置 0<br/>point_count: 10→7
     Note over S: 无新增点，分配阶段跳过<br/>required_points(7) ≤ max_points(20)
@@ -961,9 +957,7 @@ sequenceDiagram
     M2-->>A: "success"
 
     Note over A,S: Phase 2 — adjust_shm（先回收，再分配）
-    A->>S: tools/call adjust_shm()
-    S->>A: roots/list
-    A-->>S: {roots: [{uri: "file:///etc/c4/config.json"}]}
+    A->>S: tools/call adjust_shm({config_path: "/etc/c4/config.json"})
     S->>CFG: 读取配置，计算 required_points=10
     Note over S: 回收阶段：<br/>writer3 的 3 个 block → state=0<br/>point_count: 10→7
     Note over S: required_points(10) ≤ max_points(20)<br/>不扩容
@@ -999,7 +993,7 @@ sequenceDiagram
 | `SHM_NOT_CREATED` | 共享内存尚未创建 | `adjust_shm` |
 | `SHM_SYSCALL_FAILED` | POSIX 系统调用失败（shm_open / ftruncate / mmap） | `create_shm`, `adjust_shm` |
 | `CONFIG_MISSING_SECTION` | `c4_shm_manager` 段缺失；或创建时 writer 与 reader 仅一方为空 | `create_shm`, `adjust_shm` |
-| `CONFIG_PATH_MISSING` | roots/list MCP 协议调用失败（Agent 不可达或超时） | `create_shm`, `adjust_shm` |
+| `CONFIG_PATH_MISSING` | config_path 参数缺失/为空，或指定路径不存在/不可读 | `create_shm`, `adjust_shm` |
 | `DUPLICATE_KEY` | 两个 Writer point 的 `{service_id}.{point_id}` 重复 | `create_shm`, `adjust_shm` |
 | `UNKNOWN_READER_KEY` | Reader 的 `key` 字段引用了不存在的 Writer key | `create_shm`, `adjust_shm` |
 

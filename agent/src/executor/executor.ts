@@ -4,12 +4,14 @@
 
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { MultiServerMCPClient } from "@langchain/mcp-adapters";
 import type {
     MCPInstanceConfig,
     RegistryEntry,
     ServiceStep,
     SystemConfig,
 } from "../types/index.js";
+import { McpServiceRegistry } from "../registry/registry.js";
 
 // ── MCP Client Interfaces ─────────────────────────────────
 
@@ -227,9 +229,9 @@ async function handle_add(
     if (!instance_id || typeof instance_id !== "string") {
         throw new Error(`add 操作缺少 instance.id: ${step.service_type}`);
     }
-    if (!/^[a-zA-Z_]+$/.test(instance_id)) {
+    if (!/^[a-zA-Z][a-zA-Z0-9_.]*$/.test(instance_id)) {
         throw new Error(
-            `instance.id "${instance_id}" 包含非法字符，仅允许 [a-zA-Z_]+`,
+            `instance.id "${instance_id}" 包含非法字符，仅允许字母开头`
         );
     }
 
@@ -245,9 +247,9 @@ async function handle_add(
     // 检查 points 的 id 不重复（在本次 step 内）
     const point_ids = new Set<string>();
     for (const pt of step.points) {
-        if (!/^[a-zA-Z_]+$/.test(pt.id)) {
+        if (!/^[a-zA-Z][a-zA-Z0-9_.]*$/.test(pt.id)) {
             throw new Error(
-                `point.id "${pt.id}" 包含非法字符，仅允许 [a-zA-Z_]+`,
+                `point.id "${pt.id}" 包含非法字符，仅允许字母开头`,
             );
         }
         if (point_ids.has(pt.id)) {
@@ -581,25 +583,6 @@ export async function execute_stop_and_start(
     const started: string[] = [];
     const failed: StopStartResult["failed_services"] = [];
 
-    // c4_shm_manager 始终要启动
-    try {
-        const shm_start = await shm_manager.start();
-        if (shm_start === "success") {
-            started.push(shm_manager.service_type);
-        } else {
-            failed.push({
-                service_type: shm_manager.service_type,
-                error: shm_start,
-            });
-        }
-    } catch (err: unknown) {
-        failed.push({
-            service_type: shm_manager.service_type,
-            error: err instanceof Error ? err.message : String(err),
-        });
-    }
-
-    // 启动所有数据路径 MCP 服务
     for (const client of data_clients) {
         try {
             const result = await client.start();
@@ -658,4 +641,155 @@ async function restore_config_bak(config_path: string): Promise<void> {
     } catch {
         // bak 也不可用——无法恢复，但不抛异常（调用方已处于错误路径）
     }
+}
+
+export interface MCPClientHandle {
+    callTool(params: { name: string; arguments: Record<string, unknown> }): Promise<unknown>;
+}
+
+async function callToolViaMultiClient(
+    multiClient: MultiServerMCPClient,
+    serverName: string,
+    toolName: string,
+    args: Record<string, unknown>,
+): Promise<string> {
+    const tools = await multiClient.getTools(serverName);
+    const tool = tools.find(t => t.name === toolName);
+    if (!tool) throw new Error(`tool not found: ${toolName}`);
+    const result = await tool.invoke(args);
+    return typeof result === "string" ? result : JSON.stringify(result);
+}
+
+export class McpServiceClientAdapter implements McpServiceClient {
+    readonly service_type: string;
+    private _configPath: string;
+
+    constructor(
+        private _mcp: MCPClientHandle,
+        serviceType: string,
+        configPath: string,
+        private _multiClient: MultiServerMCPClient,
+    ) {
+        this.service_type = serviceType;
+        this._configPath = configPath;
+    }
+
+    async stop(): Promise<string> {
+        return callToolViaMultiClient(this._multiClient, this.service_type, "stop", {});
+    }
+
+    async start(): Promise<string> {
+        return callToolViaMultiClient(this._multiClient, this.service_type, "start", {
+            config_path: this._configPath,
+        });
+    }
+
+    async dispose(): Promise<void> {
+        await this._multiClient.close();
+    }
+}
+
+export class ShmManagerClientAdapter implements ShmManagerClient {
+    readonly service_type: string;
+    private _configPath: string;
+
+    constructor(
+        private _multiClient: MultiServerMCPClient,
+        serverName: string,
+        configPath: string,
+    ) {
+        this.service_type = serverName;
+        this._configPath = configPath;
+    }
+
+    async stop(): Promise<string> {
+        return "success"; // shm_manager has no stop tool — never called
+    }
+
+    async start(): Promise<string> {
+        return "success"; // shm_manager has no start tool — never called
+    }
+
+    async adjust_shm(): Promise<string> {
+        return callToolViaMultiClient(this._multiClient, this.service_type, "adjust_shm", {
+            config_path: this._configPath,
+        });
+    }
+}
+
+export async function runRuntimeStopStart(
+    shmMultiClient: MultiServerMCPClient,
+    shmServerName: string,
+    configPath: string,
+    registry: RegistryLookup,
+): Promise<StopStartResult> {
+    let systemConfig: SystemConfig;
+    try {
+        const raw = await fs.readFile(configPath, "utf-8");
+        systemConfig = JSON.parse(raw) as SystemConfig;
+    } catch {
+        return {
+            success: false,
+            started_services: [],
+            failed_services: [],
+            abort_reason: `无法读取 config.json: ${configPath}`,
+        };
+    }
+
+    const dataServiceTypes: string[] = [];
+    for (const key of Object.keys(systemConfig)) {
+        if (key === "c4_shm_manager") continue;
+        const instances = systemConfig[key];
+        if (Array.isArray(instances) && instances.length > 0) {
+            dataServiceTypes.push(key);
+        }
+    }
+
+    const shmClient = new ShmManagerClientAdapter(
+        shmMultiClient,
+        shmServerName,
+        configPath,
+    );
+
+    const dataClients: McpServiceClientAdapter[] = [];
+    for (const svcType of dataServiceTypes) {
+        const entry = registry.get_entry(svcType);
+        if (!entry) continue;
+
+        try {
+            const multiClient = new MultiServerMCPClient({
+                mcpServers: {
+                    [svcType]: {
+                        transport: "stdio" as const,
+                        command: entry.binary_path,
+                        args: [],
+                    },
+                },
+            });
+            const mcpClient = await multiClient.getClient(svcType);
+            if (!mcpClient) {
+                await multiClient.close();
+                continue;
+            }
+            dataClients.push(
+                new McpServiceClientAdapter(
+                    mcpClient as MCPClientHandle,
+                    svcType,
+                    configPath,
+                    multiClient,
+                ),
+            );
+        } catch {
+            continue;
+        }
+    }
+
+    const result = await execute_stop_and_start(
+        shmClient,
+        dataClients,
+        systemConfig,
+        configPath,
+    );
+
+    return result;
 }

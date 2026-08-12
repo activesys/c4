@@ -20,12 +20,14 @@ from pathlib import Path
 import pytest  # type: ignore
 
 from test_helpers import (
+    create_asfp2_csv,
     create_full_csv,
     create_test_csv,
     retry_llm,
     find_interrupt_id,
     run_upload,
     full_access_flow,
+    _parse_csv_to_device_json,
 )
 from assertions import (
     assert_config_json_valid,
@@ -413,3 +415,68 @@ class TestE2EFullLifecycle:
             "After deleting all modbus instances, c4_shm_manager.writer[] "
             "should remove c4_modbus_client"
         )
+
+
+# ══════════════════════════════════════════════
+#  §5.6 ASFP2 数据流全流程（standalone工具）
+# ══════════════════════════════════════════════
+
+
+@pytest.mark.llm
+class TestE2EASFP2:
+    """§5.6 ASFP2 接收 + 转发 + 数据流"""
+
+    @retry_llm(max_attempts=2)
+    def test_asfp2_full_data_flow(self, chat, agent, tmp_path, registry_dir):
+        """5.6: ASFP2 数据源接入 → 转发 → 数据流验证"""
+        import subprocess, time, json as _json, os
+
+        ASFP2_SRV = "/usr/local/bin/asfp2_server"
+        ASFP2_CLI = "/usr/local/bin/asfp2_client"
+        FWD_PORT = 19998
+
+        srv_proc = subprocess.Popen(
+            [ASFP2_SRV, "-p", str(FWD_PORT)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        time.sleep(1)
+
+        try:
+            csv_path = create_asfp2_csv(tmp_path)
+            devices = _parse_csv_to_device_json(str(csv_path))
+            devices["forward_targets"] = [{
+                "name": "中心侧", "protocol": "asfp2",
+                "connection": {"ip": "127.0.0.1", "port": FWD_PORT},
+            }]
+            confirm_msg = f"确认\n\n{_json.dumps(devices)}"
+            with chat.send(confirm_msg) as stream:
+                stream.text_content()
+            time.sleep(5)
+
+            config = assert_config_json_valid(agent.config_dir / "config.json")
+            assert "c4_asfp2_server" in config
+            assert "c4_asfp2_client" in config
+
+            server_cfg = config["c4_asfp2_server"][0]
+            pt_addrs = [p["addr"] for p in server_cfg.get("points", [])]
+            srv_port = server_cfg.get("port", 0)
+            first_addr = pt_addrs[0] if pt_addrs else 1000
+            last_addr = pt_addrs[-1] if pt_addrs else 1000
+
+            cli_proc = subprocess.Popen(
+                [ASFP2_CLI, "-s", "127.0.0.1", "-p", str(srv_port),
+                 "-b", str(first_addr), "-e", str(last_addr), "-t", "3"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            )
+            cli_proc.wait(timeout=30)
+            time.sleep(2)
+
+            assert cli_proc.returncode == 0, (
+                f"standalone asfp2_client failed, exit={cli_proc.returncode}"
+            )
+        finally:
+            srv_proc.terminate()
+            try:
+                srv_proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                srv_proc.kill()

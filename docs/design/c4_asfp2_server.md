@@ -175,10 +175,10 @@ ASFP2 Server 监听实例。
   3. Agent 调用 c4_shm_manager.adjust_shm()
      → 计算所需点数 → 分配 shm_id → 回填配置文件中 shm_id 字段
   4. Agent 启动 c4_asfp2_server 进程（仅注册 MCP 工具，无其他初始化）
-  5. Agent 调用 c4_asfp2_server 的 `start` 工具
-     → server 在工具 handler 中完成：
-     a. 通过 roots/list 获取配置文件路径
-     b. 读取 c4_asfp2_server 配置段
+   5. Agent 调用 c4_asfp2_server 的 `start` 工具（传入 config_path 参数）
+      → server 在工具 handler 中完成：
+      a. 从 config_path 参数获取配置文件绝对路径
+      b. 通过 loadConfig(configPath) 读取 c4_asfp2_server 配置段
      c. 校验配置有效性（端口唯一性、addr 合法性等）
      d. 以 O_RDWR 模式 shm_open 已有共享内存
      e. mmap 共享内存，校验 magic
@@ -216,10 +216,8 @@ sequenceDiagram
     A->>S: 启动进程 → MCP initialize
     S-->>A: 工具列表（stop / status / start）
 
-    A->>S: start()
-    S->>A: roots/list
-    A-->>S: 配置文件路径
-    S->>S: 读取配置，校验有效性
+    A->>S: start(config_path="/etc/c4/config.json")
+    S->>S: loadConfig(configPath) 读取配置，校验有效性
     S->>S: shm_open(O_RDWR) + mmap
     S->>S: 校验 magic
     S->>S: 构建 addr→shm_id 映射
@@ -235,9 +233,9 @@ sequenceDiagram
     S-->>A: "success"
     A->>SM: adjust_shm()
     SM-->>A: 完成
-    A->>S: start()
+    A->>S: start(config_path="/etc/c4/config.json")
     S->>S: shm_open + mmap
-    S->>S: 加载配置 → 启动所有实例
+    S->>S: loadConfig(configPath) → 启动所有实例
     S-->>A: "success"
 ```
 
@@ -251,11 +249,11 @@ Agent 在需要调整共享内存容量或变更接收配置时，执行 Stop-St
 
 1. Agent 调用 `stop` → 关闭所有 TCP 监听端口和活跃连接，销毁全部实例，munmap 并关闭共享内存
 2. Agent 调用 `c4_shm_manager.adjust_shm()` 完成共享内存调整
-3. Agent 调用 `start` → 重新 `shm_open` + `mmap` 共享内存，加载配置文件，启动所有实例
+3. Agent 调用 `start`（传入 config_path 参数）→ 重新 `shm_open` + `mmap` 共享内存，`loadConfig(configPath)` 加载配置文件，启动所有实例
 
 `stop` 销毁所有实例并释放共享内存映射后，服务回到进程刚启动的状态。`start` 的执行流程与首次启动完全一致——无需区分"首次"和"重启"。
 
-> **接口一致性**：`stop` 和 `start` 均无参数。`stop` → `adjust_shm` → `start` 三步操作，Agent 无需在服务间传递 shm_id 列表或容量参数。`start` 在 `stop` 之后可再次调用——与首次启动复用同一逻辑。
+> **接口一致性**：`stop` 无参数；`start` 接受 `config_path` 参数。`stop` → `adjust_shm` → `start` 三步操作，Agent 无需在服务间传递 shm_id 列表或容量参数。`start` 在 `stop` 之后可再次调用——与首次启动复用同一逻辑。
 
 ---
 
@@ -522,7 +520,7 @@ ASFP2 接收端无独立的采集周期——写入频率取决于发送端的�
 **首次调用**完成服务初始化。**在 `stop` 之后可再次调用**——`stop` 已释放共享内存，`start` 重新 `shm_open` + `mmap` 后加载最新配置并启动实例。与首次启动执行完全相同的流程。
 **若服务当前处于运行状态（已 start 且未 stop），返回 `ALREADY_RUNNING`。**
 
-**参数**：无
+**参数**：`config_path`（string，必填）—— 配置文件 config.json 的绝对路径
 
 **返回值**：成功返回 `"success"`，失败返回 `isError: true`。
 
@@ -531,7 +529,7 @@ ASFP2 接收端无独立的采集周期——写入频率取决于发送端的�
 | 错误码 | 含义 |
 |--------|------|
 | `ALREADY_RUNNING` | 服务当前处于运行状态，须先调用 `stop` |
-| `CONFIG_PATH_MISSING` | `roots/list` 超时或未返回配置文件路径 |
+| `CONFIG_PATH_MISSING` | `config_path` 参数缺失或无法读取指定文件 |
 | `CONFIG_PARSE_ERROR` | 配置文件格式错误或 `c4_asfp2_server` 段缺失 |
 | `PORT_CONFLICT` | 配置中存在重复端口 |
 | `SHM_CORRUPTED` | 共享内存 magic 校验失败 |
@@ -542,7 +540,7 @@ ASFP2 接收端无独立的采集周期——写入频率取决于发送端的�
 ```json
 // ========== 成功 ==========
 // --> 请求
-{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "start", "arguments": {}}}
+{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "start", "arguments": {"config_path": "/etc/c4/config.json"}}}
 // <-- 应答
 {"jsonrpc": "2.0", "id": 1, "result": {"content": [{"type": "text", "text": "success"}], "isError": false}}
 
@@ -557,7 +555,7 @@ ASFP2 接收端无独立的采集周期——写入频率取决于发送端的�
 
 关闭所有 TCP 监听端口和活跃连接，销毁全部实例，服务回到初始化完成但未启动的状态。
 `stop` 之后可调用 `start` 重新启动。
-**若 `start` 从未成功调用过，返回 `SERVICE_NOT_READY`。**
+**幂等：若 `start` 从未成功调用过（服务未运行），直接返回 `"success"`，不报错。**
 
 **参数**：无
 
@@ -625,8 +623,9 @@ ASFP2 接收端无独立的采集周期——写入频率取决于发送端的�
 | 场景 | 触发工具 | 处理方式 |
 |------|---------|---------|
 | `start` 在运行状态下再次调用 | `start` | 返回 `ALREADY_RUNNING` |
-| `start` 从未成功调用过时调用 `stop`/`status` | `stop`、`status` | 返回 `SERVICE_NOT_READY` |
-| `roots/list` 超时或路径缺失 | `start` | 返回 `CONFIG_PATH_MISSING` |
+| `start` 从未成功调用过时调用 `stop` | `stop` | 幂等，直接返回 `"success"` |
+| `start` 从未成功调用过时调用 `status` | `status` | 返回 `SERVICE_NOT_READY` |
+| `config_path` 参数缺失 | `start` | 返回 `CONFIG_PATH_MISSING` |
 | 配置文件格式错误 | `start` | 返回 `isError: true` + `CONFIG_PARSE_ERROR` |
 | 端口重复（配置冲突） | `start` | 返回 `isError: true` + `PORT_CONFLICT` |
 | 单个端口被占用（非配置冲突） | `start` | 返回 `isError: true` + 具体端口；不影响其余实例 |

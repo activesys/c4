@@ -11,7 +11,6 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { createApp } from "./server/app.js";
-import { McpClientBridge, connectBridge } from "./mcp/bridge.js";
 import { C4McpManager } from "./mcp/client.js";
 import {
     McpServiceRegistry,
@@ -21,7 +20,11 @@ import {
     type McpServiceClient,
     type ShmManagerClient,
     type RegistryLookup,
+    McpServiceClientAdapter,
+    ShmManagerClientAdapter,
+    type MCPClientHandle,
 } from "./executor/executor.js";
+import { MultiServerMCPClient } from "@langchain/mcp-adapters";
 import { createC4Agent } from "./super_worker/super_worker.js";
 import type {
     AgentConfig,
@@ -99,78 +102,7 @@ class AgentStateTracker implements AgentStateProvider {
     }
 }
 
-// ── McpServiceClient Adapter ──────────────────────────────
-/**
- * Wraps a McpClientBridge as an McpServiceClient by calling
- * the `start` and `stop` MCP tools on the connected service.
- *
- * Used for Stop-Start recovery and runtime service lifecycle management.
- */
-class McpServiceClientAdapter implements McpServiceClient {
-    readonly service_type: string;
-
-    constructor(
-        private _bridge: McpClientBridge,
-        serviceType: string,
-    ) {
-        this.service_type = serviceType;
-    }
-
-    async stop(): Promise<string> {
-        const result = await this._bridge.callTool({
-            name: "stop",
-            arguments: {},
-        });
-        return extractTextResult(result);
-    }
-
-    async start(): Promise<string> {
-        const result = await this._bridge.callTool({
-            name: "start",
-            arguments: {},
-        });
-        return extractTextResult(result);
-    }
-
-    /** Get the underlying bridge (for access to MCP tools). */
-    get bridge(): McpClientBridge {
-        return this._bridge;
-    }
-}
-
-/**
- * Wraps c4_shm_manager bridge as a ShmManagerClient.
- * Provides stop, start, and the additional adjust_shm tool.
- */
-class ShmManagerClientAdapter
-    extends McpServiceClientAdapter
-    implements ShmManagerClient
-{
-    async adjust_shm(): Promise<string> {
-        const result = await this.bridge.callTool({
-            name: "adjust_shm",
-            arguments: {},
-        });
-        return extractTextResult(result);
-    }
-}
-
 // ── Helpers ───────────────────────────────────────────────
-
-/** Extract text result from MCP CallToolResult. */
-function extractTextResult(result: unknown): string {
-    const content = (
-        result as { content?: Array<{ type: string; text?: string }> }
-    )?.content;
-    if (Array.isArray(content)) {
-        for (const item of content) {
-            if (item.type === "text" && typeof item.text === "string") {
-                return item.text;
-            }
-        }
-    }
-    return JSON.stringify(result);
-}
 
 /** Logger: simple console-based logger with level filtering. */
 class Logger {
@@ -234,22 +166,19 @@ class RegistryLookupAdapter implements RegistryLookup {
  */
 async function runStartupRecovery(
     config: AgentConfig,
-    shmManagerBridge: McpClientBridge,
+    mcpManager: C4McpManager,
     registry: McpServiceRegistry,
     logger: Logger,
 ): Promise<void> {
     const configPath = config.shm_manager.config_path;
 
     if (!existsSync(configPath)) {
-        logger.info(
-            "启动恢复: config.json 不存在，跳过（等待首次接入）",
-        );
+        logger.info("启动恢复: config.json 不存在，跳过（等待首次接入）");
         return;
     }
 
     const bakPath = configPath + ".bak";
 
-    // Read config.json to discover which services need recovery
     let systemConfig: SystemConfig;
     try {
         const raw = await readFile(configPath, "utf-8");
@@ -257,21 +186,15 @@ async function runStartupRecovery(
     } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
         logger.warn(`启动恢复: config.json 损坏: ${msg}`);
-
-        // Try restore from .bak (§3.2.3 step 2)
         if (existsSync(bakPath)) {
             try {
                 const bakRaw = await readFile(bakPath, "utf-8");
                 systemConfig = JSON.parse(bakRaw) as SystemConfig;
                 await writeFile(configPath, bakRaw, "utf-8");
                 logger.info("启动恢复: 已从 config.json.bak 恢复 config.json");
-                // Fall through to continue recovery
             } catch (bakErr: unknown) {
-                const bakMsg =
-                    bakErr instanceof Error ? bakErr.message : String(bakErr);
-                logger.warn(
-                    `启动恢复: config.json.bak 也无效: ${bakMsg}，等同首次启动`,
-                );
+                const bakMsg = bakErr instanceof Error ? bakErr.message : String(bakErr);
+                logger.warn(`启动恢复: config.json.bak 也无效: ${bakMsg}，等同首次启动`);
                 return;
             }
         } else {
@@ -280,19 +203,15 @@ async function runStartupRecovery(
         }
     }
 
-    // Build the shm_manager client
     const shmClient = new ShmManagerClientAdapter(
-        shmManagerBridge,
-        "c4_shm_manager",
+        mcpManager.getMultiClient(),
+        "shm",
+        configPath,
     );
 
-    // Collect all data path service types from config
-    // config.json keys are service_type names (excluding c4_shm_manager section)
     const dataServiceTypes: string[] = [];
     for (const key of Object.keys(systemConfig)) {
-        if (key === "c4_shm_manager") {
-            continue;
-        }
+        if (key === "c4_shm_manager") continue;
         const instances = systemConfig[key];
         if (Array.isArray(instances) && instances.length > 0) {
             dataServiceTypes.push(key);
@@ -311,26 +230,35 @@ async function runStartupRecovery(
         return;
     }
 
-    // Spawn and connect each data path MCP service
-    const dataClients: McpServiceClient[] = [];
     const registryLookup = new RegistryLookupAdapter(registry);
+    const dataClients: McpServiceClient[] = [];
+    const tempMultiClients: MultiServerMCPClient[] = [];
 
     for (const svcType of dataServiceTypes) {
         const entry = registryLookup.get_entry(svcType);
         if (!entry) {
-            logger.warn(
-                `启动恢复: 跳过 ${svcType}（Registry 中未找到注册信息）`,
-            );
+            logger.warn(`启动恢复: 跳过 ${svcType}（Registry 中未找到注册信息）`);
             continue;
         }
 
         try {
-            const bridge = await connectBridge(
-                entry.binary_path,
-                [],
-                { connectTimeoutMs: 30000 },
+            const multiClient = new MultiServerMCPClient({
+                mcpServers: {
+                    [svcType]: {
+                        transport: "stdio" as const,
+                        command: entry.binary_path,
+                        args: [],
+                    },
+                },
+            });
+            tempMultiClients.push(multiClient);
+
+            const client = new McpServiceClientAdapter(
+                null as unknown as MCPClientHandle,
+                svcType,
+                configPath,
+                multiClient,
             );
-            const client = new McpServiceClientAdapter(bridge, svcType);
             dataClients.push(client);
             logger.debug(`启动恢复: 已连接 ${svcType} (${entry.binary_path})`);
         } catch (err: unknown) {
@@ -340,21 +268,14 @@ async function runStartupRecovery(
     }
 
     if (dataClients.length === 0) {
-        logger.info("启动恢复: 无可用数据路径 MCP 服务，仅执行 stop/start 空操作 + adjust_shm");
-        try {
-            const result = await shmClient.adjust_shm();
-            logger.info(`启动恢复: adjust_shm 完成: ${result}`);
-        } catch (err: unknown) {
-            const msg = err instanceof Error ? err.message : String(err);
-            logger.warn(`启动恢复: adjust_shm 失败: ${msg}`);
+        logger.info("启动恢复: 无可用数据路径 MCP 服务");
+        for (const mc of tempMultiClients) {
+            try { await mc.close(); } catch { /* ignore */ }
         }
         return;
     }
 
-    // Unconditionally execute Stop-Start
-    logger.info(
-        `启动恢复: 无条件执行 Stop-Start（${dataClients.length} 个数据路径服务）`,
-    );
+    logger.info(`启动恢复: 无条件执行 Stop-Start（${dataClients.length} 个数据路径服务）`);
 
     const result = await execute_stop_and_start(
         shmClient,
@@ -364,18 +285,12 @@ async function runStartupRecovery(
     );
 
     if (result.success) {
-        logger.info(
-            `启动恢复: Stop-Start 成功，${result.started_services.length} 个服务已启动`,
-        );
+        logger.info(`启动恢复: Stop-Start 成功，${result.started_services.length} 个服务已启动`);
     } else {
-        logger.warn(
-            `启动恢复: Stop-Start 失败: ${result.abort_reason ?? "未知原因"}`,
-        );
+        logger.warn(`启动恢复: Stop-Start 失败: ${result.abort_reason ?? "未知原因"}`);
         if (result.failed_services.length > 0) {
             for (const f of result.failed_services) {
-                logger.error(
-                    `启动恢复: 服务 ${f.service_type} 启动失败: ${f.error}`,
-                );
+                logger.error(`启动恢复: 服务 ${f.service_type} 启动失败: ${f.error}`);
             }
         }
     }
@@ -529,29 +444,12 @@ async function main(): Promise<void> {
         systemPrompt = `你是 C4 Agent。\n\n${serviceCatalog}`;
     }
 
-    // ── Step 4: Connect c4_shm_manager ──
-    let shmBridge: McpClientBridge;
-    try {
-        shmBridge = await connectBridge(
-            config.shm_manager.binary,
-            [],
-            { connectTimeoutMs: 30000 },
-        );
-        logger.info(
-            `c4_shm_manager 已连接: ${config.shm_manager.binary}`,
-        );
-    } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : String(err);
-        logger.error(`FATAL: 无法连接 c4_shm_manager: ${msg}`);
-        process.exit(1);
-    }
-
-    // ── Step 4b: Setup MCP manager for agent tools ──
+    // ── Step 4: Setup MCP manager ──
     const mcpManager = new C4McpManager(
         { shm: { binaryPath: config.shm_manager.binary } },
         registry,
     );
-    logger.info(`MCP tools client 已配置`);
+    logger.info("MCP manager 已配置（shm_manager + MultiServerMCPClient）");
 
     // ── Step 5: Build model ──
     let model;
@@ -601,17 +499,17 @@ async function main(): Promise<void> {
     // Unconditional Stop-Start if /etc/c4/config.json exists (§3.2.3).
     // This runs after the server is listening so the agent is responsive
     // even during recovery.
-    await runStartupRecovery(config, shmBridge, registry, logger);
+    await runStartupRecovery(config, mcpManager, registry, logger);
 
     // ── Graceful Shutdown ──
     const shutdown = async (signal: string) => {
         logger.info(`收到 ${signal}，正在关闭...`);
         try {
-            await shmBridge.disconnect();
-            logger.info("c4_shm_manager 已断开");
+            await mcpManager.close();
+            logger.info("MCP manager 已关闭");
         } catch (err: unknown) {
             const msg = err instanceof Error ? err.message : String(err);
-            logger.error(`断开 c4_shm_manager 时出错: ${msg}`);
+            logger.error(`关闭 MCP manager 时出错: ${msg}`);
         }
         process.exit(0);
     };

@@ -15,7 +15,10 @@ import { createOutputPlanStepsTool } from "../subagents/tools/output_plan_steps.
 import { outputAccessPlanTool } from "../subagents/tools/output_access_plan.js";
 import { outputDeviceInfoTool } from "../subagents/tools/output_device_info.js";
 import { createQueryRegistryTool } from "../subagents/tools/query_registry.js";
-import { merge_config_from_steps } from "../executor/executor.js";
+import {
+    merge_config_from_steps,
+    runRuntimeStopStart,
+} from "../executor/executor.js";
 import type { C4Agent } from "../server/types.js";
 import type { ServiceStep } from "../types/index.js";
 
@@ -91,11 +94,15 @@ export async function createC4Agent(
             let planSteps: ServiceStep[] | null = null;
             let deviceInfo: Record<string, unknown> | null = null;
             let accessPlan: Record<string, unknown> | null = null;
+            let planDeviceInfo: Record<string, unknown> | null = null;
+            let planAccessPlan: Record<string, unknown> | null = null;
+            let confirmOriginalContent: string | null = null;
             let isConfirm = false;
             try {
                 if (input.messages.length > 0) {
                     const last = input.messages[input.messages.length - 1];
                     if (last.role === "user" && /确认|好的|执行|按方案|开始/.test(last.content as string)) {
+                        confirmOriginalContent = last.content as string;
                         isConfirm = true;
                         // 将 deviceInfo + accessPlan 注入消息，供 LLM 传入 output_plan_steps
                         const extra = [];
@@ -108,6 +115,8 @@ export async function createC4Agent(
                                 content: `${last.content}${prefix}立即调用 output_plan_steps({ devices, site, forward_targets })，不要用文字回答。`,
                             }],
                         };
+                        planDeviceInfo = deviceInfo;
+                        planAccessPlan = accessPlan;
                         // 重置，避免下次 confirm 重复注入旧数据
                         deviceInfo = null;
                         accessPlan = null;
@@ -170,42 +179,58 @@ export async function createC4Agent(
                 }
 
                 if (isConfirm && (!planSteps || (planSteps as ServiceStep[]).length === 0)) {
-                    const data = deviceInfo as any;
-                    if (data?.devices) {
-                        const devices = data.devices as any[];
-                        const steps: ServiceStep[] = [];
-                        for (const dev of devices) {
-                            if (!dev.name) continue;
-                            const instanceId = dev.name.replace(/[^a-zA-Z0-9_]/g, "_").toLowerCase();
-                            steps.push({
-                                action: "add" as const,
-                                service_type: "c4_modbus_client" as const,
-                                instance: {
-                                    id: instanceId,
-                                    name: dev.name,
-                                    ip: dev.connection?.ip || "",
-                                    port: dev.connection?.port || 502,
-                                } as any,
-                                points: (dev.points || []).map((p: any) => ({
-                                    id: p.name || "point",
-                                    addr: p.addr || 0,
-                                    uid: p.uid,
-                                    fun: p.fun,
-                                    type: p.type,
-                                    swap: p.swap,
-                                    shm_id: 0,
-                                })),
-                            } as any);
+                    let data: any = planDeviceInfo || planAccessPlan;
+                    if (!data?.devices && confirmOriginalContent) {
+                        const jsonMatch = confirmOriginalContent.match(/\{[\s\S]*"devices"[\s\S]*\}/);
+                        if (jsonMatch) {
+                            try { data = JSON.parse(jsonMatch[0]); } catch { /* ignore */ }
                         }
-                        if (steps.length > 0) planSteps = steps;
+                    }
+                    if (data?.devices) {
+                        try {
+                            const genTool = createOutputPlanStepsTool(config.registry);
+                            const raw = await (genTool as any).invoke(data);
+                            const r = typeof raw === "string" ? JSON.parse(raw) : raw;
+                            if (r?.success && Array.isArray(r?.steps)) {
+                                planSteps = r.steps as ServiceStep[];
+                            }
+                        } catch { /* deterministic generation failed, skip */ }
                     }
                 }
 
                 if (planSteps && planSteps.length > 0) {
                     try {
                         const mr = await merge_config_from_steps(planSteps, config.configPath, config.registry as any);
-                        if (mr.success) yield { type: "text" as const, content: "接入方案已执行，配置已写入。" };
-                        else yield { type: "text" as const, content: `执行问题: ${mr.error ?? "未知"}` };
+                        if (mr.success) {
+                            yield { type: "text" as const, content: "接入方案已执行，配置已写入。" };
+
+                            const ssr = await runRuntimeStopStart(
+                                config.mcpManager.getMultiClient(),
+                                "shm",
+                                config.configPath,
+                                config.registry as any,
+                            );
+                            if (ssr.success) {
+                                yield {
+                                    type: "text" as const,
+                                    content: `服务已重启: ${ssr.started_services.join(", ")}`,
+                                };
+                            } else if (ssr.abort_reason) {
+                                yield {
+                                    type: "error" as const,
+                                    message: ssr.abort_reason,
+                                };
+                            }
+                            if (ssr.failed_services.length > 0) {
+                                const names = ssr.failed_services.map((f) => f.service_type).join(", ");
+                                yield {
+                                    type: "error" as const,
+                                    message: `部分服务启动失败: ${names}`,
+                                };
+                            }
+                        } else {
+                            yield { type: "text" as const, content: `执行问题: ${mr.error ?? "未知"}` };
+                        }
                     } catch (ex: unknown) {
                         yield {
                             type: "error" as const,

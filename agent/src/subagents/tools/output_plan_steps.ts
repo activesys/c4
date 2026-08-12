@@ -20,7 +20,7 @@ const devicePointInputSchema = z.object({
 
 const deviceInputSchema = z.object({
     name: z.string().describe("设备名称"),
-    seq: z.number().describe("设备编号"),
+    seq: z.number().optional().describe("设备编号，默认 1"),
     protocol: z.string().describe("通信协议，如 modbus_tcp, modbus"),
     connection: z.object({
         ip: z.string(),
@@ -105,7 +105,7 @@ function generate_steps(
 
         const role_abbr = ROLE_ABBR[svc_type] || svc_type;
         const instance_id = site_abbr
-            ? `${site_abbr}_${dev.seq}_${role_abbr}`
+            ? `${site_abbr}_${dev.seq || 1}_${role_abbr}`
             : dev.name.replace(/[^a-zA-Z0-9_]/g, "_").toLowerCase();
 
         const points: ServicePoint[] = dev.points.map((p) => ({
