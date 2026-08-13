@@ -513,11 +513,7 @@ export async function execute_stop_and_start(
     // ── Phase 1: Stop ──
     for (const client of data_clients) {
         try {
-            const result = await client.stop();
-            if (result !== "success") {
-                // stop 返回非 success（如 SERVICE_NOT_READY）
-                // 仍视为已停止（幂等语义），继续
-            }
+            await client.stop();
             stopped_clients.push(client);
         } catch (err: unknown) {
             const err_msg = err instanceof Error ? err.message : String(err);

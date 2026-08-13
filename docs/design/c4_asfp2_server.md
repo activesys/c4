@@ -214,7 +214,7 @@ sequenceDiagram
     SM-->>A: 完成
 
     A->>S: 启动进程 → MCP initialize
-    S-->>A: 工具列表（stop / status / start）
+    S-->>A: 工具列表（stop / start）
 
     A->>S: start(config_path="/etc/c4/config.json")
     S->>S: loadConfig(configPath) 读取配置，校验有效性
@@ -510,7 +510,7 @@ ASFP2 接收端无独立的采集周期——写入频率取决于发送端的�
 ## 6. MCP 工具接口
 
 `c4_asfp2_server` 实现所有数据路径 MCP 服务通用生命周期工具（定义见
-[c4_architecture.md §3.3.1](c4_architecture.md)），此外提供状态查询工具。
+[c4_architecture.md §3.3.1](c4_architecture.md)）。
 
 ### 6.1 通用工具
 
@@ -561,61 +561,6 @@ ASFP2 接收端无独立的采集周期——写入频率取决于发送端的�
 
 **返回值**：成功返回 `"success"`。
 
-### 6.2 状态查询工具
-
-#### Tool: `status`
-
-查询各 Server 实例的运行状态和数据统计。**若 `start` 从未成功调用过，返回 `SERVICE_NOT_READY`。**
-
-**参数**：无
-
-**返回值示例**：
-
-```json
-{
-    "instances": [
-        {
-            "id": "hnals_I_windturbine_receiver",
-            "name": "接收I区风机数据服务",
-            "port": 9000,
-            "state": "running",
-            "connections": 2,
-            "points_count": 2,
-            "stats": {
-                "packets_received": 15234,
-                "items_received": 30468,
-                "items_written": 30468,
-                "items_dropped": 0,
-                "parse_errors": 0
-            }
-        },
-        {
-            "id": "hnals_I_transformer_receiver",
-            "name": "接收I区升压站数据服务",
-            "port": 9001,
-            "state": "running",
-            "connections": 1,
-            "points_count": 2,
-            "stats": {
-                "packets_received": 7621,
-                "items_received": 15242,
-                "items_written": 15242,
-                "items_dropped": 0,
-                "parse_errors": 0
-            }
-        }
-    ]
-}
-```
-
-| 统计指标 | 说明 |
-|---------|------|
-| `packets_received` | 成功接收并解析的 ASFP2 数据包总数 |
-| `items_received` | 解析出的 data item 总数 |
-| `items_written` | 成功写入共享内存的 data item 数（addr 命中映射） |
-| `items_dropped` | 丢弃的 data item 数（addr 不在映射中） |
-| `parse_errors` | 数据包解析失败次数 |
-
 ---
 
 ## 7. 错误处理
@@ -624,7 +569,6 @@ ASFP2 接收端无独立的采集周期——写入频率取决于发送端的�
 |------|---------|---------|
 | `start` 在运行状态下再次调用 | `start` | 返回 `ALREADY_RUNNING` |
 | `start` 从未成功调用过时调用 `stop` | `stop` | 幂等，直接返回 `"success"` |
-| `start` 从未成功调用过时调用 `status` | `status` | 返回 `SERVICE_NOT_READY` |
 | `config_path` 参数缺失 | `start` | 返回 `CONFIG_PATH_MISSING` |
 | 配置文件格式错误 | `start` | 返回 `isError: true` + `CONFIG_PARSE_ERROR` |
 | 端口重复（配置冲突） | `start` | 返回 `isError: true` + `PORT_CONFLICT` |

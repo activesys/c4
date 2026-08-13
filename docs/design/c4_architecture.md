@@ -244,7 +244,7 @@ block-beta
 | `reserved` | 2B | 6 | 保留字段，始终为 0 |
 | `point_count` | 4B | 8 | 已分配（已分配 shm_id）的 point 数量，不包含 Header 自身。分配时递增，回收时递减。在分配与 Writer 首次写入之间可能暂高于实际 state=1 的 block 数 |
 | `max_points` | 4B | 12 | 最大 point 容量，空闲块数 = `max_points - point_count` |
-| `global_write_seq` | 8B | 16 | 全局写入序号（原子单调递增），用于跨 point 的全局顺序 |
+| `global_write_seq` | 8B | 16 | 预留字段（跨 point 全局写序号），当前无消费者，Writer 不递增，保持 0 |
 | `reserved` | 8B | 24 | 保留，总计 32B |
 
 > **初始化规则**：`c4_shm_manager` 创建共享内存时，先通过 `ftruncate` 将文件扩展到目标大小
@@ -402,8 +402,8 @@ if block.state == 0 {
     atomic.StoreUint64(&block.write_seq, 0)  // 归零，保证偶数→奇数→偶数的 seqlock 协议
 }
 
-// 3. 获取全局序号
-gseq := atomic.AddUint64(&header.global_write_seq, 1)
+// 3. 获取全局序号（预留，当前无消费者，不递增）
+// atomic.AddUint64(&header.global_write_seq, 1)  // 可选，按需
 
 // 4. 递增序列号为奇数，宣告写入开始
 atomic.AddUint64(&block.write_seq, 1)
@@ -510,8 +510,8 @@ sequenceDiagram
 - **单调递增**：每次写入递增 2（例如 0→1→2, 2→3→4），reader 比较 `write_seq > last_seen`
 - **64 位**：2^64 足以覆盖任意部署周期，无需担心溢出（100Hz 写入需 58.5 亿年）
 
-`global_write_seq`（Global Header 中 8B）保留独立职责：跨 point 的全局顺序。
-每次 writer 写入时原子递增一次（非两次），与 block 级 `write_seq` 的递增次数无关。
+`global_write_seq`（Global Header 中 8B）为预留字段，当前无任何组件读取。设计上用于跨 point 的
+全局顺序，但尚无消费者，Writer 不递增（保持 0）。待有跨点全序需求时再启用并定义语义。
 
 ### 2.4.5 不变式
 
@@ -523,7 +523,6 @@ sequenceDiagram
 | 每个 block 只有一个 writer（shm_id 集合不重叠） | Agent（分配时不交叉） | 分配时 |
 | block 被回收（state→0）前，writer 已停止，reader 已停止 | Agent（Stop-Start 协议） | 回收 Phase 3 入口 |
 | `write_seq` 单调递增（每次 +2：偶数→奇数→偶数） | Writer（seqlock） | — |
-| `global_write_seq` 单调递增（每次 +1） | Writer（atomic add） | — |
 | 扩容期间无其他进程读写 shm | Agent（先 stop 所有 MCP） | 扩容入口 |
 | `point_count` = 已分配但尚未回收的 block 数 | `c4_shm_manager`（alloc/free 维护；重启时扫描 state=1 重建） | Agent 重启后 |
 | `magic` 仅在创建/扩容时由 `c4_shm_manager` 写入，此后永不变 | `c4_shm_manager` | 创建/扩容时 |
@@ -715,7 +714,7 @@ Agent（TypeScript）与 MCP Server（Go）的交互分为两部分：**运行�
 | `id` | string | 实例标识符，全局唯一。与 point.id 组合形成 `{service_id}.{point_id}` 的全局 key |
 | `ip` | string | Modbus TCP 设备 IP 地址 |
 | `port` | int | Modbus TCP 端口，标准 502 |
-| `hton_register` | int | Register 值是否做网络序转换：1=转换, 0=不转换 |
+| `hton_register` | int | 是否将每个 16 位寄存器的网络序格式转换为本机序格式：`1`=转换（网络序→本机序，默认），`0`=不转换 |
 | `hton_total` | int | 保留 |
 | `t0` | int | 连接超时（秒） |
 | `t1` | int | 请求超时（秒） |
@@ -733,7 +732,7 @@ Agent（TypeScript）与 MCP Server（Go）的交互分为两部分：**运行�
 | `addr` | integer | Modbus 地址 |
 | `fun` | integer | Modbus 功能码 |
 | `type` | integer | 数据的类型（ASFP2_TYPE_* 枚举值，见 §2.2.3） |
-| `swap` | integer | 交换的数据单元的字节数 |
+| `swap` | integer | 多寄存器值的字顺序交换（`swap` 字节为一组首尾镜像交换），单寄存器/位类型必须为 0 |
 | `shm_id` | integer | 全局 shm_id，默认 0（未分配），由 `c4_shm_manager` 分配后回填 |
 
 ### 3.2.3 c4_iec104_client 配置
@@ -1026,7 +1025,6 @@ IEC104 采集（2 个主变 RTU）和 ASFP2 转发（到中心侧数据库和第
 
 | 错误码 | 含义 | 触发工具 |
 |--------|------|---------|
-| `SERVICE_NOT_READY` | 服务尚未完成首次 `start`（`stop` 在首次 `start` 前调用） | `stop` |
 | `SHM_CORRUPTED` | 共享内存 magic 校验失败 | `start` |
 
 ---

@@ -21,7 +21,6 @@ const BUILTIN_ERROR_TRANSLATIONS: Record<string, string> = {
   UNKNOWN_READER_KEY: "转发配置引用了不存在的数据点，请确认数据点名称正确",
   CONNECTION_REFUSED: "设备连接失败，请确认设备已开机且网络可达",
   TIMEOUT: "设备响应超时，请检查网络连接和设备状态",
-  SERVICE_NOT_READY: "服务尚未就绪，请稍后再试",
   INVALID_CONFIG: "配置参数有误，请检查提交的信息",
   FILE_NOT_FOUND: "配置文件未找到，请联系管理员确认部署",
   PERMISSION_DENIED: "权限不足，请联系管理员",

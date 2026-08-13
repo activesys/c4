@@ -232,7 +232,7 @@ sequenceDiagram
     SM-->>A: 完成
 
     A->>C: 启动进程 → MCP initialize
-    C-->>A: 工具列表（stop / status / start）
+    C-->>A: 工具列表（stop / start）
 
     A->>C: start(config_path="/etc/c4/config.json")
     C->>C: loadConfig(configPath) 读取配置，校验有效性
@@ -585,7 +585,7 @@ var index map[uint32]*PointMapping
 ## 5. MCP 工具接口
 
 `c4_asfp2_client` 实现所有数据路径 MCP 服务通用生命周期工具（定义见
-[c4_architecture.md §3.3.1](c4_architecture.md)），此外提供状态查询工具。
+[c4_architecture.md §3.3.1](c4_architecture.md)）。
 
 ### 5.1 通用工具
 
@@ -640,57 +640,6 @@ tear down 已建立的 goroutine（关闭连接、清理资源），恢复到调
 
 **返回值**：成功返回 `"success"`。
 
-### 5.2 状态查询工具
-
-#### Tool: `status`
-
-查询各 Client 实例的运行状态和数据统计。**若 `start` 从未成功调用过，返回 `SERVICE_NOT_READY`。**
-
-**参数**：无
-
-**返回值示例**：
-
-```json
-{
-    "instances": [
-        {
-            "name": "转发到中心测数据库服务器",
-            "target": "172.16.109.11:9999",
-            "state": "running",
-            "points_count": 2,
-            "stats": {
-                "packets_sent": 15234,
-                "items_sent": 30468,
-                "items_skipped": 0,
-                "send_errors": 0,
-                "reconnects": 1
-            }
-        },
-        {
-            "name": "转发到第三方数据服务器",
-            "target": "172.16.109.13:9999",
-            "state": "running",
-            "points_count": 2,
-            "stats": {
-                "packets_sent": 7621,
-                "items_sent": 15242,
-                "items_skipped": 0,
-                "send_errors": 0,
-                "reconnects": 0
-            }
-        }
-    ]
-}
-```
-
-| 统计指标 | 说明 |
-|---------|------|
-| `packets_sent` | 成功发送的 ASFP2 数据包总数 |
-| `items_sent` | 成功发送的 data item 总数 |
-| `items_skipped` | 跳过的 data item 数（type 为非数值类型） |
-| `send_errors` | 发送失败次数 |
-| `reconnects` | TCP 重连次数 |
-
 ---
 
 ## 6. 错误处理
@@ -699,7 +648,6 @@ tear down 已建立的 goroutine（关闭连接、清理资源），恢复到调
 |------|---------|---------|
 | `start` 在运行状态下再次调用 | `start` | 返回 `ALREADY_RUNNING` |
 | `stop` 在服务未运行（从未 start）时调用 | `stop` | 幂等：直接返回 `success`，不报错 |
-| `status` 在服务未运行（从未 start）时调用 | `status` | 返回 `SERVICE_NOT_READY` |
 | `config_path` 参数缺失或无法读取指定文件 | `start` | 返回 `CONFIG_PATH_MISSING` |
 | 配置文件格式错误 | `start` | 返回 `isError: true` + `CONFIG_PARSE_ERROR` |
 | 共享内存 magic 校验失败 | `start` | 返回 `SHM_CORRUPTED`，Agent 应重建共享内存后重试 |
@@ -747,7 +695,7 @@ tear down 已建立的 goroutine（关闭连接、清理资源），恢复到调
 | 协议版本 | 自动识别对端版本并适配解码 | 固定最新版本编码 |
 | 属性开关 | 按对端数据包解析 | 自动检测并设置 |
 | 数据类型 | 仅数值类型，变长类型丢弃 | 仅数值类型，非数值 block 跳过 |
-| 生命周期工具 | `start` / `stop` / `status` | `start` / `stop` / `status` |
+| 生命周期工具 | `start` / `stop` | `start` / `stop` |
 | 配置字段差异 | `port`、`t1`、`t2`、`forward_kack`、`inverse_keep` | `ip` + `port`、`t0`、`t1`、`t2`、`smart`、`forward_kack`、`inverse_keep`、`timer` |
 | Points 字段 | `id`、`addr`、`shm_id` | `key`、`addr`、`shm_id` |
 
