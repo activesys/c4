@@ -335,7 +335,7 @@ Python 通过 `shm_helpers.read_shm_block(shm_path, shm_id)` 读取 Data Block�
 - 通过 `sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../c4_fun_00057"))` 引用 `c4_fun_00057` 的 `conftest.py`
 - 需要引入的 fixtures：`prepare_environment`、`start_asfp2_server`、`isolated_shm`
 - 需要引入的工具：`shm_helpers.read_shm_block`、`shm_helpers.shm_path`、`shm_helpers.read_shm_header`
-- **重要**：每个 TC 在调用 `start_asfp2_server.call_tool("start", ...)` 时，必须传入 `on_request=_roots_callback([{"uri": f"file://{config_path}"}])` 以响应 SUT 的 `roots/list` 请求。`_roots_callback` 定义参考 c4_fun_00057/conftest.py 中的同名函数
+- **重要**：每个 TC 在调用 `start_asfp2_server.call_tool("start", ...)` 时，必须通过 `config_path` 参数传入配置文件路径（`{"config_path": config_path}`）。配置文件由 `prepare_environment` 生成并就地改写（分配 shm_id）后交给 `start` 使用
 
 ### 5.2 asfp2_client 进程管理
 
@@ -350,8 +350,9 @@ Python 通过 `shm_helpers.read_shm_block(shm_path, shm_id)` 读取 Data Block�
 
 ### 5.4 端口管理
 
-- 每个测试用例使用独立的 port（TC1: 9000, TC2: 9100, …），
-  或每个测试用例自行启动独立的 SUT 实例（function-scope fixtures 保证隔离）
+- 每个测试用例通过 `_next_free_port()` 动态分配空闲的临时端口（同一用例的配置模板与
+  asfp2_client 使用同一个 port 值），避免在并行运行多个功能测试套件时发生端口冲突。
+- 每个测试用例自行启动独立的 SUT 实例（function-scope fixtures 保证隔离）
 
 ### 5.5 共享内存清理
 

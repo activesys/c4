@@ -24,41 +24,6 @@ EXPECTED_SHM_SIZE = (DEFAULT_MAX_POINTS + 1) * BLOCK_SIZE  # 3,200,032
 
 
 # ──────────────────────────────────────────────
-#  roots/list 回调工厂
-# ──────────────────────────────────────────────
-
-
-def _roots_callback(roots_list):
-    """创建 on_request 回调：对 roots/list 返回 roots_list。"""
-
-    def callback(method, params, request_id):
-        if method == "roots/list":
-            return {
-                "jsonrpc": "2.0",
-                "id": request_id,
-                "result": {"roots": roots_list},
-            }
-        return None
-
-    return callback
-
-
-def _roots_error_callback():
-    """创建 on_request 回调：对 roots/list 返回 MCP 错误。"""
-
-    def callback(method, params, request_id):
-        if method == "roots/list":
-            return {
-                "jsonrpc": "2.0",
-                "id": request_id,
-                "error": {"code": -32601, "message": "Method not found"},
-            }
-        return None
-
-    return callback
-
-
-# ──────────────────────────────────────────────
 #  辅助断言
 # ──────────────────────────────────────────────
 
@@ -124,41 +89,37 @@ def _assert_mcp_error(resp, expected_prefix):
 class TestNoConfigShmCreation:
     """C4_FUN_00053: 配置文件不存在或为 null → 默认 10 万点共享内存。"""
 
-    # ── TC1: roots/list 返回空 ─────────────────────
+    # ── TC1: 不传 config_path ─────────────────────
 
-    def test_tc1_roots_empty(self, mcp, isolated_shm):
-        """TC1: roots/list 返回 [] → 创建 100k 默认 shm。"""
+    def test_tc1_no_config_path(self, mcp, isolated_shm):
+        """TC1: 不传 config_path → 创建 100k 默认 shm。"""
         iid = "test_tc1"
         isolated_shm(iid)
 
         resp = mcp.call_tool(
             "create_shm",
             {"instance_id": iid},
-            on_request=_roots_callback([]),
         )
         assert resp["result"]["content"][0]["text"] == "success"
 
         _assert_default_shm(iid)
 
-    # ── TC2: roots/list 返回路径，文件不存在 ────────
+    # ── TC2: config_path 指向不存在的文件 ──────────
 
     def test_tc2_file_not_found(self, mcp, isolated_shm):
-        """TC2: 返回路径但文件不存在 → 100k 默认 shm。"""
+        """TC2: config_path 指向的文件不存在 → 100k 默认 shm。"""
         iid = "test_tc2"
         isolated_shm(iid)
 
         resp = mcp.call_tool(
             "create_shm",
-            {"instance_id": iid},
-            on_request=_roots_callback(
-                [{"uri": "file:///tmp/c4_no_such_config.json"}]
-            ),
+            {"instance_id": iid, "config_path": "/tmp/c4_no_such_config.json"},
         )
         assert resp["result"]["content"][0]["text"] == "success"
 
         _assert_default_shm(iid)
 
-    # ── TC3: roots/list 返回路径，文件为空 JSON ─────
+    # ── TC3: config_path 指向空 JSON 文件 ───────────
 
     def test_tc3_empty_json(self, mcp, isolated_shm):
         """TC3: 文件内容 {} → 100k 默认 shm，且原文件不被修改。"""
@@ -176,10 +137,7 @@ class TestNoConfigShmCreation:
 
             resp = mcp.call_tool(
                 "create_shm",
-                {"instance_id": iid},
-                on_request=_roots_callback(
-                    [{"uri": f"file://{tmp_path}"}]
-                ),
+                {"instance_id": iid, "config_path": tmp_path},
             )
             assert resp["result"].get("isError", False) is False
             assert resp["result"]["content"][0]["text"] == "success"
@@ -206,7 +164,6 @@ class TestNoConfigShmCreation:
         resp1 = mcp.call_tool(
             "create_shm",
             {"instance_id": iid},
-            on_request=_roots_callback([]),
         )
         assert resp1["result"].get("isError", False) is False
 
@@ -214,7 +171,6 @@ class TestNoConfigShmCreation:
         resp2 = mcp.call_tool(
             "create_shm",
             {"instance_id": iid},
-            on_request=_roots_callback([]),
         )
         _assert_mcp_error(resp2, "SHM_ALREADY_EXISTS")
 
@@ -228,7 +184,6 @@ class TestNoConfigShmCreation:
         mcp.call_tool(
             "create_shm",
             {"instance_id": iid},
-            on_request=_roots_callback([]),
         )
         _assert_default_shm(iid)
 
@@ -242,7 +197,6 @@ class TestNoConfigShmCreation:
         mcp.call_tool(
             "create_shm",
             {"instance_id": iid},
-            on_request=_roots_callback([]),
         )
 
         path = shm_path(iid)
@@ -260,7 +214,6 @@ class TestNoConfigShmCreation:
         mcp.call_tool(
             "create_shm",
             {"instance_id": iid},
-            on_request=_roots_callback([]),
         )
 
         resp = mcp.call_tool("query_status", {})
@@ -278,22 +231,17 @@ class TestNoConfigShmCreation:
         assert inner["free_blocks"] == DEFAULT_MAX_POINTS  # max - point_count
         assert inner["global_write_seq"] == 0
 
-    # ── TC8: roots/list MCP 调用失败 ────────────────
+    # ── TC8: config_path 为空字符串 ────────────────
 
-    def test_tc8_roots_list_failure(self, mcp, isolated_shm):
-        """TC8: roots/list 返回 MCP 错误 → CONFIG_PATH_MISSING。"""
+    def test_tc8_empty_config_path(self, mcp, isolated_shm):
+        """TC8: config_path 为空字符串 → 创建 100k 默认 shm。"""
         iid = "test_tc8"
         isolated_shm(iid)
 
         resp = mcp.call_tool(
             "create_shm",
-            {"instance_id": iid},
-            on_request=_roots_error_callback(),
+            {"instance_id": iid, "config_path": ""},
         )
-        _assert_mcp_error(resp, "CONFIG_PATH_MISSING:")
+        assert resp["result"]["content"][0]["text"] == "success"
 
-        # 不应创建共享内存
-        path = shm_path(iid)
-        assert not os.path.exists(path), (
-            f"Shared memory should not exist for failed create: {path}"
-        )
+        _assert_default_shm(iid)

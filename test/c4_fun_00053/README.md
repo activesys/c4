@@ -19,11 +19,11 @@ C4_FUN_00053 有两条分支：
 
 ### 触发默认模式的三种场景
 
-| 场景 | roots/list 返回 | 文件状态 |
+| 场景 | config_path 参数 | 文件状态 |
 |------|-----------------|---------|
-| 无配置文件注册 | `[]` | — |
-| 路径指向的文件不存在 | `["file:///tmp/no_such.json"]` | 文件不存在 (ENOENT) |
-| 文件内容为空 JSON | `["file:///tmp/empty.json"]` | 文件内容 `{}` |
+| 不传 config_path | 缺省（未提供） | — |
+| config_path 指向不存在的文件 | `/tmp/no_such.json` | 文件不存在 (ENOENT) |
+| config_path 指向空 JSON 文件 | `/tmp/empty.json` | 文件内容 `{}` |
 
 ### 默认模式下的期望值
 
@@ -84,10 +84,10 @@ Go 编译的 `c4_shm_manager` 二进制，通过 Python `subprocess.Popen` 启�
 ### 2.2 MCP 交互序列
 
 ```
-1. initialize (握手，声明 roots 能力)
+1. initialize (MCP 握手)
 2. tools/list → 获取工具列表，确认 create_shm 存在
-3. tools/call create_shm({instance_id}) → SUT 发起 roots/list
-4. Python 根据测试场景返回对应的 roots/list 应答
+3. tools/call create_shm({instance_id, config_path}) → SUT 读取配置文件
+4. SUT 按 config_path 参数读取配置文件并执行创建
 5. SUT 执行创建 → 返回 create_shm 结果
 ```
 
@@ -102,25 +102,25 @@ Python 通过 `os.open("/dev/shm/c4_{id}", os.O_RDONLY)` + `mmap` 直接读取�
 
 **测试文件**：`test_no_config.py`（TC1~TC8）
 
-### TC1: roots/list 返回空 → 创建 100k 默认 shm
+### TC1: 不传 config_path → 创建 100k 默认 shm
 
 - **前置**：无配置文件注册
-- **操作**：调用 `create_shm({instance_id: "test_tc1"})`，roots/list 返回 `{"roots": []}`
+- **操作**：调用 `create_shm({instance_id: "test_tc1"})`，不传 config_path
 - **预期**：返回 `"success"`
 - **清理**：`shm_unlink("/c4_test_tc1")`
 
-### TC2: roots/list 返回路径，文件不存在 → 创建 100k 默认 shm
+### TC2: config_path 指向的文件不存在 → 创建 100k 默认 shm
 
 - **前置**：确保 `/tmp/c4_no_such_config.json` 不存在
-- **操作**：调用 `create_shm({instance_id: "test_tc2"})`，roots/list 返回 `{"roots": [{"uri": "file:///tmp/c4_no_such_config.json"}]}`
+- **操作**：调用 `create_shm({instance_id: "test_tc2", config_path: "/tmp/c4_no_such_config.json"})`
 - **预期**：返回 `"success"`
 - **清理**：`shm_unlink("/c4_test_tc2")`
 
-### TC3: roots/list 返回路径，文件内容为空 JSON → 创建 100k 默认 shm
+### TC3: config_path 指向空 JSON 文件 → 创建 100k 默认 shm
 
-- **前置**：创建 `/tmp/c4_empty_config.json`，内容 `{}`
-- **操作**：调用 `create_shm({instance_id: "test_tc3"})`，roots/list 返回 `{"roots": [{"uri": "file:///tmp/c4_empty_config.json"}]}`
-- **预期**：返回 `"success"`
+- **前置**：创建 `/tmp/c4_empty_config.json`，内容 `{}`（空 JSON）
+- **操作**：调用 `create_shm({instance_id: "test_tc3", config_path: "/tmp/c4_empty_config.json"})`
+- **预期**：返回 `"success"`，创建默认 10 万点共享内存（文件内容为空 JSON 等价于无配置）
 - **额外验证**：`/tmp/c4_empty_config.json` 未被修改（内容仍为 `{}`）
 - **清理**：`shm_unlink("/c4_test_tc3")`，删除 `/tmp/c4_empty_config.json`
 
@@ -152,12 +152,12 @@ Python 通过 `os.open("/dev/shm/c4_{id}", os.O_RDONLY)` + `mmap` 直接读取�
 - **预期**：返回 `{"magic": "valid", "version": 1, "remap_version": 0, "point_count": 0, "max_points": 100000, "free_blocks": 100000, "global_write_seq": 0}`
 - **注意**：`query_status` 的 MCP 响应为嵌套 JSON——`result.content[0].text` 是 JSON 字符串，需二次 `json.loads` 解析
 
-### TC8: roots/list MCP 调用失败 → 返回 CONFIG_PATH_MISSING
+### TC8: config_path 为空字符串 → 创建 100k 默认 shm
 
 - **前置**：无
-- **操作**：调用 `create_shm({instance_id: "test_tc8"})`，Python 对 roots/list 请求响应 `{"jsonrpc": "2.0", "id": "...", "error": {"code": -32601, "message": "Method not found"}}`
-- **预期**：`create_shm` 返回 `isError: true`，`content[0].text` 以 `CONFIG_PATH_MISSING:` 开头
-- **清理**：`shm_unlink("/c4_test_tc8")`（预防性）
+- **操作**：调用 `create_shm({instance_id: "test_tc8", config_path: ""})`
+- **预期**：返回 `"success"`，创建默认 10 万点共享内存（config_path 为空等价于未传）
+- **清理**：`shm_unlink("/c4_test_tc8")`
 
 > **测试顺序依赖**：TC4 依赖 TC1~TC3 之一已成功创建 shm。TC5、TC6、TC7 依赖 TC1。
 > 若 TC1 失败，TC4~TC7 均会被跳过。建议为 TC4~TC7 各自独立创建/销毁 shm，
@@ -174,7 +174,7 @@ Python 通过 `os.open("/dev/shm/c4_{id}", os.O_RDONLY)` + `mmap` 直接读取�
 - 每行一个 JSON 对象（行分隔），不是流式 JSON
 - `initialize` 握手：Python 发送 `initialize` 请求 → 读取 SUT 的 `initialize` 响应（含 `serverInfo` 和 capabilities）→ 发送 `initialized` 通知
 - initialize 请求需包含 `capabilities.roots.listChanged: true`
-- `create_shm` 调用期间，SUT 通过 **stdout** 发送 `roots/list` 请求，Python 须从 SUT 的 stdout 读取该请求，并向 SUT 的 **stdin** 写入对应的 `roots/list` 应答
+- 配置文件路径通过 `create_shm` 的 `config_path` 参数显式传入，不再使用 roots/list 回调
 - `query_status` 返回的 MCP 响应中，`result.content[0].text` 是 JSON 字符串，需二次 `json.loads` 解析
 
 ### 4.2 共享内存清理
@@ -358,7 +358,7 @@ Python 通过 `os.open("/dev/shm/c4_{id}", os.O_RDONLY)` + `mmap` 直接读取�
 
 ### 6.2 临时配置文件
 
-测试需动态生成配置文件写入 `/tmp`，`roots/list` 返回该路径。
+测试需动态生成配置文件写入 `/tmp`，通过 `config_path` 参数传入该路径。
 创建 shm 后验证文件内容已被 `c4_shm_manager` 回填更新。
 
 ### 6.3 配置写入幂等

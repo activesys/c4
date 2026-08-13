@@ -229,26 +229,6 @@ def _find_shm_manager_binary() -> str:
 
 
 # ──────────────────────────────────────────────
-#  roots/list 回调工厂
-# ──────────────────────────────────────────────
-
-
-def _roots_callback(roots_list):
-    """创建 on_request 回调：对 roots/list 返回 roots_list。"""
-
-    def cb(method, params, request_id):
-        if method == "roots/list":
-            return {
-                "jsonrpc": "2.0",
-                "id": request_id,
-                "result": {"roots": roots_list},
-            }
-        return None
-
-    return cb
-
-
-# ──────────────────────────────────────────────
 #  Fixtures
 # ──────────────────────────────────────────────
 
@@ -311,8 +291,7 @@ def prepare_environment(shm_mgr_client):
         # 步骤 3: create_shm
         resp = shm_mgr_client.call_tool(
             "create_shm",
-            {"instance_id": instance_id},
-            on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+            {"instance_id": instance_id, "config_path": config_path},
         )
         if resp["result"].get("isError", False):
             raise RuntimeError(
@@ -322,8 +301,7 @@ def prepare_environment(shm_mgr_client):
         # 步骤 4: adjust_shm
         resp = shm_mgr_client.call_tool(
             "adjust_shm",
-            {},
-            on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+            {"config_path": config_path},
         )
         if resp["result"].get("isError", False):
             raise RuntimeError(
@@ -354,7 +332,7 @@ def start_asfp2_server():
     binary = _find_asfp2_binary()
     client = McpClient(binary)
 
-    # 步骤 7: 验证 start/pause/resume/status 均已注册
+    # 步骤 7: 验证 start/stop 均已注册
     resp = client.list_tools()
     if "result" in resp and "tools" in resp["result"]:
         tool_names = [t["name"] for t in resp["result"]["tools"]]
@@ -368,7 +346,6 @@ def start_asfp2_server():
 
     assert "start" in tool_names, f"start not in tools: {tool_names}"
     assert "stop" in tool_names, f"stop not in tools: {tool_names}"
-    assert "status" in tool_names, f"status not in tools: {tool_names}"
 
     yield client
     client.close()

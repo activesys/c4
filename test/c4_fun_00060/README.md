@@ -13,12 +13,12 @@ C4_FUN_00060：ASFP2 发送 MCP 服务支持停止和重启 — Agent 可停止�
 验证 `c4_asfp2_client` 的 Stop-Start 协议：
 
 1. `stop` 在运行状态返回 `"success"` 并释放 TCP 连接
-2. `stop` 在未启动状态返回 `SERVICE_NOT_READY`
+2. `stop` 在未启动状态幂等返回 `"success"`
 3. `start` 在已运行状态返回 `ALREADY_RUNNING`
 4. 简单重启（`stop` → `start`）后连接恢复
 5. 完整 Stop-Start 协议（`stop` → `adjust_shm` → `start`）
 6. 多次 `stop`/`start` 循环正确
-7. 连续两次 `stop` 返回 `SERVICE_NOT_READY`
+7. 连续两次 `stop` 均返回 `"success"`（幂等）
 8. 重启时配置变更（新 IP/port/points）生效
 9. `start` 失败后修正配置恢复成功
 10. At-least-once 语义：重启后可能重复发送
@@ -117,7 +117,7 @@ Go 编译的 `c4_asfp2_client` 二进制，通过 MCP stdio JSON-RPC 协议控�
 
 - **前置**：MCP initialize 完成，`start` 从未调用
 - **操作**：调用 `stop`
-- **预期**：`isError: true`，`SERVICE_NOT_READY`
+- **预期**：`isError: false`，返回 `"success"`（stop 幂等）
 
 ### TC3: start — 已运行时重复调用
 
@@ -154,7 +154,7 @@ Go 编译的 `c4_asfp2_client` 二进制，通过 MCP stdio JSON-RPC 协议控�
 
 - **前置**：SUT 已 start
 - **操作**：`stop`（成功）→ `stop`
-- **预期**：第一次 `"success"`，第二次 `SERVICE_NOT_READY`
+- **预期**：两次均返回 `"success"`（stop 幂等）
 
 ### TC8: 重启时配置变更生效
 

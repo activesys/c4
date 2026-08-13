@@ -33,7 +33,11 @@ func createShmHandler(ctx context.Context, req *mcp.CallToolRequest, input Creat
 
 	if input.ConfigPath != "" {
 		if _, statErr := os.Stat(input.ConfigPath); statErr == nil {
-			sm, err = createFromConfig(input.ConfigPath, input.InstanceID)
+			if isDefaultConfigContent(input.ConfigPath) {
+				sm, err = shm.Create(input.InstanceID, shm.DefaultMaxPoints)
+			} else {
+				sm, err = createFromConfig(input.ConfigPath, input.InstanceID)
+			}
 		} else {
 			sm, err = shm.Create(input.InstanceID, shm.DefaultMaxPoints)
 		}
@@ -53,21 +57,10 @@ func createShmHandler(ctx context.Context, req *mcp.CallToolRequest, input Creat
 	return newResult("success"), nil, nil
 }
 
-func shouldUseDefault(rootRes *mcp.ListRootsResult) bool {
-	if rootRes == nil || len(rootRes.Roots) == 0 {
-		return true
-	}
-	uri := rootRes.Roots[0].URI
-	configPath := uri
-	if len(uri) > 7 && uri[:7] == "file://" {
-		configPath = uri[7:]
-	}
-	if _, err := os.Stat(configPath); os.IsNotExist(err) {
-		return true
-	}
+func isDefaultConfigContent(configPath string) bool {
 	data, err := os.ReadFile(configPath)
 	if err != nil {
-		return true
+		return false
 	}
 	return isWhitespaceOnly(data) || isEmptyJSON(data)
 }
@@ -326,6 +319,11 @@ func adjustShmHandler(ctx context.Context, req *mcp.CallToolRequest, input struc
 	}
 
 	configPath := input.ConfigPath
+
+	// 空 JSON 内容（{} / null / 空白）→ no-op：无需调整，直接返回 success
+	if isDefaultConfigContent(configPath) {
+		return newResult("success"), nil, nil
+	}
 
 	config, writers, readers, err := loadConfigSection(configPath)
 	if err != nil {

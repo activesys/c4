@@ -26,7 +26,6 @@ _spec.loader.exec_module(_c57)
 prepare_environment = _c57.prepare_environment
 start_asfp2_server = _c57.start_asfp2_server
 isolated_shm = _c57.isolated_shm
-_roots_callback = _c57._roots_callback
 shm_mgr_client = _c57.shm_mgr_client
 
 # ──────────────────────────────────────────────
@@ -162,14 +161,12 @@ def _run_adjust_shm(config_path: str, instance_id: str | None = None):
     if instance_id is not None:
         client.call_tool(
             "create_shm",
-            {"instance_id": instance_id},
-            on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+            {"instance_id": instance_id, "config_path": config_path},
         )
 
     resp = client.call_tool(
         "adjust_shm",
-        {},
-        on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+        {"config_path": config_path},
     )
     client.close()
 

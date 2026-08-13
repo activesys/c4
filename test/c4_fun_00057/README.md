@@ -11,7 +11,7 @@ C4_FUN_00057：Agent 生成 ASFP2 接收 MCP 服务的配置文件后，启动 M
 ## 1. 测试目标
 
 验证 `c4_asfp2_server` 在收到 Agent 的 `start` 工具调用后：
-1. 通过 `roots/list` 获取配置文件路径
+1. 通过 `config_path` 参数获取配置文件路径
 2. 读取并校验配置
 3. 附加已有共享内存
 4. 构建 `addr → shm_id` 映射索引
@@ -50,18 +50,16 @@ Go 编译的 `c4_asfp2_server` 二进制，通过 Python `subprocess.Popen` 启�
 4. 调用 adjust_shm 为 c4_asfp2_server 的 points 分配 shm_id（回填配置文件）
 5. 关闭 c4_shm_manager（释放端口，仅需共享内存和配置文件保留）
 6. 启动 c4_asfp2_server → MCP initialize
-7. 获取工具列表，确认 start/pause/resume/status 均已注册
+7. 获取工具列表，确认 start/stop 均已注册
 8. 调用 start 工具
 ```
 
 ### 2.3 MCP 交互序列（start 工具调用期间）
 
 ```
-1. Python 发送 tools/call {name: "start", arguments: {}}
-2. SUT 通过 stdout 发送 roots/list 请求
-3. Python 向 SUT 的 stdin 写入 roots/list 应答（含配置文件路径）
-4. SUT 读取配置 → shm_open → mmap → 启动 goroutine
-5. SUT 返回 start 结果
+1. Python 发送 tools/call {name: "start", arguments: {"config_path": "/tmp/config.json"}}
+2. SUT 读取 config_path 指向的配置 → 校验 → shm_open → mmap → 启动 goroutine
+3. SUT 返回 start 结果
 ```
 
 ### 2.4 共享内存验证
@@ -124,7 +122,7 @@ Python 通过 `socket.create_connection(("127.0.0.1", port), timeout=1)` 验证�
   - 返回 `"success"`（`isError: false`）
   - 端口 9000 已监听（`socket.create_connection` 成功）
 - **额外验证**：
-  - `c4_asfp2_server` 内部已构建 addr→shm_id 索引（通过后续 `status` 工具间接验证）
+  - `c4_asfp2_server` 内部已构建 addr→shm_id 索引
   - 无法直接验证索引内容，但 `start` 成功 + 端口已监听即可证明加载正常
 
 ### TC2: 多实例启动 — 3 个不同端口
@@ -155,11 +153,11 @@ Python 通过 `socket.create_connection(("127.0.0.1", port), timeout=1)` 验证�
 - **操作**：再次调用 `start`（同一 SUT 进程）
 - **预期**：`isError: true`，错误码 `ALREADY_STARTED`
 
-### TC5: start 未调用前调用 pause/status → SERVICE_NOT_READY
+### TC5: start 未调用前调用 stop → 幂等 success
 
 - **前置**：启动 `c4_asfp2_server`，MCP initialize 完成，但未调用 `start`
-- **操作**：分别调用 `pause`、`status`（`resume` 同理，任选一个验证）
-- **预期**：均返回 `isError: true`，错误码 `SERVICE_NOT_READY`
+- **操作**：调用 `stop`
+- **预期**：返回 `"success"`（`isError: false`）— `stop` 幂等，服务未运行时直接返回成功，不报错
 
 ### TC6: 端口重复 → PORT_CONFLICT
 
@@ -180,12 +178,11 @@ Python 通过 `socket.create_connection(("127.0.0.1", port), timeout=1)` 验证�
 - **操作**：调用 `start`
 - **预期**：`isError: true`，错误码 `SHM_CORRUPTED`
 
-### TC9: roots/list 超时 → CONFIG_PATH_MISSING
+### TC9: config_path 缺失 → CONFIG_PATH_MISSING
 
 - **前置**：启动 `c4_asfp2_server`，MCP initialize
-- **操作**：调用 `start`，Python 对 `roots/list` 请求**不响应**（模拟超时）
-- **预期**：SUT 在超时（如 5s）后返回 `isError: true`，错误码 `CONFIG_PATH_MISSING`
-- **注意**：Python 需设置 `start` 调用超时略大于 SUT 的 roots/list 超时，避免测试误报
+- **操作**：调用 `start`，不提供 `config_path` 参数（`arguments: {}`）
+- **预期**：返回 `isError: true`，错误码 `CONFIG_PATH_MISSING`
 
 ### TC10: 配置文件格式错误 → CONFIG_PARSE_ERROR
 
@@ -213,10 +210,8 @@ Python 通过 `socket.create_connection(("127.0.0.1", port), timeout=1)` 验证�
 
 - 每行一个 JSON 对象（行分隔），不是流式 JSON
 - `initialize` 握手：Python 发送 `initialize` → 读取 SUT 的 `initialize` 响应 → 发送 `initialized` 通知
-- initialize 请求需包含 `capabilities.roots.listChanged: true`
-- `start` 调用期间，SUT 通过 **stdout** 发送 `roots/list` 请求，Python 从 stdout 读取该请求，
-  并向 SUT 的 **stdin** 写入对应的 `roots/list` 应答
-- `roots/list` 应答示例：`{"jsonrpc":"2.0","id":<request_id>,"result":{"roots":[{"uri":"file:///tmp/config.json"}]}}`
+- `start` 的 `config_path` 参数通过 `tools/call` 的 `arguments` 字段传递（绝对路径字符串），
+  SUT 直接读取该路径指向的配置文件，不再通过 `roots/list` 获取配置路径
 
 ### 5.3 端口冲突处理
 

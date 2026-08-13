@@ -2,7 +2,7 @@
 C4_FUN_00057 测试用例 — c4_asfp2_server start 工具
 
 验证 c4_asfp2_server 在收到 Agent 的 start 工具调用后：
-1. 通过 roots/list 获取配置文件路径
+1. 通过 config_path 参数获取配置文件路径
 2. 读取并校验配置
 3. 附加已有共享内存
 4. 为每个配置实例启动 goroutine 监听对应端口
@@ -20,7 +20,6 @@ import tempfile
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import pytest  # type: ignore
-from conftest import _roots_callback
 from shm_helpers import shm_path, shm_unlink
 
 
@@ -155,10 +154,7 @@ class TestAsfp2ServerStart:
 
         resp = start_asfp2_server.call_tool(
             "start",
-            {},
-            on_request=_roots_callback(
-                [{"uri": f"file://{config_path}"}]
-            ),
+            {"config_path": config_path},
         )
         assert resp["result"].get("isError", False) is False, (
             f"start failed: {resp}"
@@ -187,10 +183,7 @@ class TestAsfp2ServerStart:
 
         resp = start_asfp2_server.call_tool(
             "start",
-            {},
-            on_request=_roots_callback(
-                [{"uri": f"file://{config_path}"}]
-            ),
+            {"config_path": config_path},
         )
         assert resp["result"].get("isError", False) is False, (
             f"start failed: {resp}"
@@ -216,10 +209,7 @@ class TestAsfp2ServerStart:
 
         resp = start_asfp2_server.call_tool(
             "start",
-            {},
-            on_request=_roots_callback(
-                [{"uri": f"file://{config_path}"}]
-            ),
+            {"config_path": config_path},
         )
         assert resp["result"].get("isError", False) is False, (
             f"start failed: {resp}"
@@ -247,10 +237,7 @@ class TestAsfp2ServerStart:
         # 首次 start
         resp1 = start_asfp2_server.call_tool(
             "start",
-            {},
-            on_request=_roots_callback(
-                [{"uri": f"file://{config_path}"}]
-            ),
+            {"config_path": config_path},
         )
         assert resp1["result"].get("isError", False) is False
         assert resp1["result"]["content"][0]["text"] == "success"
@@ -258,24 +245,19 @@ class TestAsfp2ServerStart:
         # 再次 start — 应返回     ALREADY_RUNNING
         resp2 = start_asfp2_server.call_tool(
             "start",
-            {},
-            on_request=_roots_callback(
-                [{"uri": f"file://{config_path}"}]
-            ),
+            {"config_path": config_path},
         )
         _assert_mcp_error(resp2, "ALREADY_RUNNING")
 
-    # ── TC5: start 未调用前调用 stop/status → SERVICE_NOT_READY
+    # ── TC5: start 未调用前调用 stop → 幂等 success
 
-    def test_tc5_service_not_ready(self, start_asfp2_server):
-        """TC5: start 前调用 stop/status 均返回 SERVICE_NOT_READY。"""
-        # stop
+    def test_tc5_stop_idempotent(self, start_asfp2_server):
+        """TC5: start 前调用 stop 幂等返回 success。"""
         resp = start_asfp2_server.call_tool("stop", {})
-        _assert_mcp_error(resp, "SERVICE_NOT_READY")
-
-        # status
-        resp = start_asfp2_server.call_tool("status", {})
-        _assert_mcp_error(resp, "SERVICE_NOT_READY")
+        assert resp["result"].get("isError", False) is False, (
+            f"stop should be idempotent, got: {resp}"
+        )
+        assert resp["result"]["content"][0]["text"] == "success"
 
     # ── TC6: 端口重复 → PORT_CONFLICT ─────────────
 
@@ -295,10 +277,7 @@ class TestAsfp2ServerStart:
 
         resp = start_asfp2_server.call_tool(
             "start",
-            {},
-            on_request=_roots_callback(
-                [{"uri": f"file://{config_path}"}]
-            ),
+            {"config_path": config_path},
         )
         _assert_mcp_error(resp, "PORT_CONFLICT")
 
@@ -323,10 +302,7 @@ class TestAsfp2ServerStart:
         try:
             resp = start_asfp2_server.call_tool(
                 "start",
-                {},
-                on_request=_roots_callback(
-                    [{"uri": f"file://{config_path}"}]
-                ),
+                {"config_path": config_path},
             )
             _assert_mcp_error(resp, "SHM_OPEN_FAILED")
         finally:
@@ -356,22 +332,17 @@ class TestAsfp2ServerStart:
 
         resp = start_asfp2_server.call_tool(
             "start",
-            {},
-            on_request=_roots_callback(
-                [{"uri": f"file://{config_path}"}]
-            ),
+            {"config_path": config_path},
         )
         _assert_mcp_error(resp, "SHM_CORRUPTED")
 
-    # ── TC9: roots/list 超时 → CONFIG_PATH_MISSING ─
+    # ── TC9: config_path 缺失 → CONFIG_PATH_MISSING ─
 
     def test_tc9_config_path_missing(self, start_asfp2_server):
-        """TC9: 不响应 roots/list — SUT 超时后返回 CONFIG_PATH_MISSING。"""
-        # on_request 返回 None，即不响应 roots/list 请求
+        """TC9: start 未提供 config_path — 返回 CONFIG_PATH_MISSING。"""
         resp = start_asfp2_server.call_tool(
             "start",
             {},
-            on_request=lambda method, params, request_id: None,
         )
         _assert_mcp_error(resp, "CONFIG_PATH_MISSING")
 
@@ -397,42 +368,14 @@ class TestAsfp2ServerStart:
         iid = f"test_tc10_{abs(hash(bad_config_content)) % 100000}"
         isolated_shm(iid)
 
-        # 先创建 shm（使用有效配置，确保共享内存存在）
-        valid_config = {
-            "c4_shm_manager": {
-                "writer": [],
-                "reader": [],
-            },
-        }
-        fd, valid_config_path = tempfile.mkstemp(
-            suffix=".json", prefix="c4_config_valid_", text=True
+        # 先创建 shm（无配置文件 → 默认 10 万点）
+        resp = shm_mgr_client.call_tool(
+            "create_shm",
+            {"instance_id": iid},
         )
-        with os.fdopen(fd, "w") as f:
-            json.dump(valid_config, f)
-
-        try:
-            resp = shm_mgr_client.call_tool(
-                "create_shm",
-                {"instance_id": iid},
-                on_request=_roots_callback(
-                    [{"uri": f"file://{valid_config_path}"}]
-                ),
-            )
-            assert resp["result"].get("isError", False) is False, (
-                f"create_shm failed for TC10: {resp}"
-            )
-            resp = shm_mgr_client.call_tool(
-                "adjust_shm",
-                {},
-                on_request=_roots_callback(
-                    [{"uri": f"file://{valid_config_path}"}]
-                ),
-            )
-            assert resp["result"].get("isError", False) is False, (
-                f"adjust_shm failed for TC10: {resp}"
-            )
-        finally:
-            os.unlink(valid_config_path)
+        assert resp["result"].get("isError", False) is False, (
+            f"create_shm failed for TC10: {resp}"
+        )
 
         # 创建格式错误的配置文件
         fd, bad_config_path = tempfile.mkstemp(
@@ -444,10 +387,7 @@ class TestAsfp2ServerStart:
         try:
             resp = start_asfp2_server.call_tool(
                 "start",
-                {},
-                on_request=_roots_callback(
-                    [{"uri": f"file://{bad_config_path}"}]
-                ),
+                {"config_path": bad_config_path},
             )
             _assert_mcp_error(resp, "CONFIG_PARSE_ERROR")
         finally:

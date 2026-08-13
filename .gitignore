@@ -53,3 +53,8 @@ __pycache__/
 *.pyc
 mcp/*/c4_asfp2_server
 mcp/*/c4_asfp2_client
+
+# Node.js / TypeScript (c4/agent/)
+node_modules/
+dist/
+*.tsbuildinfo

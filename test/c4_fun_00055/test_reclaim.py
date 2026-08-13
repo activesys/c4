@@ -10,8 +10,8 @@ C4_FUN_00055 测试用例 — adjust_shm 块回收功能
 所有验证均通过直接读取共享内存完成，不使用 query_status 工具。
 Writer 激活通过 mmap 直接写入 block state 字节模拟。
 
-注：当前 Go 实现中 adjust_shm 的回收算法尚未实现，本测试严格按 README
-     规格断言预期行为——测试预期全部失败，证明源码尚未实现回收功能。
+注：本套件通过 config_path 工具参数将配置文件路径传入 create_shm / adjust_shm
+     （不再使用 roots/list 协议），并在测试文件中直接模拟 Writer 激活。
 """
 
 import json
@@ -218,37 +218,6 @@ def remove_writer_section(config_path, section_name):
 
 
 # ══════════════════════════════════════════════════
-#  roots/list 回调
-# ══════════════════════════════════════════════════
-
-
-def _roots_callback(roots_list):
-    """返回处理 roots/list 请求的回调函数。"""
-    def cb(method, params, request_id):
-        if method == "roots/list":
-            return {
-                "jsonrpc": "2.0",
-                "id": request_id,
-                "result": {"roots": roots_list},
-            }
-        return None
-    return cb
-
-
-def _roots_error_callback():
-    """返回一个对 roots/list 返回 MCP 错误的回调函数。"""
-    def cb(method, params, request_id):
-        if method == "roots/list":
-            return {
-                "jsonrpc": "2.0",
-                "id": request_id,
-                "error": {"code": -32603, "message": "Simulated roots failure"},
-            }
-        return None
-    return cb
-
-
-# ══════════════════════════════════════════════════
 #  辅助断言
 # ══════════════════════════════════════════════════
 
@@ -305,8 +274,7 @@ class TestPureReclaim:
 
         try:
             resp = mcp.call_tool(
-                "create_shm", {"instance_id": iid},
-                on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+                "create_shm", {"instance_id": iid, "config_path": config_path},
             )
             _assert_mcp_success(resp)
 
@@ -322,8 +290,7 @@ class TestPureReclaim:
             )
 
             resp = mcp.call_tool(
-                "adjust_shm", {},
-                on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+                "adjust_shm", {"config_path": config_path},
             )
             _assert_mcp_success(resp)
 
@@ -372,8 +339,7 @@ class TestPureReclaim:
 
         try:
             resp = mcp.call_tool(
-                "create_shm", {"instance_id": iid},
-                on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+                "create_shm", {"instance_id": iid, "config_path": config_path},
             )
             _assert_mcp_success(resp)
 
@@ -402,8 +368,7 @@ class TestPureReclaim:
             remove_writer_section(config_path, "c4_iec104_client")
 
             resp = mcp.call_tool(
-                "adjust_shm", {},
-                on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+                "adjust_shm", {"config_path": config_path},
             )
             _assert_mcp_success(resp)
 
@@ -453,8 +418,7 @@ class TestPureReclaim:
 
         try:
             resp = mcp.call_tool(
-                "create_shm", {"instance_id": iid},
-                on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+                "create_shm", {"instance_id": iid, "config_path": config_path},
             )
             _assert_mcp_success(resp)
 
@@ -476,8 +440,7 @@ class TestPureReclaim:
             )
 
             resp = mcp.call_tool(
-                "adjust_shm", {},
-                on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+                "adjust_shm", {"config_path": config_path},
             )
             _assert_mcp_success(resp)
 
@@ -531,8 +494,7 @@ class TestNoDelete:
 
         try:
             resp = mcp.call_tool(
-                "create_shm", {"instance_id": iid},
-                on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+                "create_shm", {"instance_id": iid, "config_path": config_path},
             )
             _assert_mcp_success(resp)
 
@@ -542,8 +504,7 @@ class TestNoDelete:
             set_header_point_count(path, 3)
 
             resp = mcp.call_tool(
-                "adjust_shm", {},
-                on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+                "adjust_shm", {"config_path": config_path},
             )
             _assert_mcp_success(resp)
 
@@ -575,8 +536,7 @@ class TestNoDelete:
 
         try:
             resp = mcp.call_tool(
-                "create_shm", {"instance_id": iid},
-                on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+                "create_shm", {"instance_id": iid, "config_path": config_path},
             )
             _assert_mcp_success(resp)
 
@@ -593,8 +553,7 @@ class TestNoDelete:
                 json.dump(cfg, f)
 
             resp = mcp.call_tool(
-                "adjust_shm", {},
-                on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+                "adjust_shm", {"config_path": config_path},
             )
             _assert_mcp_success(resp)
 
@@ -633,8 +592,7 @@ class TestStateConsistency:
 
         try:
             resp = mcp.call_tool(
-                "create_shm", {"instance_id": iid},
-                on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+                "create_shm", {"instance_id": iid, "config_path": config_path},
             )
             _assert_mcp_success(resp)
 
@@ -648,8 +606,7 @@ class TestStateConsistency:
             )
 
             resp = mcp.call_tool(
-                "adjust_shm", {},
-                on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+                "adjust_shm", {"config_path": config_path},
             )
             _assert_mcp_success(resp)
 
@@ -677,8 +634,7 @@ class TestStateConsistency:
 
         try:
             resp = mcp.call_tool(
-                "create_shm", {"instance_id": iid},
-                on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+                "create_shm", {"instance_id": iid, "config_path": config_path},
             )
             _assert_mcp_success(resp)
 
@@ -703,8 +659,7 @@ class TestStateConsistency:
             )
 
             resp = mcp.call_tool(
-                "adjust_shm", {},
-                on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+                "adjust_shm", {"config_path": config_path},
             )
             _assert_mcp_success(resp)
 
@@ -762,8 +717,7 @@ class TestStateConsistency:
 
         try:
             resp = mcp.call_tool(
-                "create_shm", {"instance_id": iid},
-                on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+                "create_shm", {"instance_id": iid, "config_path": config_path},
             )
             _assert_mcp_success(resp)
 
@@ -782,8 +736,7 @@ class TestStateConsistency:
             )
 
             resp = mcp.call_tool(
-                "adjust_shm", {},
-                on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+                "adjust_shm", {"config_path": config_path},
             )
             _assert_mcp_success(resp)
 
@@ -844,8 +797,7 @@ class TestStateConsistency:
 
         try:
             resp = mcp.call_tool(
-                "create_shm", {"instance_id": iid},
-                on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+                "create_shm", {"instance_id": iid, "config_path": config_path},
             )
             _assert_mcp_success(resp)
 
@@ -870,8 +822,7 @@ class TestStateConsistency:
             )
 
             resp = mcp.call_tool(
-                "adjust_shm", {},
-                on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+                "adjust_shm", {"config_path": config_path},
             )
             _assert_mcp_success(resp)
 
@@ -917,8 +868,7 @@ class TestStateConsistency:
 
         try:
             resp = mcp.call_tool(
-                "create_shm", {"instance_id": iid},
-                on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+                "create_shm", {"instance_id": iid, "config_path": config_path},
             )
             _assert_mcp_success(resp)
 
@@ -933,8 +883,7 @@ class TestStateConsistency:
             )
 
             resp = mcp.call_tool(
-                "adjust_shm", {},
-                on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+                "adjust_shm", {"config_path": config_path},
             )
             _assert_mcp_success(resp)
 
@@ -971,8 +920,7 @@ class TestStateConsistency:
 
         try:
             resp = mcp.call_tool(
-                "create_shm", {"instance_id": iid},
-                on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+                "create_shm", {"instance_id": iid, "config_path": config_path},
             )
             _assert_mcp_success(resp)
 
@@ -987,8 +935,7 @@ class TestStateConsistency:
             )
 
             resp = mcp.call_tool(
-                "adjust_shm", {},
-                on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+                "adjust_shm", {"config_path": config_path},
             )
             _assert_mcp_success(resp)
 
@@ -1016,8 +963,7 @@ class TestStateConsistency:
             )
 
             resp = mcp.call_tool(
-                "adjust_shm", {},
-                on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+                "adjust_shm", {"config_path": config_path},
             )
             # 验证 2a：返回 success
             _assert_mcp_success(resp)
@@ -1060,7 +1006,7 @@ class TestStateConsistency:
 
 
 class TestErrorPaths:
-    """TC12–TC14：SHM 未创建、roots/list 失败、writer 为空。"""
+    """TC12–TC14：SHM 未创建、config_path 为空、writer 为空。"""
 
     def test_tc12_shm_not_created(self, mcp, isolated_shm):
         """TC12: SHM 未创建 → SHM_NOT_CREATED。
@@ -1076,18 +1022,17 @@ class TestErrorPaths:
         try:
             # 不调用 create_shm，直接 adjust_shm
             resp = mcp.call_tool(
-                "adjust_shm", {},
-                on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+                "adjust_shm", {"config_path": config_path},
             )
             _assert_mcp_error(resp, "SHM_NOT_CREATED")
 
         finally:
             os.unlink(config_path)
 
-    def test_tc13_roots_list_failure(self, mcp, isolated_shm):
-        """TC13: roots/list 失败 → CONFIG_PATH_MISSING。
+    def test_tc13_empty_config_path(self, mcp, isolated_shm):
+        """TC13: config_path 参数为空 → CONFIG_PATH_MISSING。
 
-        README §4.4 TC13 — adjust_shm 时 Python 对 roots/list 返回 MCP 错误。
+        README §4.4 TC13 — adjust_shm 的 config_path 参数为空。
         """
         iid = "test_tc13"
         isolated_shm(iid)
@@ -1097,15 +1042,13 @@ class TestErrorPaths:
 
         try:
             resp = mcp.call_tool(
-                "create_shm", {"instance_id": iid},
-                on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+                "create_shm", {"instance_id": iid, "config_path": config_path},
             )
             _assert_mcp_success(resp)
 
-            # adjust_shm 时 roots/list 返回错误
+            # adjust_shm 的 config_path 为空 → CONFIG_PATH_MISSING
             resp = mcp.call_tool(
-                "adjust_shm", {},
-                on_request=_roots_error_callback(),
+                "adjust_shm", {"config_path": ""},
             )
             _assert_mcp_error(resp, "CONFIG_PATH_MISSING")
 
@@ -1125,8 +1068,7 @@ class TestErrorPaths:
 
         try:
             resp = mcp.call_tool(
-                "create_shm", {"instance_id": iid},
-                on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+                "create_shm", {"instance_id": iid, "config_path": config_path},
             )
             _assert_mcp_success(resp)
 
@@ -1137,8 +1079,7 @@ class TestErrorPaths:
                 json.dump(cfg, f)
 
             resp = mcp.call_tool(
-                "adjust_shm", {},
-                on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+                "adjust_shm", {"config_path": config_path},
             )
             _assert_mcp_error(resp, "CONFIG_MISSING_SECTION")
 

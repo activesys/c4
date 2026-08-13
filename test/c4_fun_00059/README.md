@@ -11,7 +11,7 @@ C4_FUN_00059：Agent 生成 ASFP2 发送 MCP 服务的配置文件后，启动 M
 ## 1. 测试目标
 
 验证 `c4_asfp2_client` 在收到 Agent 的 `start` 工具调用后：
-1. 通过 `roots/list` 获取配置文件路径
+1. 通过 `config_path` 参数获取配置文件路径
 2. 读取并校验配置（shm_id 合法性、addr 合法性等）
 3. 以 O_RDONLY 模式附加已有共享内存
 4. 构建 `shm_id → asfp2_key` 正向映射索引
@@ -148,11 +148,11 @@ writer_points=2，max_points=4。pt_a → shm_id=1，pt_b → shm_id=2。
 - **操作**：再次调用 `start`
 - **预期**：`isError: true`，错误码 `ALREADY_RUNNING`
 
-### TC5: start 未调用前调用 stop/status → SERVICE_NOT_READY
+### TC5: start 未调用前调用 stop → 幂等 success
 
 - **前置**：MCP initialize 完成，但未调用 `start`
-- **操作**：调用 `stop`、`status`
-- **预期**：均返回 `isError: true`，`SERVICE_NOT_READY`
+- **操作**：调用 `stop`
+- **预期**：返回 `"success"`（`isError: false`）— `stop` 幂等，服务未运行时直接返回成功
 
 ### TC6: shm_id 未分配 → SHM_ID_NOT_ASSIGNED
 
@@ -166,11 +166,11 @@ writer_points=2，max_points=4。pt_a → shm_id=1，pt_b → shm_id=2。
 - **操作**：调用 `start`
 - **预期**：`isError: true`，`CONFIG_PARSE_ERROR`
 
-### TC8: roots/list 超时 → CONFIG_PATH_MISSING
+### TC8: config_path 指向不存在的文件 → CONFIG_PATH_MISSING
 
 - **前置**：MCP initialize 完成
-- **操作**：调用 `start`，Python 不响应 `roots/list`
-- **预期**：超时后返回 `isError: true`，`CONFIG_PATH_MISSING`
+- **操作**：调用 `start`，`config_path` 指向不存在的文件路径
+- **预期**：返回 `isError: true`，`CONFIG_PATH_MISSING`
 
 ### TC9: 共享内存不存在 → SHM_OPEN_FAILED
 

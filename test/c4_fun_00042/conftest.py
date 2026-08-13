@@ -2,6 +2,10 @@ import os
 import sys
 import subprocess
 import importlib.util
+import json
+import tempfile
+
+import pytest
 
 # Reuse c4_fun_00057 fixtures
 _src_path = os.path.join(os.path.dirname(__file__), "../c4_fun_00057/conftest.py")
@@ -9,12 +13,107 @@ _spec = importlib.util.spec_from_file_location("c4_fun_00057_conftest", _src_pat
 _c57 = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_c57)
 
-prepare_environment = _c57.prepare_environment
 start_asfp2_server = _c57.start_asfp2_server
-isolated_shm = _c57.isolated_shm
-_roots_callback = _c57._roots_callback
 shm_mgr_client = _c57.shm_mgr_client
 mcp = _c57.mcp
+
+
+# ──────────────────────────────────────────────
+#  Fixture: prepare_environment（config_path 参数方式）
+#  create_shm / adjust_shm 通过 config_path 参数读取配置，
+#  对应设计文档 c4_shm_manager.md。
+# ──────────────────────────────────────────────
+
+@pytest.fixture
+def prepare_environment(shm_mgr_client):
+    """
+    Function 级 fixture — 准备配置文件 + 共享内存。
+    返回工厂函数 (config_dict, instance_id) → (config_path, instance_id)。
+    内部完成 create_shm(config_path) + adjust_shm(config_path)，并在返回前关闭 shm_manager。
+    """
+    temp_files: list[str] = []
+
+    def _prepare(config_dict: dict, instance_id: str):
+        # 步骤 1: 写入配置文件
+        fd, config_path = tempfile.mkstemp(suffix=".json", prefix="c4_config_")
+        temp_files.append(config_path)
+        with os.fdopen(fd, "w") as f:
+            json.dump(config_dict, f)
+
+        # 步骤 2: create_shm — 以 config_path 参数指定配置（config-based sizing + 分配 shm_id）
+        resp = shm_mgr_client.call_tool(
+            "create_shm",
+            {"instance_id": instance_id, "config_path": config_path},
+        )
+        if resp["result"].get("isError", False):
+            raise RuntimeError(
+                f"create_shm failed: {resp['result']['content'][0]['text']}"
+            )
+
+        # 步骤 3: adjust_shm — 重新读取配置、分配 shm_id、必要时扩容
+        resp = shm_mgr_client.call_tool(
+            "adjust_shm",
+            {"config_path": config_path},
+        )
+        if resp["result"].get("isError", False):
+            raise RuntimeError(
+                f"adjust_shm failed: {resp['result']['content'][0]['text']}"
+            )
+
+        # 步骤 4: 关闭 shm_manager（shm_manager 在 shm_mgr_client teardown 中也会关闭）
+        shm_mgr_client.close()
+
+        return config_path, instance_id
+
+    yield _prepare
+
+    # Teardown: 清理临时配置文件
+    for path in temp_files:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+# ──────────────────────────────────────────────
+#  Fixture: isolated_shm（config_path 参数方式）
+#  c4_asfp2_server 的 start 会在 /dev/shm 下按名称序选择唯一 c4_* 共享内存，
+#  因此每个用例启动前清空 /dev/shm 下所有 c4_* 对象，保证本用例的 create_shm
+#  是唯一存在的共享内存，避免残留对象被错误选中。
+# ──────────────────────────────────────────────
+
+
+def _wipe_c4_shm():
+    """删除 /dev/shm 下所有 c4_* 共享内存对象。"""
+    import glob
+
+    for p in glob.glob("/dev/shm/c4_*"):
+        try:
+            os.unlink(p)
+        except OSError:
+            pass
+
+
+@pytest.fixture
+def isolated_shm():
+    """Function 级隔离 fixture。setup 清空全部 c4_* 共享内存并登记本实例，teardown 释放。"""
+    registered: list[str] = []
+
+    def register(instance_id: str) -> None:
+        registered.append(instance_id)
+        _wipe_c4_shm()
+        try:
+            shm_unlink(f"/c4_{instance_id}")
+        except OSError:
+            pass
+
+    yield register
+
+    for iid in registered:
+        try:
+            shm_unlink(f"/c4_{iid}")
+        except OSError:
+            pass
+
 
 # Reuse shm_helpers from c4_fun_00057
 _shm_path = os.path.join(os.path.dirname(__file__), "../c4_fun_00057/shm_helpers.py")
@@ -25,6 +124,7 @@ _shm_spec.loader.exec_module(_shm)
 read_shm_block = _shm.read_shm_block
 shm_path = _shm.shm_path
 read_shm_header = _shm.read_shm_header
+shm_unlink = _shm.shm_unlink
 
 # asfp2_client binary path constant
 ASFP2_CLIENT = "/usr/local/bin/asfp2_client"

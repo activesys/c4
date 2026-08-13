@@ -10,6 +10,7 @@ import struct
 import time
 import json
 import tempfile
+import socket
 import subprocess
 
 import pytest  # type: ignore
@@ -21,10 +22,30 @@ from conftest import (  # noqa: E402
     _run_asfp2_client,
     _assert_block_written,
     _assert_block_not_written,
-    _roots_callback,
     ASFP2_CLIENT,
 )
 from shm_helpers import shm_path, read_shm_block  # noqa: E402
+
+
+# ──────────────────────────────────────────────
+#  Port allocation
+#  c4_asfp2_server 每次 start 都会绑定固定端口；在多套件并行运行的
+#  共享环境中固定端口可能被占用，这里为每个用例分配空闲的临时端口。
+# ──────────────────────────────────────────────
+
+_allocated_ports: set = set()
+
+
+def _next_free_port():
+    """分配一个本会话未使用过且当前空闲的 TCP 端口。"""
+    for _ in range(200):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+        if port not in _allocated_ports:
+            _allocated_ports.add(port)
+            return port
+    raise RuntimeError("failed to allocate a free port")
 
 
 # ──────────────────────────────────────────────
@@ -109,17 +130,17 @@ class TestReceive:
         iid = "test_tc1"
         isolated_shm(iid)
 
-        config = _standard_config(9000)
+        port = _next_free_port()
+        config = _standard_config(port)
         config_path, iid = prepare_environment(config, iid)
 
         resp = start_asfp2_server.call_tool(
-            "start", {},
-            on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+            "start", {"config_path": config_path},
         )
         assert resp["result"].get("isError", False) is False
         assert resp["result"]["content"][0]["text"] == "success"
 
-        rc, _, _ = _run_asfp2_client(port=9000, data_type=4, ts_start=1000000)
+        rc, _, _ = _run_asfp2_client(port=port, data_type=4, ts_start=1000000)
         assert rc == 0
         time.sleep(0.5)
 
@@ -137,17 +158,17 @@ class TestReceive:
         iid = "test_tc2"
         isolated_shm(iid)
 
-        config = _standard_config(9100)
+        port = _next_free_port()
+        config = _standard_config(port)
         config_path, iid = prepare_environment(config, iid)
 
         resp = start_asfp2_server.call_tool(
-            "start", {},
-            on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+            "start", {"config_path": config_path},
         )
         assert resp["result"].get("isError", False) is False
         assert resp["result"]["content"][0]["text"] == "success"
 
-        rc, _, _ = _run_asfp2_client(port=9100, data_type=4, ts_start=1000000, no_attr=True)
+        rc, _, _ = _run_asfp2_client(port=port, data_type=4, ts_start=1000000, no_attr=True)
         assert rc == 0
         time.sleep(0.5)
 
@@ -163,19 +184,19 @@ class TestReceive:
         iid = "test_tc3"
         isolated_shm(iid)
 
-        config = _multi_key_config(9200, nkeys=5)
+        port = _next_free_port()
+        config = _multi_key_config(port, nkeys=5)
         config_path, iid = prepare_environment(config, iid)
 
         resp = start_asfp2_server.call_tool(
-            "start", {},
-            on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+            "start", {"config_path": config_path},
         )
         assert resp["result"].get("isError", False) is False
         assert resp["result"]["content"][0]["text"] == "success"
 
         # TC3 does not set -z (uses default max).  Use -z 0 (asfp2_client treats 0 as max).
         rc, _, _ = _run_asfp2_client(
-            port=9200, data_type=4, packet_size=0,
+            port=port, data_type=4, packet_size=0,
             key_begin=1000, key_end=1005,
             data_begin=100, data_end=500,
         )
@@ -194,17 +215,17 @@ class TestReceive:
         iid = "test_tc4"
         isolated_shm(iid)
 
-        config = _standard_config(9300)
+        port = _next_free_port()
+        config = _standard_config(port)
         config_path, iid = prepare_environment(config, iid)
 
         resp = start_asfp2_server.call_tool(
-            "start", {},
-            on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+            "start", {"config_path": config_path},
         )
         assert resp["result"].get("isError", False) is False
         assert resp["result"]["content"][0]["text"] == "success"
 
-        rc, _, _ = _run_asfp2_client(port=9300, data_type=12)
+        rc, _, _ = _run_asfp2_client(port=port, data_type=12)
         assert rc == 0
         time.sleep(0.5)
 
@@ -220,18 +241,18 @@ class TestReceive:
         iid = "test_tc5"
         isolated_shm(iid)
 
-        config = _multi_key_config(9400, nkeys=5)
+        port = _next_free_port()
+        config = _multi_key_config(port, nkeys=5)
         config_path, iid = prepare_environment(config, iid)
 
         resp = start_asfp2_server.call_tool(
-            "start", {},
-            on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+            "start", {"config_path": config_path},
         )
         assert resp["result"].get("isError", False) is False
         assert resp["result"]["content"][0]["text"] == "success"
 
         rc, _, _ = _run_asfp2_client(
-            port=9400, data_type=0, packet_size=5,
+            port=port, data_type=0, packet_size=5,
             key_begin=1000, key_end=1005,
         )
         assert rc == 0
@@ -249,18 +270,18 @@ class TestReceive:
         iid = "test_tc6"
         isolated_shm(iid)
 
-        config = _multi_key_config(9500, nkeys=5)
+        port = _next_free_port()
+        config = _multi_key_config(port, nkeys=5)
         config_path, iid = prepare_environment(config, iid)
 
         resp = start_asfp2_server.call_tool(
-            "start", {},
-            on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+            "start", {"config_path": config_path},
         )
         assert resp["result"].get("isError", False) is False
         assert resp["result"]["content"][0]["text"] == "success"
 
         rc, _, _ = _run_asfp2_client(
-            port=9500, data_type=15, packet_size=5,
+            port=port, data_type=15, packet_size=5,
             key_begin=1000, key_end=1005,
         )
         assert rc == 0
@@ -278,17 +299,17 @@ class TestReceive:
         iid = "test_tc7"
         isolated_shm(iid)
 
-        config = _standard_config(9600)
+        port = _next_free_port()
+        config = _standard_config(port)
         config_path, iid = prepare_environment(config, iid)
 
         resp = start_asfp2_server.call_tool(
-            "start", {},
-            on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+            "start", {"config_path": config_path},
         )
         assert resp["result"].get("isError", False) is False
         assert resp["result"]["content"][0]["text"] == "success"
 
-        rc, _, _ = _run_asfp2_client(port=9600, data_type=10)
+        rc, _, _ = _run_asfp2_client(port=port, data_type=10)
         assert rc == 0
         time.sleep(0.5)
 
@@ -305,17 +326,17 @@ class TestReceive:
         iid = "test_tc8"
         isolated_shm(iid)
 
-        config = _standard_config(9700)
+        port = _next_free_port()
+        config = _standard_config(port)
         config_path, iid = prepare_environment(config, iid)
 
         resp = start_asfp2_server.call_tool(
-            "start", {},
-            on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+            "start", {"config_path": config_path},
         )
         assert resp["result"].get("isError", False) is False
         assert resp["result"]["content"][0]["text"] == "success"
 
-        rc, _, _ = _run_asfp2_client(port=9700, data_type=4, protocol=7)
+        rc, _, _ = _run_asfp2_client(port=port, data_type=4, protocol=7)
         assert rc == 0
         time.sleep(0.5)
 
@@ -331,23 +352,23 @@ class TestReceive:
         iid = "test_tc9"
         isolated_shm(iid)
 
+        port = _next_free_port()
         # Create a test blob file
         blob_file = tmp_path / "test_blob.bin"
         blob_file.write_bytes(b"\x01\x02\x03\x04\x05\x06\x07\x08")
 
-        config = _standard_config(9800)
+        config = _standard_config(port)
         config_path, iid = prepare_environment(config, iid)
 
         resp = start_asfp2_server.call_tool(
-            "start", {},
-            on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+            "start", {"config_path": config_path},
         )
         assert resp["result"].get("isError", False) is False
         assert resp["result"]["content"][0]["text"] == "success"
 
         # Use -F to send LARGE_DATA_BLOCK. Omit -B/-E/-z/--type since -F mode replaces them.
         cmd = [
-            ASFP2_CLIENT, "-s", "127.0.0.1", "-p", "9800",
+            ASFP2_CLIENT, "-s", "127.0.0.1", "-p", str(port),
             "-t", "1", "-z", "1",
             "-b", "1000", "-e", "1001",
             "-F", str(blob_file),
@@ -369,12 +390,12 @@ class TestReceive:
         iid = "test_tc10"
         isolated_shm(iid)
 
-        config = _six_key_config(9900)
+        port = _next_free_port()
+        config = _six_key_config(port)
         config_path, iid = prepare_environment(config, iid)
 
         resp = start_asfp2_server.call_tool(
-            "start", {},
-            on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+            "start", {"config_path": config_path},
         )
         assert resp["result"].get("isError", False) is False
         assert resp["result"]["content"][0]["text"] == "success"
@@ -390,9 +411,9 @@ class TestReceive:
 
         with ThreadPoolExecutor(max_workers=3) as executor:
             futures = [
-                executor.submit(run_client, 9900, 1000, 1002, 100, 200),
-                executor.submit(run_client, 9900, 2000, 2002, 300, 400),
-                executor.submit(run_client, 9900, 3000, 3002, 500, 600),
+                executor.submit(run_client, port, 1000, 1002, 100, 200),
+                executor.submit(run_client, port, 2000, 2002, 300, 400),
+                executor.submit(run_client, port, 3000, 3002, 500, 600),
             ]
             for f in futures:
                 rc, _, _ = f.result()
@@ -430,17 +451,17 @@ class TestReceive:
         iid = f"test_tc11_{dtype}"
         isolated_shm(iid)
 
-        config = _standard_config(10100)
+        port = _next_free_port()
+        config = _standard_config(port)
         config_path, iid = prepare_environment(config, iid)
 
         resp = start_asfp2_server.call_tool(
-            "start", {},
-            on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+            "start", {"config_path": config_path},
         )
         assert resp["result"].get("isError", False) is False
         assert resp["result"]["content"][0]["text"] == "success"
 
-        rc, _, _ = _run_asfp2_client(port=10100, data_type=dtype)
+        rc, _, _ = _run_asfp2_client(port=port, data_type=dtype)
         assert rc == 0
         time.sleep(0.5)
 
@@ -456,17 +477,17 @@ class TestReceive:
         iid = "test_tc12"
         isolated_shm(iid)
 
-        config = _standard_config(10200)
+        port = _next_free_port()
+        config = _standard_config(port)
         config_path, iid = prepare_environment(config, iid)
 
         resp = start_asfp2_server.call_tool(
-            "start", {},
-            on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+            "start", {"config_path": config_path},
         )
         assert resp["result"].get("isError", False) is False
         assert resp["result"]["content"][0]["text"] == "success"
 
-        rc, _, _ = _run_asfp2_client(port=10200, data_type=8)
+        rc, _, _ = _run_asfp2_client(port=port, data_type=8)
         assert rc == 0
         time.sleep(0.5)
 
@@ -483,17 +504,17 @@ class TestReceive:
         iid = "test_tc13"
         isolated_shm(iid)
 
-        config = _standard_config(10300)
+        port = _next_free_port()
+        config = _standard_config(port)
         config_path, iid = prepare_environment(config, iid)
 
         resp = start_asfp2_server.call_tool(
-            "start", {},
-            on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+            "start", {"config_path": config_path},
         )
         assert resp["result"].get("isError", False) is False
         assert resp["result"]["content"][0]["text"] == "success"
 
-        rc, _, _ = _run_asfp2_client(port=10300, data_type=4, protocol=8)
+        rc, _, _ = _run_asfp2_client(port=port, data_type=4, protocol=8)
         assert rc == 0
         time.sleep(0.5)
 
@@ -509,17 +530,17 @@ class TestReceive:
         iid = "test_tc14"
         isolated_shm(iid)
 
-        config = _standard_config(10400)
+        port = _next_free_port()
+        config = _standard_config(port)
         config_path, iid = prepare_environment(config, iid)
 
         resp = start_asfp2_server.call_tool(
-            "start", {},
-            on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+            "start", {"config_path": config_path},
         )
         assert resp["result"].get("isError", False) is False
         assert resp["result"]["content"][0]["text"] == "success"
 
-        rc, _, _ = _run_asfp2_client(port=10400, data_type=10, protocol=8)
+        rc, _, _ = _run_asfp2_client(port=port, data_type=10, protocol=8)
         assert rc == 0
         time.sleep(0.5)
 
@@ -536,17 +557,17 @@ class TestReceive:
         iid = "test_tc15"
         isolated_shm(iid)
 
-        config = _standard_config(10500)
+        port = _next_free_port()
+        config = _standard_config(port)
         config_path, iid = prepare_environment(config, iid)
 
         resp = start_asfp2_server.call_tool(
-            "start", {},
-            on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+            "start", {"config_path": config_path},
         )
         assert resp["result"].get("isError", False) is False
         assert resp["result"]["content"][0]["text"] == "success"
 
-        rc, _, _ = _run_asfp2_client(port=10500, data_type=10, protocol=7)
+        rc, _, _ = _run_asfp2_client(port=port, data_type=10, protocol=7)
         assert rc == 0
         time.sleep(0.5)
 
@@ -568,8 +589,7 @@ def _create_shm_with_config(shm_mgr_client, config_dict, instance_id):
     with os.fdopen(fd, "w") as f:
         json.dump(config_dict, f)
     resp = shm_mgr_client.call_tool(
-        "create_shm", {"instance_id": instance_id},
-        on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+        "create_shm", {"instance_id": instance_id, "config_path": config_path},
     )
     os.unlink(config_path)
     if resp["result"].get("isError", False):

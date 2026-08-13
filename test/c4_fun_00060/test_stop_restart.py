@@ -19,7 +19,6 @@ from conftest import (  # noqa: E402
     McpClient,
     _find_asfp2_client_binary,
     _find_c4_asfp2_server_binary,
-    _roots_callback,
     _assert_mcp_error,
     _assert_mcp_success,
     _assert_port_listening,
@@ -83,7 +82,7 @@ class TestStopRestart:
     def test_tc2_stop_before_start(
         self, prepare_environment, isolated_shm
     ):
-        """TC2: stop 在未启动状态返回 SERVICE_NOT_READY。
+        """TC2: stop 在未启动状态幂等返回 success。
 
         前置：MCP initialize 完成，start 从未调用。
         操作：调用 stop。
@@ -99,7 +98,7 @@ class TestStopRestart:
         client = McpClient(binary)
         try:
             resp = client.call_tool("stop", {})
-            _assert_mcp_error(resp, "SERVICE_NOT_READY")
+            _assert_mcp_success(resp)
         finally:
             client.close()
 
@@ -130,8 +129,7 @@ class TestStopRestart:
             # 操作：再次 start
             resp = client.call_tool(
                 "start",
-                {},
-                on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+                {"config_path": config_path},
             )
             _assert_mcp_error(resp, "ALREADY_RUNNING")
 
@@ -174,8 +172,7 @@ class TestStopRestart:
             # 操作：start（同一 config_path）
             resp = client.call_tool(
                 "start",
-                {},
-                on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+                {"config_path": config_path},
             )
             _assert_mcp_success(resp)
 
@@ -220,8 +217,7 @@ class TestStopRestart:
             # 操作：start（配置未变更，直接重启）
             resp = client.call_tool(
                 "start",
-                {},
-                on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+                {"config_path": config_path},
             )
             _assert_mcp_success(resp)
 
@@ -254,7 +250,6 @@ class TestStopRestart:
         config_path, _ = prepare_environment(config, iid)
 
         server = run_asfp2_server(port)
-        on_req = _roots_callback([{"uri": f"file://{config_path}"}])
         try:
             # 前置：SUT 已 start
             client = start_asfp2_client(config_path)
@@ -266,7 +261,7 @@ class TestStopRestart:
                 _assert_no_connection(port)
 
                 # start
-                resp = client.call_tool("start", {}, on_request=on_req)
+                resp = client.call_tool("start", {"config_path": config_path})
                 _assert_mcp_success(resp)
                 _assert_has_connection(port)
 
@@ -286,7 +281,7 @@ class TestStopRestart:
     def test_tc7_double_stop(
         self, prepare_environment, start_asfp2_client, isolated_shm
     ):
-        """TC7: 连续两次 stop，第一次 success，第二次 SERVICE_NOT_READY。
+        """TC7: 连续两次 stop，均幂等返回 success。
 
         前置：SUT 已 start。
         操作：stop（成功）→ stop。
@@ -307,9 +302,9 @@ class TestStopRestart:
             resp = client.call_tool("stop", {})
             _assert_mcp_success(resp)
 
-            # 第二次 stop — SUT 已回到初始状态，应返回 SERVICE_NOT_READY
+            # 第二次 stop — stop 幂等，仍返回 success
             resp = client.call_tool("stop", {})
-            _assert_mcp_error(resp, "SERVICE_NOT_READY")
+            _assert_mcp_success(resp)
         finally:
             server.kill()
             server.wait()
@@ -365,10 +360,7 @@ class TestStopRestart:
                     # 操作 4: start（新 config_path）
                     resp = client.call_tool(
                         "start",
-                        {},
-                        on_request=_roots_callback(
-                            [{"uri": f"file://{changed_path}"}]
-                        ),
+                        {"config_path": changed_path},
                     )
                     # 若 127.0.0.2 不可达，start 返回 CONNECT_FAILED
                     if resp["result"].get("isError", False):
@@ -443,18 +435,14 @@ class TestStopRestart:
                 # 操作 3: start → CONNECT_FAILED
                 resp = client.call_tool(
                     "start",
-                    {},
-                    on_request=_roots_callback(
-                        [{"uri": f"file://{unreachable_path}"}]
-                    ),
+                    {"config_path": unreachable_path},
                 )
                 _assert_mcp_error(resp, "CONNECT_FAILED")
 
                 # 操作 4: 改回标准配置 → start → success
                 resp = client.call_tool(
                     "start",
-                    {},
-                    on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+                    {"config_path": config_path},
                 )
                 _assert_mcp_success(resp)
 
@@ -515,8 +503,7 @@ class TestStopRestart:
             inject_client = McpClient(inject_binary)
             resp = inject_client.call_tool(
                 "start",
-                {},
-                on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+                {"config_path": config_path},
             )
             _assert_mcp_success(resp)
             _assert_port_listening(inject_port)
@@ -543,8 +530,7 @@ class TestStopRestart:
             # SUT start
             resp = sut_client.call_tool(
                 "start",
-                {},
-                on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+                {"config_path": config_path},
             )
             _assert_mcp_success(resp)
 
@@ -569,8 +555,7 @@ class TestStopRestart:
             # 重启 — 同配置
             resp = sut_client.call_tool(
                 "start",
-                {},
-                on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+                {"config_path": config_path},
             )
             _assert_mcp_success(resp)
 

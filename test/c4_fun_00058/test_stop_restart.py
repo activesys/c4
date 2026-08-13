@@ -24,7 +24,6 @@ from conftest import (  # noqa: E402
     _make_modified_config,
     _make_corrected_config,
     _read_config_shm_id,
-    _roots_callback,
     _run_adjust_shm,
     _run_asfp2_client,
     _prepare_config_with_shm,
@@ -53,8 +52,7 @@ class TestStopRestart:
 
         # 前置: start 成功，端口监听
         resp = start_asfp2_server.call_tool(
-            "start", {},
-            on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+        "start", {"config_path": config_path},
         )
         _assert_mcp_success(resp)
         _assert_port_listening(port)
@@ -71,16 +69,16 @@ class TestStopRestart:
     def test_tc2_stop_before_start(
         self, prepare_environment, start_asfp2_server, isolated_shm
     ):
-        """TC2: stop 在未启动状态返回 SERVICE_NOT_READY。"""
+        """TC2: stop 在未启动状态幂等返回 success。"""
         iid = "test_tc2"
         isolated_shm(iid)
 
         config = _make_standard_config(iid)
         config_path, _ = prepare_environment(config, iid)
 
-        # SUT 已 MCP initialize，但 start 从未调用
+        # SUT 已 MCP initialize，但 start 从未调用 — stop 幂等返回 success
         resp = start_asfp2_server.call_tool("stop", {})
-        _assert_mcp_error(resp, "SERVICE_NOT_READY")
+        _assert_mcp_success(resp)
 
     # ═══════════════════════════════════════════════
     #  TC3: start — 已运行时重复调用
@@ -98,15 +96,13 @@ class TestStopRestart:
         config_path, _ = prepare_environment(config, iid)
 
         resp = start_asfp2_server.call_tool(
-            "start", {},
-            on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+        "start", {"config_path": config_path},
         )
         _assert_mcp_success(resp)
 
         # 同一 SUT 进程，无间隔 stop — 再次调用 start
         resp = start_asfp2_server.call_tool(
-            "start", {},
-            on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+        "start", {"config_path": config_path},
         )
         _assert_mcp_error(resp, "ALREADY_RUNNING")
 
@@ -128,17 +124,15 @@ class TestStopRestart:
         config = _make_standard_config(iid, port)
         config_path, _ = prepare_environment(config, iid)
 
-        on_req = _roots_callback([{"uri": f"file://{config_path}"}])
-
         # 前置: start 成功
-        resp = start_asfp2_server.call_tool("start", {}, on_request=on_req)
+        resp = start_asfp2_server.call_tool("start", {"config_path": config_path})
         _assert_mcp_success(resp)
 
         # 操作: stop → start
         resp = start_asfp2_server.call_tool("stop", {})
         _assert_mcp_success(resp)
 
-        resp = start_asfp2_server.call_tool("start", {}, on_request=on_req)
+        resp = start_asfp2_server.call_tool("start", {"config_path": config_path})
         _assert_mcp_success(resp)
 
         # 验证: 端口重新监听
@@ -180,16 +174,14 @@ class TestStopRestart:
         config = _make_standard_config(iid, port)
         config_path, _ = prepare_environment(config, iid)
 
-        on_req = _roots_callback([{"uri": f"file://{config_path}"}])
-
-        resp = start_asfp2_server.call_tool("start", {}, on_request=on_req)
+        resp = start_asfp2_server.call_tool("start", {"config_path": config_path})
         _assert_mcp_success(resp)
 
         resp = start_asfp2_server.call_tool("stop", {})
         _assert_mcp_success(resp)
 
         # 配置未变更时 adjust_shm 为 no-op，直接 start 即可
-        resp = start_asfp2_server.call_tool("start", {}, on_request=on_req)
+        resp = start_asfp2_server.call_tool("start", {"config_path": config_path})
         _assert_mcp_success(resp)
 
         _assert_port_listening(port)
@@ -224,17 +216,15 @@ class TestStopRestart:
         config = _make_standard_config(iid, port)
         config_path, _ = prepare_environment(config, iid)
 
-        on_req = _roots_callback([{"uri": f"file://{config_path}"}])
-
         # 前置: start 成功
-        resp = start_asfp2_server.call_tool("start", {}, on_request=on_req)
+        resp = start_asfp2_server.call_tool("start", {"config_path": config_path})
         _assert_mcp_success(resp)
 
         # 第 1 轮: stop → start
         resp = start_asfp2_server.call_tool("stop", {})
         _assert_mcp_success(resp)
 
-        resp = start_asfp2_server.call_tool("start", {}, on_request=on_req)
+        resp = start_asfp2_server.call_tool("start", {"config_path": config_path})
         _assert_mcp_success(resp)
         _assert_port_listening(port)
 
@@ -242,7 +232,7 @@ class TestStopRestart:
         resp = start_asfp2_server.call_tool("stop", {})
         _assert_mcp_success(resp)
 
-        resp = start_asfp2_server.call_tool("start", {}, on_request=on_req)
+        resp = start_asfp2_server.call_tool("start", {"config_path": config_path})
         _assert_mcp_success(resp)
         _assert_port_listening(port)
 
@@ -282,10 +272,8 @@ class TestStopRestart:
         config = _make_standard_config(iid, port)
         config_path, _ = prepare_environment(config, iid)
 
-        on_req = _roots_callback([{"uri": f"file://{config_path}"}])
-
         # 前置: start 成功
-        resp = start_asfp2_server.call_tool("start", {}, on_request=on_req)
+        resp = start_asfp2_server.call_tool("start", {"config_path": config_path})
         _assert_mcp_success(resp)
 
         # 操作: stop
@@ -298,8 +286,7 @@ class TestStopRestart:
 
         # 用冲突配置调用 start → 预期 PORT_CONFLICT
         resp = start_asfp2_server.call_tool(
-            "start", {},
-            on_request=_roots_callback([{"uri": f"file://{conflict_path}"}]),
+        "start", {"config_path": conflict_path},
         )
         _assert_mcp_error(resp, "PORT_CONFLICT")
 
@@ -310,7 +297,7 @@ class TestStopRestart:
     def test_tc8_double_stop(
         self, prepare_environment, start_asfp2_server, isolated_shm
     ):
-        """TC8: 连续两次 stop，第二次返回 SERVICE_NOT_READY。"""
+        """TC8: 连续两次 stop，第二次幂等返回 success。"""
         iid = "test_tc8"
         isolated_shm(iid)
         port = 9000
@@ -319,8 +306,7 @@ class TestStopRestart:
         config_path, _ = prepare_environment(config, iid)
 
         resp = start_asfp2_server.call_tool(
-            "start", {},
-            on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+        "start", {"config_path": config_path},
         )
         _assert_mcp_success(resp)
 
@@ -328,9 +314,9 @@ class TestStopRestart:
         resp = start_asfp2_server.call_tool("stop", {})
         _assert_mcp_success(resp)
 
-        # 第二次 stop — SUT 已回到初始状态，应返回 SERVICE_NOT_READY
+        # 第二次 stop — 幂等，仍返回 success
         resp = start_asfp2_server.call_tool("stop", {})
-        _assert_mcp_error(resp, "SERVICE_NOT_READY")
+        _assert_mcp_success(resp)
 
     # ═══════════════════════════════════════════════
     #  TC9: 重启时配置变更生效
@@ -348,10 +334,8 @@ class TestStopRestart:
         config = _make_standard_config(iid, old_port)
         config_path, _ = prepare_environment(config, iid)
 
-        on_req_old = _roots_callback([{"uri": f"file://{config_path}"}])
-
         # 前置: start 成功 (port=9000)
-        resp = start_asfp2_server.call_tool("start", {}, on_request=on_req_old)
+        resp = start_asfp2_server.call_tool("start", {"config_path": config_path})
         _assert_mcp_success(resp)
 
         # 操作: stop
@@ -363,8 +347,7 @@ class TestStopRestart:
         modified_path = _prepare_config_with_shm(modified_config, iid, isolated_shm)
 
         # start 使用新配置
-        on_req_new = _roots_callback([{"uri": f"file://{modified_path}"}])
-        resp = start_asfp2_server.call_tool("start", {}, on_request=on_req_new)
+        resp = start_asfp2_server.call_tool("start", {"config_path": modified_path})
         _assert_mcp_success(resp)
 
         # 验证: 新端口 9001 监听，旧端口 9000 释放
@@ -420,10 +403,8 @@ class TestStopRestart:
         config = _make_standard_config(iid, port)
         config_path, _ = prepare_environment(config, iid)
 
-        on_req = _roots_callback([{"uri": f"file://{config_path}"}])
-
         # 前置: start 成功
-        resp = start_asfp2_server.call_tool("start", {}, on_request=on_req)
+        resp = start_asfp2_server.call_tool("start", {"config_path": config_path})
         _assert_mcp_success(resp)
 
         # 操作: stop
@@ -435,8 +416,7 @@ class TestStopRestart:
         conflict_path = _prepare_config_with_shm(conflict_config, "test_tc10c", isolated_shm)
 
         # start 用冲突配置 → 预期 PORT_CONFLICT
-        on_req_conflict = _roots_callback([{"uri": f"file://{conflict_path}"}])
-        resp = start_asfp2_server.call_tool("start", {}, on_request=on_req_conflict)
+        resp = start_asfp2_server.call_tool("start", {"config_path": conflict_path})
         _assert_mcp_error(resp, "PORT_CONFLICT")
 
         # 准备修正配置（单实例 port=9000, 1 point）
@@ -444,9 +424,8 @@ class TestStopRestart:
         corrected_path = _prepare_config_with_shm(corrected_config, iid, isolated_shm)
 
         # 再次调用 start 用修正配置 → 预期成功
-        on_req_corrected = _roots_callback([{"uri": f"file://{corrected_path}"}])
         resp = start_asfp2_server.call_tool(
-            "start", {}, on_request=on_req_corrected
+            "start", {"config_path": corrected_path},
         )
         _assert_mcp_success(resp)
 

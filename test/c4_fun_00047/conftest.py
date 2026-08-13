@@ -21,6 +21,37 @@ from shm_helpers import shm_unlink
 
 
 # ──────────────────────────────────────────────
+#  子进程跟踪与清理（autouse，防止失败用例泄漏进程占用端口）
+# ──────────────────────────────────────────────
+
+
+_ACTIVE_PROCESSES: set = set()
+
+
+def _register_proc(proc):
+    """登记测试期间启动的子进程，用例结束后由 autouse fixture 统一清理。"""
+    _ACTIVE_PROCESSES.add(proc)
+    return proc
+
+
+@pytest.fixture(autouse=True)
+def _cleanup_spawned_processes():
+    """用例结束后强制终止本用例期间启动的所有子进程，避免泄漏进程占用端口、污染后续用例。"""
+    yield
+    for proc in list(_ACTIVE_PROCESSES):
+        try:
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
+        except Exception:
+            pass
+    _ACTIVE_PROCESSES.clear()
+
+# ──────────────────────────────────────────────
 #  MCP Stdio Client
 # ──────────────────────────────────────────────
 
@@ -42,6 +73,7 @@ class McpClient:
         self._stdout = self.process.stdout
         self._next_id = 0
         self._closed = False
+        _register_proc(self.process)
         self._initialize()
 
     def _send(self, msg: dict) -> None:
@@ -491,8 +523,7 @@ def start_asfp2_server(config_path):
     client = McpClient(binary)
     resp = client.call_tool(
         "start",
-        {},
-        on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+        {"config_path": config_path},
     )
     if resp["result"].get("isError", False):
         client.close()
@@ -512,8 +543,7 @@ def start_sut(client, config_path):
     """在 SUT client 上调用 start 工具。"""
     resp = client.call_tool(
         "start",
-        {},
-        on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+        {"config_path": config_path},
     )
     if resp["result"].get("isError", False):
         raise RuntimeError(
@@ -549,6 +579,14 @@ def run_asfp2_server(port, t1=0, t2=0, timeout=None):
         stdout=stdout_file,
         stderr=subprocess.STDOUT,
     )
+    _register_proc(proc)
+    # 等待验证端完成监听后返回：c4_asfp2_client 的 start 为原子连接，
+    # 验证端未就绪时直接连接会返回 CONNECT_FAILED（roots 往返延迟移除后竞态更明显）。
+    deadline = time.time() + 2.0
+    while time.time() < deadline:
+        if _port_is_listening(port, timeout=0.1):
+            break
+        time.sleep(0.01)
     return proc, stdout_path, stdout_file
 
 
@@ -950,8 +988,7 @@ def prepare_environment(shm_mgr_client):
         # 步骤 2: create_shm
         resp = shm_mgr_client.call_tool(
             "create_shm",
-            {"instance_id": instance_id},
-            on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+            {"instance_id": instance_id, "config_path": config_path},
         )
         if resp["result"].get("isError", False):
             raise RuntimeError(
@@ -961,8 +998,7 @@ def prepare_environment(shm_mgr_client):
         # 步骤 3: adjust_shm
         resp = shm_mgr_client.call_tool(
             "adjust_shm",
-            {},
-            on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+            {"config_path": config_path},
         )
         if resp["result"].get("isError", False):
             raise RuntimeError(

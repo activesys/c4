@@ -93,10 +93,10 @@ c4/test/c4_fun_00055/
 ### 2.2 MCP 交互序列
 
 ```
-1. create_shm({instance_id}) → 初始 shm + 配置回填
+1. create_shm({instance_id, config_path}) → 初始 shm + 配置回填
 2. 直接写入 shm → 模拟 Writer 激活，state=1
 3. 修改配置文件 → 删除部分采集点
-4. adjust_shm() → 回收孤儿块 → 返回结果
+4. adjust_shm({config_path}) → 回收孤儿块 → 返回结果
 5. 直接读取 shm → 验证 block state 变化 + Header 状态 + 配置回填
 ```
 
@@ -288,12 +288,12 @@ def remove_points_from_config(config_path, service_id, point_ids):
 | **操作** | 直接调用 `adjust_shm()`（config 文件存在） |
 | **预期** | `isError: true`，错误码 `SHM_NOT_CREATED` |
 
-#### TC13: roots/list 失败 → `CONFIG_PATH_MISSING`
+#### TC13: config_path 参数为空 → `CONFIG_PATH_MISSING`
 
 | 项目 | 内容 |
 |------|------|
 | **前置** | `create_shm` 成功 |
-| **操作** | 调用 `adjust_shm()`，Python 对 roots/list 返回 MCP 错误 |
+| **操作** | 调用 `adjust_shm()`，`config_path` 参数为空 |
 | **预期** | `isError: true`，错误码 `CONFIG_PATH_MISSING` |
 
 #### TC14: 删除后 writer 为空 → `CONFIG_MISSING_SECTION`
@@ -324,7 +324,7 @@ def remove_points_from_config(config_path, service_id, point_ids):
 
 1. `create_shm` 回填配置后，读取配置文件获取 shm_id 分配结果
 2. 用 `remove_points_from_config` 删除指定 point
-3. `adjust_shm` 的 roots/list 返回同一配置路径
+3. `adjust_shm` 的 config_path 参数传入同一配置路径
 
 ### 5.4 回收与 shm_id 的不变性
 

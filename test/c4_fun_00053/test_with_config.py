@@ -57,23 +57,6 @@ def _make_config(writer_sections=None, reader_sections=None,
 
 
 # ──────────────────────────────────────────────
-#  roots/list 回调
-# ──────────────────────────────────────────────
-
-
-def _roots_callback(roots_list):
-    def cb(method, params, request_id):
-        if method == "roots/list":
-            return {
-                "jsonrpc": "2.0",
-                "id": request_id,
-                "result": {"roots": roots_list},
-            }
-        return None
-    return cb
-
-
-# ──────────────────────────────────────────────
 #  辅助断言
 # ──────────────────────────────────────────────
 
@@ -151,8 +134,7 @@ class TestWithConfigShmCreation:
 
         try:
             resp = mcp.call_tool(
-                "create_shm", {"instance_id": iid},
-                on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+                "create_shm", {"instance_id": iid, "config_path": config_path},
             )
             assert resp["result"].get("isError", False) is False
             assert resp["result"]["content"][0]["text"] == "success"
@@ -193,8 +175,7 @@ class TestWithConfigShmCreation:
 
         try:
             resp = mcp.call_tool(
-                "create_shm", {"instance_id": iid},
-                on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+                "create_shm", {"instance_id": iid, "config_path": config_path},
             )
             assert resp["result"].get("isError", False) is False
             assert resp["result"]["content"][0]["text"] == "success"
@@ -235,8 +216,7 @@ class TestWithConfigShmCreation:
 
         try:
             resp = mcp.call_tool(
-                "create_shm", {"instance_id": iid},
-                on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+                "create_shm", {"instance_id": iid, "config_path": config_path},
             )
             assert resp["result"].get("isError", False) is False
 
@@ -268,8 +248,7 @@ class TestWithConfigShmCreation:
 
         try:
             resp = mcp.call_tool(
-                "create_shm", {"instance_id": iid},
-                on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+                "create_shm", {"instance_id": iid, "config_path": config_path},
             )
             _assert_mcp_error(resp, "CONFIG_MISSING_SECTION")
         finally:
@@ -295,8 +274,7 @@ class TestWithConfigShmCreation:
 
         try:
             resp = mcp.call_tool(
-                "create_shm", {"instance_id": iid},
-                on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+                "create_shm", {"instance_id": iid, "config_path": config_path},
             )
             _assert_mcp_error(resp, "CONFIG_MISSING_SECTION")
         finally:
@@ -326,8 +304,7 @@ class TestWithConfigShmCreation:
 
         try:
             resp = mcp.call_tool(
-                "create_shm", {"instance_id": iid},
-                on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+                "create_shm", {"instance_id": iid, "config_path": config_path},
             )
             _assert_mcp_error(resp, "DUPLICATE_KEY")
         finally:
@@ -360,8 +337,7 @@ class TestWithConfigShmCreation:
 
         try:
             resp = mcp.call_tool(
-                "create_shm", {"instance_id": iid},
-                on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+                "create_shm", {"instance_id": iid, "config_path": config_path},
             )
             _assert_mcp_error(resp, "UNKNOWN_READER_KEY")
         finally:
@@ -398,8 +374,7 @@ class TestWithConfigShmCreation:
 
         try:
             mcp.call_tool(
-                "create_shm", {"instance_id": iid},
-                on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+                "create_shm", {"instance_id": iid, "config_path": config_path},
             )
 
             updated = _read_config(config_path)
@@ -450,8 +425,7 @@ class TestWithConfigShmCreation:
 
         try:
             mcp.call_tool(
-                "create_shm", {"instance_id": iid},
-                on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+                "create_shm", {"instance_id": iid, "config_path": config_path},
             )
 
             resp = mcp.call_tool("query_status", {})
@@ -478,8 +452,7 @@ class TestWithConfigShmCreation:
 
         try:
             resp = mcp.call_tool(
-                "create_shm", {"instance_id": iid},
-                on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+                "create_shm", {"instance_id": iid, "config_path": config_path},
             )
             _assert_mcp_error(resp, "CONFIG")  # CONFIG_PARSE_ERROR or CONFIG_MISSING_SECTION
         finally:
@@ -501,8 +474,7 @@ class TestWithConfigShmCreation:
 
         try:
             resp = mcp.call_tool(
-                "create_shm", {"instance_id": iid},
-                on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+                "create_shm", {"instance_id": iid, "config_path": config_path},
             )
             _assert_mcp_error(resp, "CONFIG_MISSING_SECTION")
         finally:
@@ -530,14 +502,12 @@ class TestWithConfigShmCreation:
 
         try:
             resp1 = mcp.call_tool(
-                "create_shm", {"instance_id": iid},
-                on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+                "create_shm", {"instance_id": iid, "config_path": config_path},
             )
             assert resp1["result"].get("isError", False) is False
 
             resp2 = mcp.call_tool(
-                "create_shm", {"instance_id": iid},
-                on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+                "create_shm", {"instance_id": iid, "config_path": config_path},
             )
             _assert_mcp_error(resp2, "SHM_ALREADY_EXISTS")
         finally:
@@ -561,8 +531,7 @@ class TestWithConfigShmCreation:
 
         try:
             resp = mcp.call_tool(
-                "create_shm", {"instance_id": iid},
-                on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+                "create_shm", {"instance_id": iid, "config_path": config_path},
             )
             _assert_mcp_error(resp, "CONFIG_MISSING_SECTION")
         finally:
@@ -590,8 +559,7 @@ class TestWithConfigShmCreation:
 
         try:
             mcp.call_tool(
-                "create_shm", {"instance_id": iid},
-                on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+                "create_shm", {"instance_id": iid, "config_path": config_path},
             )
 
             updated = _read_config(config_path)
@@ -631,8 +599,7 @@ class TestWithConfigShmCreation:
 
         try:
             mcp.call_tool(
-                "create_shm", {"instance_id": iid},
-                on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+                "create_shm", {"instance_id": iid, "config_path": config_path},
             )
 
             path = shm_path(iid)

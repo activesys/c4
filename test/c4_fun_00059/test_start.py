@@ -20,7 +20,6 @@ from conftest import (
     _assert_mcp_success,
     _make_client_config,
     _make_partial_unreachable_config,
-    _roots_callback,
 )
 from shm_helpers import read_shm_header
 
@@ -50,9 +49,7 @@ class TestStart:
 
         resp = mcp.call_tool(
             "start",
-            {},
-            on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
-        )
+            {"config_path": config_path},        )
         _assert_mcp_success(resp)
 
     # ──────────────────────────────────────────────
@@ -77,9 +74,7 @@ class TestStart:
 
         resp = mcp.call_tool(
             "start",
-            {},
-            on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
-        )
+            {"config_path": config_path},        )
         _assert_mcp_success(resp)
 
     # ──────────────────────────────────────────────
@@ -131,9 +126,7 @@ class TestStart:
 
         resp = mcp.call_tool(
             "start",
-            {},
-            on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
-        )
+            {"config_path": config_path},        )
         _assert_mcp_success(resp)
 
     # ──────────────────────────────────────────────
@@ -156,44 +149,31 @@ class TestStart:
         config_path, iid = prepare_environment(cfg, instance_id)
         assert iid == instance_id
 
-        on_request = _roots_callback([{"uri": f"file://{config_path}"}])
+        args = {"config_path": config_path}
 
         # 第一次 start — 应成功
-        resp1 = mcp.call_tool("start", {}, on_request=on_request)
+        resp1 = mcp.call_tool("start", args)
         _assert_mcp_success(resp1)
 
         # 第二次 start — 应返回 ALREADY_RUNNING
-        resp2 = mcp.call_tool("start", {}, on_request=on_request)
+        resp2 = mcp.call_tool("start", args)
         _assert_mcp_error(resp2, "ALREADY_RUNNING")
 
     # ──────────────────────────────────────────────
-    #  TC5: start 未调用前调用 stop/status → SERVICE_NOT_READY
+    #  TC5: start 未调用前调用 stop → 幂等 success
     # ──────────────────────────────────────────────
 
-    def test_tc5_service_not_ready(self, mcp, isolated_shm):
+    def test_tc5_stop_idempotent(self, mcp, isolated_shm):
         """
         前置：MCP initialize 完成，但未调用 start。
-        操作：调用 stop、status。
-        预期：均返回 isError: true，SERVICE_NOT_READY。
+        操作：调用 stop。
+        预期：返回 success（幂等），isError: false。
         """
         instance_id = "tc5"
         isolated_shm(instance_id)
 
-        # stop — 服务未启动
-        resp_stop = mcp.call_tool(
-            "stop",
-            {},
-            on_request=_roots_callback([]),
-        )
-        _assert_mcp_error(resp_stop, "SERVICE_NOT_READY")
-
-        # status — 服务未启动
-        resp_status = mcp.call_tool(
-            "status",
-            {},
-            on_request=_roots_callback([]),
-        )
-        _assert_mcp_error(resp_status, "SERVICE_NOT_READY")
+        resp_stop = mcp.call_tool("stop", {})
+        _assert_mcp_success(resp_stop)
 
     # ──────────────────────────────────────────────
     #  TC6: shm_id 未分配 → SHM_ID_NOT_ASSIGNED
@@ -219,8 +199,7 @@ class TestStart:
             # create_shm — 创建 SHM，但不调用 adjust_shm
             create_resp = shm_mgr_client.call_tool(
                 "create_shm",
-                {"instance_id": instance_id},
-                on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+                {"instance_id": instance_id, "config_path": config_path},
             )
             assert not create_resp["result"].get(
                 "isError", False
@@ -237,8 +216,7 @@ class TestStart:
             # 调用 start — 应检测到 shm_id 未分配
             resp = mcp.call_tool(
                 "start",
-                {},
-                on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+                {"config_path": config_path},
             )
             _assert_mcp_error(resp, "SHM_ID_NOT_ASSIGNED")
         finally:
@@ -278,31 +256,27 @@ class TestStart:
 
         resp = mcp.call_tool(
             "start",
-            {},
-            on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+            {"config_path": config_path},
         )
         _assert_mcp_error(resp, "CONFIG_PARSE_ERROR")
 
     # ──────────────────────────────────────────────
-    #  TC8: roots/list 超时 → CONFIG_PATH_MISSING
+    #  TC8: config_path 指向不存在的文件 → CONFIG_PATH_MISSING
     # ──────────────────────────────────────────────
 
     def test_tc8_config_path_missing(self, mcp, isolated_shm):
         """
         前置：MCP initialize 完成。
-        操作：调用 start，roots/list 返回不存在的文件路径。
+        操作：调用 start，config_path 指向不存在的文件路径。
         预期：isError: true，CONFIG_PATH_MISSING。
         """
         instance_id = "tc8"
         isolated_shm(instance_id)
 
-        # 返回不存在的文件路径 — SUT 立即返回 CONFIG_PATH_MISSING
+        # 传入不存在的文件路径 — SUT 立即返回 CONFIG_PATH_MISSING
         resp = mcp.call_tool(
             "start",
-            {},
-            on_request=_roots_callback(
-                [{"uri": "file:///tmp/nonexistent_config_xyz.json"}]
-            ),
+            {"config_path": "/tmp/nonexistent_config_xyz.json"},
         )
         _assert_mcp_error(resp, "CONFIG_PATH_MISSING")
 
@@ -332,8 +306,7 @@ class TestStart:
         try:
             resp = mcp.call_tool(
                 "start",
-                {},
-                on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+                {"config_path": config_path},
             )
             _assert_mcp_error(resp, "SHM_OPEN_FAILED")
         finally:
@@ -379,9 +352,7 @@ class TestStart:
 
         resp = mcp.call_tool(
             "start",
-            {},
-            on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
-        )
+            {"config_path": config_path},        )
         _assert_mcp_error(resp, "SHM_CORRUPTED")
 
     # ──────────────────────────────────────────────
@@ -408,7 +379,5 @@ class TestStart:
 
         resp = mcp.call_tool(
             "start",
-            {},
-            on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
-        )
+            {"config_path": config_path},        )
         _assert_mcp_error(resp, "CONNECT_FAILED")

@@ -473,8 +473,7 @@ def prepare_environment(shm_mgr_client):
         # create_shm
         resp = shm_mgr_client.call_tool(
             "create_shm",
-            {"instance_id": instance_id},
-            on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+            {"instance_id": instance_id, "config_path": config_path},
         )
         if resp["result"].get("isError", False):
             raise RuntimeError(
@@ -484,8 +483,7 @@ def prepare_environment(shm_mgr_client):
         # adjust_shm
         resp = shm_mgr_client.call_tool(
             "adjust_shm",
-            {},
-            on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+            {"config_path": config_path},
         )
         if resp["result"].get("isError", False):
             raise RuntimeError(
@@ -513,7 +511,7 @@ def start_asfp2_client():
     Function 级 fixture — 返回工厂函数 (config_path) → McpClient。
 
     内部完成：启动 c4_asfp2_client → MCP initialize → list_tools 验证 →
-    调用 start 工具（带 roots/list 回调）。teardown 关闭所有创建的 client。
+    调用 start 工具（config_path 参数）。teardown 关闭所有创建的 client。
     """
     binary = _find_asfp2_client_binary()
     clients: list[McpClient] = []
@@ -536,11 +534,10 @@ def start_asfp2_client():
         assert "start" in tool_names, f"start not in tools: {tool_names}"
         assert "stop" in tool_names, f"stop not in tools: {tool_names}"
 
-        # 调用 start — 配置路径通过 roots/list 回调传递
+        # 调用 start — 配置路径通过 config_path 参数传递
         resp = client.call_tool(
             "start",
-            {},
-            on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+            {"config_path": config_path},
         )
         _assert_mcp_success(resp)
 
@@ -772,8 +769,7 @@ def _run_adjust_shm(config_path: str, instance_id: Optional[str] = None):
     if instance_id is not None:
         resp = client.call_tool(
             "create_shm",
-            {"instance_id": instance_id},
-            on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+            {"instance_id": instance_id, "config_path": config_path},
         )
         text = resp["result"]["content"][0]["text"]
         if resp["result"].get("isError", False) and "ALREADY_EXISTS" not in text:
@@ -781,8 +777,7 @@ def _run_adjust_shm(config_path: str, instance_id: Optional[str] = None):
 
     resp = client.call_tool(
         "adjust_shm",
-        {},
-        on_request=_roots_callback([{"uri": f"file://{config_path}"}]),
+        {"config_path": config_path},
     )
     client.close()
 

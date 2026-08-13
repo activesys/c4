@@ -213,37 +213,6 @@ def collect_all_writer_shm_ids(cfg):
 
 
 # ══════════════════════════════════════════════════
-#  roots/list 回调
-# ══════════════════════════════════════════════════
-
-
-def _roots_callback(roots_list):
-    """返回处理 roots/list 请求的回调函数。"""
-    def cb(method, params, request_id):
-        if method == "roots/list":
-            return {
-                "jsonrpc": "2.0",
-                "id": request_id,
-                "result": {"roots": roots_list},
-            }
-        return None
-    return cb
-
-
-def _roots_error_callback():
-    """返回一个对 roots/list 返回 MCP 错误的回调函数。"""
-    def cb(method, params, request_id):
-        if method == "roots/list":
-            return {
-                "jsonrpc": "2.0",
-                "id": request_id,
-                "error": {"code": -32603, "message": "Simulated roots failure"},
-            }
-        return None
-    return cb
-
-
-# ══════════════════════════════════════════════════
 #  辅助断言
 # ══════════════════════════════════════════════════
 
@@ -285,9 +254,9 @@ def _create_and_activate(mcp, isolated_shm, instance_id):
     cfg = build_initial_config()
     _write_config(config_path, cfg)
 
-    on_request = _roots_callback([{"uri": f"file://{config_path}"}])
-    resp = mcp.call_tool("create_shm", {"instance_id": instance_id},
-                         on_request=on_request)
+    resp = mcp.call_tool(
+        "create_shm", {"instance_id": instance_id, "config_path": config_path},
+    )
     _assert_mcp_success(resp)
 
     # 读回 backfill 后的配置，获取实际 shm_ids
@@ -337,8 +306,7 @@ def test_tc1_equal_swap(mcp, isolated_shm):
         _write_config(config_path, cfg)
 
         # adjust_shm
-        on_request = _roots_callback([{"uri": f"file://{config_path}"}])
-        resp = mcp.call_tool("adjust_shm", {}, on_request=on_request)
+        resp = mcp.call_tool("adjust_shm", {"config_path": config_path})
         _assert_mcp_success(resp)
 
         activate_blocks_from_config(shm_path(iid), config_path)
@@ -416,8 +384,7 @@ def test_tc2_net_increase(mcp, isolated_shm):
         ])
         _write_config(config_path, cfg)
 
-        on_request = _roots_callback([{"uri": f"file://{config_path}"}])
-        resp = mcp.call_tool("adjust_shm", {}, on_request=on_request)
+        resp = mcp.call_tool("adjust_shm", {"config_path": config_path})
         _assert_mcp_success(resp)
 
         activate_blocks_from_config(shm_path(iid), config_path)
@@ -486,8 +453,7 @@ def test_tc3_net_decrease(mcp, isolated_shm):
         ])
         _write_config(config_path, cfg)
 
-        on_request = _roots_callback([{"uri": f"file://{config_path}"}])
-        resp = mcp.call_tool("adjust_shm", {}, on_request=on_request)
+        resp = mcp.call_tool("adjust_shm", {"config_path": config_path})
         _assert_mcp_success(resp)
 
         activate_blocks_from_config(shm_path(iid), config_path)
@@ -546,8 +512,7 @@ def test_tc4_mixed_expand(mcp, isolated_shm):
         ])
         _write_config(config_path, cfg)
 
-        on_request = _roots_callback([{"uri": f"file://{config_path}"}])
-        resp = mcp.call_tool("adjust_shm", {}, on_request=on_request)
+        resp = mcp.call_tool("adjust_shm", {"config_path": config_path})
         _assert_mcp_success(resp)
 
         activate_blocks_from_config(shm_path(iid), config_path)
@@ -621,8 +586,7 @@ def test_tc5_single_point_swap(mcp, isolated_shm):
         ])
         _write_config(config_path, cfg)
 
-        on_request = _roots_callback([{"uri": f"file://{config_path}"}])
-        resp = mcp.call_tool("adjust_shm", {}, on_request=on_request)
+        resp = mcp.call_tool("adjust_shm", {"config_path": config_path})
         _assert_mcp_success(resp)
 
         activate_blocks_from_config(shm_path(iid), config_path)
@@ -684,8 +648,7 @@ def test_tc6_full_reclaim(mcp, isolated_shm):
             cfg.pop(w, None)
         _write_config(config_path, cfg)
 
-        on_request = _roots_callback([{"uri": f"file://{config_path}"}])
-        resp = mcp.call_tool("adjust_shm", {}, on_request=on_request)
+        resp = mcp.call_tool("adjust_shm", {"config_path": config_path})
         _assert_mcp_success(resp)
 
         activate_blocks_from_config(shm_path(iid), config_path)
@@ -735,8 +698,7 @@ def test_tc7_reclaim_then_reallocate(mcp, isolated_shm):
             cfg.pop(w, None)
         _write_config(config_path, cfg)
 
-        on_request = _roots_callback([{"uri": f"file://{config_path}"}])
-        resp = mcp.call_tool("adjust_shm", {}, on_request=on_request)
+        resp = mcp.call_tool("adjust_shm", {"config_path": config_path})
         _assert_mcp_success(resp)
 
         activate_blocks_from_config(shm_path(iid), config_path)
@@ -757,7 +719,7 @@ def test_tc7_reclaim_then_reallocate(mcp, isolated_shm):
         }]
         _write_config(config_path, cfg)
 
-        resp = mcp.call_tool("adjust_shm", {}, on_request=on_request)
+        resp = mcp.call_tool("adjust_shm", {"config_path": config_path})
         _assert_mcp_success(resp)
 
         activate_blocks_from_config(full_path, config_path)
@@ -801,7 +763,6 @@ def test_tc8_post_expand_mixed(mcp, isolated_shm):
     config_path, temp_dir = _create_and_activate(mcp, isolated_shm, iid)
 
     try:
-        on_request = _roots_callback([{"uri": f"file://{config_path}"}])
 
         # 第一次：纯新增 writer5（15 点）→ 触发扩容
         cfg = _read_config(config_path)
@@ -810,7 +771,7 @@ def test_tc8_post_expand_mixed(mcp, isolated_shm):
         ])
         _write_config(config_path, cfg)
 
-        resp = mcp.call_tool("adjust_shm", {}, on_request=on_request)
+        resp = mcp.call_tool("adjust_shm", {"config_path": config_path})
         _assert_mcp_success(resp)
 
         activate_blocks_from_config(shm_path(iid), config_path)
@@ -839,7 +800,7 @@ def test_tc8_post_expand_mixed(mcp, isolated_shm):
         ])
         _write_config(config_path, cfg)
 
-        resp = mcp.call_tool("adjust_shm", {}, on_request=on_request)
+        resp = mcp.call_tool("adjust_shm", {"config_path": config_path})
         _assert_mcp_success(resp)
 
         activate_blocks_from_config(full_path, config_path)
@@ -902,8 +863,7 @@ def test_tc9_retained_points_unchanged(mcp, isolated_shm):
         ])
         _write_config(config_path, cfg)
 
-        on_request = _roots_callback([{"uri": f"file://{config_path}"}])
-        resp = mcp.call_tool("adjust_shm", {}, on_request=on_request)
+        resp = mcp.call_tool("adjust_shm", {"config_path": config_path})
         _assert_mcp_success(resp)
 
         activate_blocks_from_config(shm_path(iid), config_path)
@@ -986,8 +946,7 @@ def test_tc10_block_integrity(mcp, isolated_shm):
         ])
         _write_config(config_path, cfg)
 
-        on_request = _roots_callback([{"uri": f"file://{config_path}"}])
-        resp = mcp.call_tool("adjust_shm", {}, on_request=on_request)
+        resp = mcp.call_tool("adjust_shm", {"config_path": config_path})
         _assert_mcp_success(resp)
 
         activate_blocks_from_config(shm_path(iid), config_path)
@@ -1039,8 +998,7 @@ def test_tc11_config_writeback(mcp, isolated_shm):
         ])
         _write_config(config_path, cfg)
 
-        on_request = _roots_callback([{"uri": f"file://{config_path}"}])
-        resp = mcp.call_tool("adjust_shm", {}, on_request=on_request)
+        resp = mcp.call_tool("adjust_shm", {"config_path": config_path})
         _assert_mcp_success(resp)
 
         backfilled = _read_config(config_path)
@@ -1092,8 +1050,7 @@ def test_tc12_shm_not_created(mcp, isolated_shm):
         cfg = build_initial_config()
         _write_config(config_path, cfg)
 
-        on_request = _roots_callback([{"uri": f"file://{config_path}"}])
-        resp = mcp.call_tool("adjust_shm", {}, on_request=on_request)
+        resp = mcp.call_tool("adjust_shm", {"config_path": config_path})
         _assert_mcp_error(resp, "SHM_NOT_CREATED")
 
     finally:
@@ -1105,12 +1062,12 @@ def test_tc12_shm_not_created(mcp, isolated_shm):
 
 @pytest.mark.timeout(30)
 def test_tc13_config_path_missing(mcp, isolated_shm):
-    """TC13: create_shm 后，adjust_shm 时 roots/list 返回错误 → CONFIG_PATH_MISSING。"""
+    """TC13: create_shm 后，adjust_shm 的 config_path 参数为空 → CONFIG_PATH_MISSING。"""
     iid = f"tc13_{uuid.uuid4().hex[:8]}"
     config_path, temp_dir = _create_and_activate(mcp, isolated_shm, iid)
 
     try:
-        resp = mcp.call_tool("adjust_shm", {}, on_request=_roots_error_callback())
+        resp = mcp.call_tool("adjust_shm", {"config_path": ""})
         _assert_mcp_error(resp, "CONFIG_PATH_MISSING")
 
     finally:
@@ -1134,8 +1091,7 @@ def test_tc14_config_missing_section(mcp, isolated_shm):
         # reader 保持非空（reader1 仍在）
         _write_config(config_path, cfg)
 
-        on_request = _roots_callback([{"uri": f"file://{config_path}"}])
-        resp = mcp.call_tool("adjust_shm", {}, on_request=on_request)
+        resp = mcp.call_tool("adjust_shm", {"config_path": config_path})
         _assert_mcp_error(resp, "CONFIG_MISSING_SECTION")
 
     finally:
@@ -1164,8 +1120,7 @@ def test_tc15_duplicate_key(mcp, isolated_shm):
         ])
         _write_config(config_path, cfg)
 
-        on_request = _roots_callback([{"uri": f"file://{config_path}"}])
-        resp = mcp.call_tool("adjust_shm", {}, on_request=on_request)
+        resp = mcp.call_tool("adjust_shm", {"config_path": config_path})
         _assert_mcp_error(resp, "DUPLICATE_KEY")
 
     finally:
@@ -1187,8 +1142,7 @@ def test_tc16_unknown_reader_key(mcp, isolated_shm):
         remove_writer_section(cfg, "writer1")
         _write_config(config_path, cfg)
 
-        on_request = _roots_callback([{"uri": f"file://{config_path}"}])
-        resp = mcp.call_tool("adjust_shm", {}, on_request=on_request)
+        resp = mcp.call_tool("adjust_shm", {"config_path": config_path})
         _assert_mcp_error(resp, "UNKNOWN_READER_KEY")
 
     finally:

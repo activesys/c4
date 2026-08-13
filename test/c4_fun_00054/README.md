@@ -11,7 +11,7 @@ C4_FUN_00054 对应 `adjust_shm` 工具——根据配置文件计算所需点�
 |------|------|------|
 | **不扩容** | `required_points ≤ max_points`，在空闲块中分配 | 无 ftruncate，remap_version 不变 |
 | **扩容** | `required_points > max_points`，扩至 2 倍后分配 | ftruncate + remap_version++ |
-| **错误路径** | 配置缺失 / 解析失败 / shm 未创建 / roots 失败 | 返回业务错误 |
+| **错误路径** | 配置缺失 / 解析失败 / shm 未创建 / config_path 缺失 | 返回业务错误 |
 
 ---
 
@@ -22,9 +22,9 @@ C4_FUN_00054 对应 `adjust_shm` 工具——根据配置文件计算所需点�
 | 属性 | 值 |
 |------|-----|
 | 工具名 | `adjust_shm` |
-| 参数 | 无 |
+| 参数 | `config_path`（必填） |
 | 前置 | Agent 已通过 Pause-Resume 暂停所有 MCP 进程（测试中不涉及） |
-| 内部流程 | roots/list → 读配置 → 计算 required_points → 比较 current_max_points → 分配/扩容 → 回填配置 → 写回磁盘 |
+| 内部流程 | config_path 参数 → 读配置 → 计算 required_points → 比较 current_max_points → 分配/扩容 → 回填配置 → 写回磁盘 |
 | 成功返回 | `"success"` |
 
 ### 1.2 容量判断规则
@@ -48,9 +48,9 @@ else:
 测试流程为：
 
 ```
-1. create_shm({instance_id}) → 初始 shm 创建 + 配置回填（shm_ids 已填入）
+1. create_shm({instance_id, config_path}) → 初始 shm 创建 + 配置回填（shm_ids 已填入）
 2. 修改配置文件 → 添加新采集点（新 point 的 shm_id=0）
-3. adjust_shm() → 读配置，计算 required_points，分配/扩容
+3. adjust_shm({config_path}) → 读配置，计算 required_points，分配/扩容
 4. 验证 shm 状态 + 配置回填
 ```
 
@@ -73,10 +73,10 @@ c4/test/c4_fun_00054/
 ### 2.2 MCP 交互序列
 
 ```
-1. initialize (握手，声明 roots 能力)
-2. create_shm({instance_id}) → SUT 发起 roots/list → Python 应答
+1. initialize (MCP 握手，无需 roots 能力；配置路径通过 config_path 参数传入)
+2. create_shm({instance_id, config_path}) → SUT 直接读取配置文件 → 创建/回填
 3. （Python 修改配置文件）
-4. adjust_shm() → SUT 发起 roots/list → Python 应答 → SUT 执行分配 → 返回结果
+4. adjust_shm({config_path}) → SUT 读取配置 → 执行分配 → 返回结果
 5. 直接读取共享内存（`read_shm_header` / `read_shm_block`）→ 验证状态一致性
 ```
 
@@ -276,15 +276,15 @@ def add_points_to_config(config_path, service_id, new_points):
 | **操作** | 修改 config：向 reader 追加一条 key=`"device1.ghost"`（Writer 中不存在）<br/>调用 `adjust_shm()` |
 | **预期** | `UNKNOWN_READER_KEY` 错误 |
 
-#### TC22: 空配置文件 `{}` → CONFIG_MISSING_SECTION
+#### TC22: 空配置文件 `{}` → no-op（幂等 success）
 
 | 项目 | 内容 |
 |------|------|
 | **前置** | `create_shm` 成功 |
 | **操作** | 将 config 文件内容替换为 `{}`<br/>调用 `adjust_shm()` |
-| **预期** | `isError: true`，`content[0].text` 以 `CONFIG_MISSING_SECTION` 开头 |
+| **预期** | `isError: false`，返回 `"success"`（no-op） |
 | **验证** | shm 状态不变 |
-| **说明** | 与 TC7（删除 `c4_shm_manager` 段但保留其他 key）互补——验证完全空 JSON 同样触发错误 |
+| **说明** | 与 TC7（删除 `c4_shm_manager` 段但保留其他 key → 仍报 CONFIG_MISSING_SECTION）互补——完全空 JSON 视为「无需调整」，直接 no-op |
 
 ---
 
@@ -298,12 +298,12 @@ def add_points_to_config(config_path, service_id, new_points):
 | **操作** | 直接调用 `adjust_shm()`（config 文件存在） |
 | **预期** | `isError: true`，`content[0].text` 以 `SHM_NOT_CREATED` 开头 |
 
-#### TC14: roots/list 失败 → CONFIG_PATH_MISSING
+#### TC14: config_path 缺失 → CONFIG_PATH_MISSING
 
 | 项目 | 内容 |
 |------|------|
 | **前置** | `create_shm` 成功 |
-| **操作** | 调用 `adjust_shm()`，Python 对 roots/list 返回 MCP 错误 |
+| **操作** | 调用 `adjust_shm()`，不传 config_path（或为空） |
 | **预期** | `isError: true`，`content[0].text` 以 `CONFIG_PATH_MISSING` 开头 |
 | **验证** | shm 状态不变 |
 
@@ -397,7 +397,7 @@ def add_points_to_config(config_path, service_id, new_points):
 | 项目 | 内容 |
 |------|------|
 | **前置** | `create_shm` 无配置文件 → max=100000，point_count=0 |
-| **操作** | 创建配置文件（5 点），roots/list 指向新文件 → `adjust_shm()` |
+| **操作** | 创建配置文件（5 点），config_path 指向新文件 → `adjust_shm()` |
 | **验证 1** | 返回 `"success"` |
 | **验证 2** | `max_points = 100000`（不变），`remap_version = 0`（不变） |
 | **验证 3** | 5 点分配到 `shm_id=1..5` |
@@ -424,7 +424,7 @@ Python 修改配置文件发生在 `create_shm` 和 `adjust_shm` 之间，需确
 
 1. `create_shm` 完成后，读取回填后的配置文件
 2. 在内存中修改（添加新 point），写回同一路径
-3. 调用 `adjust_shm`，roots/list 返回同一路径
+3. 调用 `adjust_shm`，config_path 指向同一路径
 
 ### 5.3 point_count 语义
 
@@ -482,7 +482,8 @@ Python 修改配置文件发生在 `create_shm` 和 `adjust_shm` 之间，需确
 | 不扩容-正常 | TC1, TC2, TC3 |
 | 扩容-正常 | TC4, TC5, TC6 |
 | 已有点保护 | TC1, TC4, TC5（验证已有 shm_id 不变） |
-| 配置解析错误 | TC7, TC8, TC9, TC10, TC11, TC12, TC22 |
+| 配置解析错误 | TC7, TC8, TC9, TC10, TC11, TC12 |
+| 空 JSON no-op | TC22 |
 | 基础设施错误 | TC13, TC14 |
 | 配置回填 | TC15, TC16, TC17 |
 | 状态一致性 | TC18, TC19, TC20, TC21 |

@@ -719,7 +719,8 @@ sequenceDiagram
    ┌ 若 config_path 为空或文件不存在 → 返回 `CONFIG_PATH_MISSING` 错误
    └ 正常 → 继续
  2. 读取配置文件，按 §2.2 算法计算所需点数 (`required_points`)
-    ┌ 若 `c4_shm_manager` 段缺失 → 返回 `CONFIG_MISSING_SECTION` 错误
+    ┌ 若文件内容为空 JSON（`{}` / `null` / 空白）→ **no-op**：不做任何调整，直接返回 `"success"`
+    ├ 若 `c4_shm_manager` 段缺失 → 返回 `CONFIG_MISSING_SECTION` 错误
     ├ 若 `c4_shm_manager.writer` 为空（所有 Writer 已删除）：
     │   ┌ 若 reader 也为空 → required_points = 0，回收阶段将所有 state=1 block 置 0（全量回收）
     │   └ 若 reader 非空 → 返回 `CONFIG_MISSING_SECTION` 错误（仅一方为空不合法）
