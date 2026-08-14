@@ -52,23 +52,23 @@ Python 通过 `mmap` 读取 `/dev/shm/c4_{instance_id}`，Data Block 布局（32
 
 | 字段 | 偏移 | 大小 | Python struct |
 |------|------|------|---------------|
-| magic | 0 | 4B | `>I` |
-| state | 4 | 1B | `>B` |
-| type | 7 | 1B | `>B` |
-| write_seq | 8 | 8B | `>Q` |
-| timestamp | 16 | 8B | `>Q` |
+| magic | 0 | 4B | `=I` |
+| state | 4 | 1B | `=B` |
+| type | 7 | 1B | `=B` |
+| write_seq | 8 | 8B | `=Q` |
+| timestamp | 16 | 8B | `=Q` |
 | value | 24 | 8B | 见 §2.4 |
 
-**value 读取**（设计文档 §5.2：值以大端写入 `value` 字段低位字节，高位补零）：
+**value 读取**（设计文档 §5.2：值以本机序写入 `value` 字段低位字节，高位补零）：
 
 | type | 枚举值 | 有效字节 | struct 格式 | 读取区间 |
 |------|--------|---------|-------------|---------|
-| BOOLEAN / BIT | 0 / 15 | 1B | `>B` | `shm[24:25]` |
-| INT16 | 3 | 2B | `>h` | `shm[24:26]` |
-| UINT16 | 4 | 2B | `>H` | `shm[24:26]` |
-| INT32 | 5 | 4B | `>i` | `shm[24:28]` |
-| UINT32 | 6 | 4B | `>I` | `shm[24:28]` |
-| FLOAT32 | 10 | 4B | `>f` | `shm[24:28]` |
+| BOOLEAN / BIT | 0 / 15 | 1B | `=B` | `shm[24:25]` |
+| INT16 | 3 | 2B | `=h` | `shm[24:26]` |
+| UINT16 | 4 | 2B | `=H` | `shm[24:26]` |
+| INT32 | 5 | 4B | `=i` | `shm[24:28]` |
+| UINT32 | 6 | 4B | `=I` | `shm[24:28]` |
+| FLOAT32 | 10 | 4B | `=f` | `shm[24:28]` |
 
 **数据流验证**：记录 `write_seq` 为 `seq_before`，等待 ≥1 个轮询周期后重读，
 断言 `write_seq > seq_before` 且 `value` 等于期望值。
@@ -139,13 +139,13 @@ N 个 point → `adjust_shm` 依次分配 shm_id=1..N。
 
 - **配置**：1 point `fun:3, type:4(UINT16)`，c4 `hton_register:1`；modbusd `hton_register:1`（§3.3 单寄存器规则），`type:4`
 - **操作**：redis_tool 写 `MB_PT_001 = 4660`（0x1234）
-- **预期**：shm block（shm_id=1）`write_seq` 递增，`value = 0x1234`（`>H` 读 `shm[24:26]`）
+- **预期**：shm block（shm_id=1）`write_seq` 递增，`value = 0x1234`（`=H` 读 `shm[24:26]`）
 
 ### TC2: fun=3 读保持寄存器 — FLOAT32（ABCD 标准大端）
 
 - **配置**：modbusd `hton_register:1, swap:1`（→ ABCD），c4 `hton_register:1, swap:2`，point `fun:3, type:10(FLOAT32)`
 - **操作**：redis_tool 写 `MB_AI_001 = 1.5`
-- **预期**：`value = 1.5`（`>f` 读 `shm[24:28]`）
+- **预期**：`value = 1.5`（`=f` 读 `shm[24:28]`）
 - **说明**：验证 §3.3 映射 ABCD（标准大端）→ c4 `hton_register=1, swap=2` 解码正确
 
 ### TC3: 字节序 BADC（寄存器内字节交换）
@@ -181,7 +181,7 @@ N 个 point → `adjust_shm` 依次分配 shm_id=1..N。
 
 - **配置**：1 point `fun:1, type:15(BIT)`；modbusd point `funcode:0, type:15`，addr=0
 - **操作**：redis_tool 写 `MB_COIL_000 = 1`
-- **预期**：`value = 1`（`>B` 读 `shm[24:25]`）
+- **预期**：`value = 1`（`=B` 读 `shm[24:25]`）
 - **说明**：线圈位打包 LSB 优先，地址 0 位于首字节 bit0
 
 ### TC8: fun=2 读离散输入 — BOOLEAN
@@ -259,7 +259,7 @@ def wait_write_seq_advanced(shm_path, shm_id, seq_before, timeout=3.0, interval=
 
 ### 5.3 字节序断言
 
-- shm 中 value 为大端（§2.3 表），`struct.unpack` 用 `>` 前缀
+- shm 中 value 为本机序（§2.3 表），`struct.unpack` 用 `=` 前缀
 - 字节序用例（TC2~TC5）断言 `value == 1.5`（近似比较，FLOAT32 精度内）
 - modbusd 的 `hton_total` 在 FLOAT32 类型下不生效（仅 INT32/UINT32 生效），测试统一设 0
 

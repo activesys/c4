@@ -42,6 +42,7 @@
 
 # Go binaries — match compiled binary, not the source directory
 mcp/*/c4_shm_manager
+mcp/*/c4_modbus_client
 
 # Go module files — override *.mod Fortran rule above
 !go.mod

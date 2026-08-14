@@ -330,7 +330,7 @@ ASFP2 发送 MCP 服务支持停止和重启：Agent 可停止 ASFP2 发送链�
 
 ### 3.4 支持Modbus协议
 
-### C4_FUN_00012：C4 支持 Modbus/TCP 协议数据采集 ❌
+### C4_FUN_00012：C4 支持 Modbus/TCP 协议数据采集 ✅
 
 **功能描述**：
 
@@ -350,7 +350,7 @@ C4 通过 Modbus/RTU 协议（串口）采集工业设备的寄存器数据。
 
 ---
 
-### C4_FUN_00062：C4 启动 Modbus/TCP 采集 MCP 服务 ❌
+### C4_FUN_00062：C4 启动 Modbus/TCP 采集 MCP 服务 ✅
 
 **功能描述**：
 
@@ -360,7 +360,7 @@ Agent 生成 Modbus/TCP 采集 MCP 服务的配置文件后，启动 MCP 服务�
 
 ---
 
-### C4_FUN_00063：Modbus/TCP 采集 MCP 服务支持停止和重启 ❌
+### C4_FUN_00063：Modbus/TCP 采集 MCP 服务支持停止和重启 ✅
 
 **功能描述**：
 
