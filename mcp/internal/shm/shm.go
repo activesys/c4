@@ -81,6 +81,43 @@ func ShmPath(instanceID string) string {
 	return ShmDir + "/c4_" + instanceID
 }
 
+// Open attaches to an existing shared memory object (O_RDWR, no O_CREAT).
+// It validates the header magic and maps the full size read from the header.
+func Open(path string) (*SharedMemory, error) {
+	fd, err := unix.Open(path, unix.O_RDWR, 0)
+	if err != nil {
+		return nil, fmt.Errorf("SHM_OPEN_FAILED: shm_open failed for %s: %w", path, err)
+	}
+
+	hdrData, err := unix.Mmap(fd, 0, BlockSize, unix.PROT_READ, unix.MAP_SHARED)
+	if err != nil {
+		unix.Close(fd)
+		return nil, fmt.Errorf("SHM_OPEN_FAILED: mmap header failed: %w", err)
+	}
+	magic := binary.NativeEndian.Uint32(hdrData[0:])
+	if magic != Magic {
+		unix.Munmap(hdrData)
+		unix.Close(fd)
+		return nil, fmt.Errorf("SHM_CORRUPTED: header magic is invalid (got 0x%08X, expected 0x%08X)", magic, Magic)
+	}
+	maxPoints := binary.NativeEndian.Uint32(hdrData[HdrOffMaxPoints:])
+	unix.Munmap(hdrData)
+
+	totalSize := int64(int(maxPoints)+1) * BlockSize
+	data, err := unix.Mmap(fd, 0, int(totalSize), unix.PROT_READ|unix.PROT_WRITE, unix.MAP_SHARED)
+	if err != nil {
+		unix.Close(fd)
+		return nil, fmt.Errorf("SHM_OPEN_FAILED: mmap failed: %w", err)
+	}
+
+	return &SharedMemory{
+		fd:        fd,
+		data:      data,
+		path:      path,
+		maxPoints: int(maxPoints),
+	}, nil
+}
+
 func Create(instanceID string, maxPoints int) (*SharedMemory, error) {
 	path := ShmPath(instanceID)
 	fd, err := unix.Open(path, unix.O_CREAT|unix.O_EXCL|unix.O_RDWR, 0600)

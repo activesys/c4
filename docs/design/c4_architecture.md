@@ -260,8 +260,8 @@ block-beta
 | `reserved` | 2B | 5 | 保留 |
 | `type` | 1B | 7 | 数据类型（ASFP2_TYPE_* 枚举） |
 | `write_seq` | 8B | 8 | Seqlock 序列号——奇数=writer 写入中，偶数=稳定可读。同时承载数据新鲜度判断（超过 `last_seen` 即新数据） |
-| `timestamp` | 8B | 16 | 采集时间戳，Unix 纪元毫秒差值（大端） |
-| `value` | 8B | 24 | 实际数据值，统一 8B（大端），不足 8B 的类型靠右对齐低位 |
+| `timestamp` | 8B | 16 | 采集时间戳，Unix 纪元毫秒差值（本机序） |
+| `value` | 8B | 24 | 实际数据值，统一 8B（本机序），不足 8B 的类型低位存储、高位补零 |
 
 ### 2.2.3 数据类型存储
 
@@ -283,8 +283,8 @@ block-beta
 | FLOAT64 | 11 | 8B | 全部 8 字节 |
 | BIT | 15 | 1B | 最低字节（offset 0） |
 
-所有类型的 value 使用网络字节序（大端）存储。
-FLOAT 类型的 value 同样使用网络字节序（大端）存储，字节 swap 方式与整数类型一致（Go: `binary.BigEndian`，C: `htonl`/`ntohl`）。
+所有类型的 value 使用本机序存储（Writer 与 Reader 均运行在同一台机器，直接读写本机内存序，无需网络序转换）。
+FLOAT 类型的 value 同样使用本机序存储（Go: `binary.NativeEndian`），其 IEEE 754 位模式与整数类型一致地按本机序写入。
 BOOLEAN 和 BIT 类型：最低位（bit 0）表示有效值，其余位为 0。
 
 ### 2.2.4 定长块设计优势

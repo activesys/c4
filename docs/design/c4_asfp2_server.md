@@ -491,7 +491,7 @@ func writeBlock(shmPtr unsafe.Pointer, shmID uint32, dataType uint8,
     // 5. 写入数据
     block.timestamp = timestamp
     block.type = dataType
-    copyValue(&block.value, value, valueSize)   // 大端写入
+    copyValue(&block.value, value, valueSize)   // 本机序写入
 
     // 6. 递增序列号为偶数，宣告写入完成
     atomic.AddUint64(&block.write_seq, 1)

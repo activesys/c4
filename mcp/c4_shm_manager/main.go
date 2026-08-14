@@ -303,9 +303,26 @@ func queryStatusHandler(ctx context.Context, req *mcp.CallToolRequest) (*mcp.Cal
 	return newResult(string(data)), nil
 }
 
+func attachExistingShm() (*shm.SharedMemory, error) {
+	entries, err := os.ReadDir("/dev/shm")
+	if err != nil {
+		return nil, fmt.Errorf("SHM_OPEN_FAILED: cannot read /dev/shm: %v", err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "c4_") {
+			return shm.Open("/dev/shm/" + e.Name())
+		}
+	}
+	return nil, fmt.Errorf("SHM_OPEN_FAILED: no c4_* shared memory found in /dev/shm")
+}
+
 func adjustShmHandler(ctx context.Context, req *mcp.CallToolRequest, input struct{ ConfigPath string `json:"config_path"` }) (*mcp.CallToolResult, any, error) {
 	if state.sm == nil {
-		return newError("SHM_NOT_CREATED: shared memory not initialized, call create_shm first"), nil, nil
+		sm, err := attachExistingShm()
+		if err != nil {
+			return newError(err.Error()), nil, nil
+		}
+		state.sm = sm
 	}
 
 	if _, err := os.Stat(state.sm.Path()); os.IsNotExist(err) {

@@ -156,7 +156,7 @@ Modbus/TCP 设备连接实例。
 | `port` | int | `502` | Modbus/TCP 端口，标准 502 |
 | `t0` | int | `30` | 连接超时（秒） |
 | `t1` | int | `10` | 请求/响应超时（秒） |
-| `retries` | int | `10` | 请求失败最大重试次数 |
+| `retries` | int | `10` | 请求失败最大重试次数（`0` = 无限重试，与 C 采集层 `libmodbus` 语义一致） |
 | `coils_quantity_max` | int | `2000` | 单次请求最大线圈/离散输入数量（协议上限 2000） |
 | `registers_quantity_max` | int | `125` | 单次请求最大寄存器数量（协议上限 125） |
 | `hton_register` | int | `1` | 是否将每个 16 位寄存器的网络序格式转换为本机序格式：`1`=转换（网络序→本机序），`0`=不转换 |
@@ -411,8 +411,8 @@ Modbus/TCP ADU（最大 260 字节 = 7 + 253）
 1. net.DialTimeout("tcp", "{ip}:{port}", t0)  → 建立到设备的 TCP 连接（`t0` 为连接超时）
 2. 连接成功后进入轮询循环（§4.5）
 3. 连接断开（请求超时 / 读响应失败 / 设备主动关闭）：
-   → 关闭当前连接 → 启动重连
-   → 按 retries 次重试，仍失败则等待下一个 timer 周期后再次重连
+   → 关闭当前连接 → 每个 timer 周期尝试一次重连（`net.DialTimeout`），直到成功；
+   请求级重试由 `retries` 控制（见 §4.5、§7），重连本身不消耗 `retries`
 ```
 
 与 `c4_asfp2_server`（`net.Listen` + Accept 循环）相反，client 使用 `net.Dial` 主动出站，
@@ -475,7 +475,7 @@ flowchart TD
     E --> F{"响应类型?"}
     F -->|"正常响应"| G["解析响应<br/>按偏移提取各 point（§5.1）"]
     F -->|"异常响应"| H["跳过批次<br/>记录 error_count"]
-    F -->|"超时/无响应"| I["连接断开<br/>重连（retries）"]
+    F -->|"超时/无响应"| I["请求重试（retries）<br/>耗尽后关闭连接重连"]
     G --> J["逐 point 转换数值（§4.6 字节序）"]
     J --> K["Seqlock 写入共享内存（§5）"]
     K --> L{"还有批次?"}
@@ -559,8 +559,8 @@ ABCD = [Hi_hi, Hi_lo, Lo_hi, Lo_lo]，Hi/Lo 分别为高/低 16 位字，hi/lo �
 > 中 `_swap_byte()` 的「`swap` 字节为一组首尾镜像交换」；`hton_register` 即该实现对每个
 > 16 位寄存器做 `ntohs`（网络序→本机序）的开关。**注意**：该 C 实现在 `count=8, swap=2`
 > 时循环边界有缺陷（只交换最外层一组，漏掉 [2,3]↔[4,5]），本 Go 服务按本文档表格的完整
-> 镜像语义实现，不逐行移植 C 循环。解码得到本机序值后，写入共享内存时统一转为大端
-> （`binary.BigEndian`）。
+> 镜像语义实现，不逐行移植 C 循环。解码得到本机序值后，写入共享内存时按本机序写入
+> （`binary.NativeEndian`）。
 
 ---
 
@@ -639,7 +639,7 @@ func writeBlock(shmPtr unsafe.Pointer, shmID uint32, dataType uint8,
     // 5. 写入数据
     block.timestamp = timestamp
     block.type = dataType
-    copyValue(&block.value, value, valueSize)   // 大端写入
+    copyValue(&block.value, value, valueSize)   // 本机序写入
 
     // 6. 递增序列号为偶数，宣告写入完成
     atomic.AddUint64(&block.write_seq, 1)
@@ -648,13 +648,13 @@ func writeBlock(shmPtr unsafe.Pointer, shmID uint32, dataType uint8,
 }
 ```
 
-**timestamp 语义**：写入的 `timestamp` 为设备数据采集完成时刻的 Unix 纪元毫秒差值（大端）。
+**timestamp 语义**：写入的 `timestamp` 为设备数据采集完成时刻的 Unix 纪元毫秒差值（本机序）。
 由于 Modbus 设备响应中通常不携带时间戳，以 `c4_modbus_client` 收到响应并解析完成的时间为准。
 
-**value 字节位置**：解码得到的本机序值统一转为大端（`binary.BigEndian`）后，写入
+**value 字节位置**：解码得到的本机序值按本机序（`binary.NativeEndian`）写入
 `block.value` 的**低位字节**（4 字节类型写 offset 0~3，2 字节类型写 offset 0~1，
 高位字节补 0），与 [c4_architecture.md §2.2.3](c4_architecture.md)「不足 8B 的类型在
-低位存储、高位补零」及 Reader（`c4_asfp2_client`）的大端读取约定一致。
+低位存储、高位补零」及 Reader（`c4_asfp2_client`）的本机序读取约定一致。
 
 > **`block.type` 写入**：`block.type = dataType` 在临界区内每次写入，与
 > `c4_asfp2_server` 一致；[c4_architecture.md §2.4.2](c4_architecture.md) 的 Writer 伪代码

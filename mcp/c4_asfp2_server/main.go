@@ -509,10 +509,21 @@ func writeBlock(shmData []byte, shmID int, dataType uint8, timestamp uint64, val
 	// Write data
 	binary.NativeEndian.PutUint64(shmData[off+shm.BlkOffTimestamp:], timestamp)
 	shmData[off+shm.BlkOffType] = dataType
-	binary.NativeEndian.PutUint64(shmData[off+shm.BlkOffValue:], value)
+	writeValue(shmData, off+shm.BlkOffValue, value, valueSize)
 
 	// Seqlock: increment to even
 	binary.NativeEndian.PutUint64(shmData[off+shm.BlkOffWriteSeq:], writeSeq+2)
+}
+
+// writeValue writes a value in native byte order into the low `valueSize` bytes
+// of the 8-byte value field, zeroing the high bytes (c4_architecture.md §2.2.3).
+func writeValue(shmData []byte, off int, value uint64, valueSize int) {
+	for i := 0; i < 8; i++ {
+		shmData[off+i] = 0
+	}
+	var buf [8]byte
+	binary.NativeEndian.PutUint64(buf[:], value)
+	copy(shmData[off:off+valueSize], buf[:valueSize])
 }
 
 // ──────────────────────────────────────────────
