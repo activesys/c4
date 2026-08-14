@@ -139,7 +139,7 @@ Modbus/TCP 设备连接实例。
             "hton_total": 0,
             "timer": 1000,
             "points": [
-                {"id": "windspeed", "uid": 1, "addr": 1000, "fun": 3, "type": 10, "swap": 2, "shm_id": 3}
+                {"id": "windspeed", "uid": 1, "addr": 1000, "fun": 3, "type": 10, "swap": 2, "shm_id": 4}
             ]
         }
     ]
@@ -160,7 +160,7 @@ Modbus/TCP 设备连接实例。
 | `coils_quantity_max` | int | `2000` | 单次请求最大线圈/离散输入数量（协议上限 2000） |
 | `registers_quantity_max` | int | `125` | 单次请求最大寄存器数量（协议上限 125） |
 | `hton_register` | int | `1` | 是否将每个 16 位寄存器的网络序格式转换为本机序格式：`1`=转换（网络序→本机序），`0`=不转换 |
-| `hton_total` | int | `0` | 保留字段，始终为 0 |
+| `hton_total` | int | `0` | 保留字段，始终为 0（接受但忽略，与 C 采集层配置兼容） |
 | `timer` | int | `1000` | 采集周期（毫秒），决定轮询和写入共享内存的频率。设计约束 **1Hz（timer=1000）** |
 
 ### 2.3 points 数组元素
@@ -174,7 +174,7 @@ Modbus/TCP 设备连接实例。
 | `addr` | integer | Modbus 地址，即 PDU 中的 Starting Address（0 基地址，直接编码进请求的 2 字节地址字段） |
 | `fun` | integer | Modbus 功能码：`1`(Read Coils) / `2`(Read Discrete Inputs) / `3`(Read Holding Registers) / `4`(Read Input Registers) |
 | `type` | integer | 数据类型（ASFP2_TYPE_* 枚举值，见 [c4_architecture.md §2.2.3](c4_architecture.md)）。决定该 point 跨越的寄存器数量与数值解释方式（见 §4.6） |
-| `swap` | integer | 多寄存器值的字顺序交换数（`swap` 字节为一组做首尾交换）。单寄存器（INT16/UINT16）与位类型（BOOLEAN/BIT）必须为 0（见 §4.6） |
+| `swap` | integer | 多寄存器值的字顺序交换数（`swap` 字节为一组做首尾交换）。单寄存器（INT16/UINT16）与位类型（BOOLEAN/BIT）必须为 0；合法取值与规则见 §4.6.2 |
 | `shm_id` | integer | 全局 shm_id，默认 0（未分配），由 `c4_shm_manager` 分配后回填 |
 
 **shm_id 分配时机**：Agent 在生成配置文件时先将所有 point 的 `shm_id` 置为 0，
@@ -408,7 +408,7 @@ Modbus/TCP ADU（最大 260 字节 = 7 + 253）
 `c4_modbus_client` 作为 **Modbus TCP 主站**，主动发起 TCP 连接：
 
 ```
-1. net.Dial("tcp", "{ip}:{port}")  → 建立到设备的 TCP 连接
+1. net.DialTimeout("tcp", "{ip}:{port}", t0)  → 建立到设备的 TCP 连接（`t0` 为连接超时）
 2. 连接成功后进入轮询循环（§4.5）
 3. 连接断开（请求超时 / 读响应失败 / 设备主动关闭）：
    → 关闭当前连接 → 启动重连
@@ -459,8 +459,9 @@ Modbus/TCP ADU（最大 260 字节 = 7 + 253）
 
 **关键点**：批数量以「寄存器/线圈跨度」累加（而非 point 个数）。跨寄存器 point
 （FLOAT32 / INT32 / UINT32 占 2 寄存器，FLOAT64 / INT64 / UINT64 占 4 寄存器）的跨度
-计入批数量，因此单批不会超出协议数量上限。跨越批边界的 point 不会被拆分——超出上限
-的 point 整体归入下一批次。
+计入批数量，因此单批不会超出协议数量上限。单个 point 的完整跨度始终整体保留——由于
+`span` 最大仅 4（寄存器）或 1（线圈），任何单个 point 都不会单独超出 125/2000 的上限，
+不存在拆分 point 的情形；仅当「并入后」数量超出上限时，该 point 整体归入下一批次。
 
 **示例**：两个 FLOAT32 point 位于 addr 1000、1002（各占 2 寄存器，覆盖连续区间
 [1000, 1003]），合并为 1 个批次：Starting Address = 1000，Quantity = 4。
@@ -527,6 +528,10 @@ flowchart TD
 | `1` | 1 字节组镜像交换（整体字节反转） | 1 字节组镜像交换（整体字节反转） |
 | `2` | 2 字节组镜像交换（高低字交换） | 2 字节组镜像交换 |
 | `4` | 无操作（swap≥count） | 4 字节组镜像交换（高低 32 位交换） |
+
+> **`swap` 合法取值**：`swap` 只能是 `0`、`1`、`2`、`4`，且必须整除解码字节数 `count`
+> （否则 `count/swap` 非整数，交换语义无定义）。非法取值（如 `swap=3`）在启动校验时
+> 视为 `INVALID_POINT`。单寄存器（INT16/UINT16）与位类型（BOOLEAN/BIT）必须为 0。
 
 **32 位值常见字节序 → 解码配置**（以 Intel/小端机为例；目标值 V 的标准大端字节
 ABCD = [Hi_hi, Hi_lo, Lo_hi, Lo_lo]，Hi/Lo 分别为高/低 16 位字，hi/lo 分别为该字的高/低字节；
@@ -600,7 +605,8 @@ type、swap，从响应缓冲区提取数值后写入共享内存。提取方式
   value      = (response[byte_index] >> bit_index) & 0x01
   ```
 
-响应中的地址不在 index 中的数据项被静默丢弃。
+由于批次由本服务的 point 表构造，正常响应必然全部命中 index；仅当设备返回地址不匹配或
+畸形的响应时才可能出现未命中项，此类字节被静默丢弃。
 
 ### 5.2 Seqlock 写入协议
 
@@ -645,11 +651,30 @@ func writeBlock(shmPtr unsafe.Pointer, shmID uint32, dataType uint8,
 **timestamp 语义**：写入的 `timestamp` 为设备数据采集完成时刻的 Unix 纪元毫秒差值（大端）。
 由于 Modbus 设备响应中通常不携带时间戳，以 `c4_modbus_client` 收到响应并解析完成的时间为准。
 
+**value 字节位置**：解码得到的本机序值统一转为大端（`binary.BigEndian`）后，写入
+`block.value` 的**低位字节**（4 字节类型写 offset 0~3，2 字节类型写 offset 0~1，
+高位字节补 0），与 [c4_architecture.md §2.2.3](c4_architecture.md)「不足 8B 的类型在
+低位存储、高位补零」及 Reader（`c4_asfp2_client`）的大端读取约定一致。
+
+> **`block.type` 写入**：`block.type = dataType` 在临界区内每次写入，与
+> `c4_asfp2_server` 一致；[c4_architecture.md §2.4.2](c4_architecture.md) 的 Writer 伪代码
+> 未显式写 `type`，属架构文档省略，实现以写入 `type` 为准。
+>
+> **内存模型提示**：`block.state`/`type`/`timestamp`/`value` 使用普通（非原子）字段访问，
+> 会被 `go test -race` 标记为数据竞争。Seqlock 的正确性由 `write_seq` 的 `sync/atomic`
+> 顺序一致语义保证（普通写发生在两次 `AddUint64` 之间，对 Reader 可见），该竞争在实际
+> 中良性且继承自架构文档；若 CI 启用 race detector，需改用原子读写。
+
 ### 5.3 写入频率约束
 
 `c4_modbus_client` 的写入频率由 `timer`（采集周期）决定，设计约束 **1Hz（timer=1000）**，
 与 [c4_architecture.md §2.4.2](c4_architecture.md) 中 "Writer 1Hz / Reader 10Hz" 的频率模型一致。
 每个轮询周期内，各 point 写入一次，覆盖前一次的值。
+
+> **`t1` 与 `timer` 相互独立**：`timer`（默认 1000ms）决定正常情况下的采集周期（1Hz）。
+> `t1`（请求超时）与 `retries` 仅作用于失败路径——设备无响应时，请求最长等待 `t1`、
+> 重试 `retries` 次，故障期间本周期耗时自然拉长、低于 1Hz，属预期行为，不受 `timer`
+> 约束。二者分属「正常」与「失败」两种互斥场景，无需相互制约。
 
 ---
 
@@ -729,7 +754,7 @@ tear down 已建立的 goroutine（关闭连接、清理资源），恢复到调
 | 部分实例 TCP 连接失败 | `start` | 返回 `CONNECT_FAILED`——tear down 已建立的 goroutine，恢复到调用前状态 |
 | 设备返回异常响应（§4.3） | 运行时 | 跳过该批次，递增 errors |
 | 请求超时（t1 超时） | 运行时 | 递增 errors → 按 retries 重试 → 仍失败则关闭连接重连 |
-| 响应地址不在映射表中 | 运行时 | 丢弃该 point，递增 items_dropped |
+| 设备返回地址不匹配/畸形响应 | 运行时 | 丢弃未命中映射的字节，递增 items_dropped（仅畸形响应时发生） |
 | Seqlock 写入时 magic 失效 | 运行时 | 跳过该 block，记录错误日志 |
 | TCP 连接断开 | 运行时 | 启动重连，重连成功后恢复轮询 |
 | 单个 goroutine panic | 运行时 | recover 后重启 goroutine，不影响其他实例 |
@@ -750,7 +775,7 @@ tear down 已建立的 goroutine（关闭连接、清理资源），恢复到调
 | 单次请求数量不超协议上限 | 轮询拆分逻辑 | 批数量按 span 累加：线圈/离散输入 ≤ coils_quantity_max（≤2000），寄存器 ≤ registers_quantity_max（≤125） |
 | 同一 (uid, fun) 组内 point 区间不重叠 | 启动校验 | 按 addr 升序后 next.addr ≥ prev.addr + prev.span，重叠即 INVALID_POINT |
 | 所有多字节字段大端编码 | 编码/解码逻辑 | 遵循 Modbus/TCP 规范 |
-| 采集周期固定为 timer（1Hz） | 轮询循环 | 与 Writer 1Hz / Reader 10Hz 频率模型一致 |
+| 采集周期固定为 timer（1Hz，健康状态下） | 轮询循环 | 与 Writer 1Hz / Reader 10Hz 频率模型一致；设备超时（`t1`×`retries`）时有效周期会拉长，见 §5.3 |
 | 各 goroutine 独立运行 | 并发模型 | 每个 Client goroutine 有独立的连接、transaction_id 计数器和轮询循环 |
 
 ---
