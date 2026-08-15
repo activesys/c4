@@ -522,8 +522,7 @@ def start_asfp2_server(config_path):
     binary = _find_c4_asfp2_server_binary()
     client = McpClient(binary)
     resp = client.call_tool(
-        "start",
-        {"config_path": config_path},
+        "start", {"instance_id": instance_id, "config_path": config_path},
     )
     if resp["result"].get("isError", False):
         client.close()
@@ -542,8 +541,7 @@ def start_asfp2_client(config_path):
 def start_sut(client, config_path):
     """在 SUT client 上调用 start 工具。"""
     resp = client.call_tool(
-        "start",
-        {"config_path": config_path},
+        "start", {"instance_id": instance_id, "config_path": config_path},
     )
     if resp["result"].get("isError", False):
         raise RuntimeError(
@@ -997,8 +995,7 @@ def prepare_environment(shm_mgr_client):
 
         # 步骤 3: adjust_shm
         resp = shm_mgr_client.call_tool(
-            "adjust_shm",
-            {"config_path": config_path},
+            "adjust_shm", {"instance_id": instance_id, "config_path": config_path},
         )
         if resp["result"].get("isError", False):
             raise RuntimeError(
@@ -1028,7 +1025,7 @@ def isolated_shm():
     def register(instance_id: str) -> None:
         registered.append(instance_id)
         try:
-            shm_unlink(f"/c4_{instance_id}")
+            shm_unlink(f"/{instance_id}")
         except OSError:
             pass
 
@@ -1036,7 +1033,7 @@ def isolated_shm():
 
     for iid in registered:
         try:
-            shm_unlink(f"/c4_{iid}")
+            shm_unlink(f"/{iid}")
         except OSError:
             pass
 

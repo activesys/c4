@@ -335,7 +335,7 @@ Python 通过 `shm_helpers.read_shm_block(shm_path, shm_id)` 读取 Data Block�
 - 通过 `sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../c4_fun_00057"))` 引用 `c4_fun_00057` 的 `conftest.py`
 - 需要引入的 fixtures：`prepare_environment`、`start_asfp2_server`、`isolated_shm`
 - 需要引入的工具：`shm_helpers.read_shm_block`、`shm_helpers.shm_path`、`shm_helpers.read_shm_header`
-- **重要**：每个 TC 在调用 `start_asfp2_server.call_tool("start", ...)` 时，必须通过 `config_path` 参数传入配置文件路径（`{"config_path": config_path}`）。配置文件由 `prepare_environment` 生成并就地改写（分配 shm_id）后交给 `start` 使用
+- **重要**：每个 TC 在调用 `start_asfp2_server.call_tool("start", ...)` 时，必须通过 `instance_id` 和 `config_path` 参数传入（`{"instance_id": iid, "config_path": config_path}`）。配置文件由 `prepare_environment` 生成并就地改写（分配 shm_id）后交给 `start` 使用
 
 ### 5.2 asfp2_client 进程管理
 

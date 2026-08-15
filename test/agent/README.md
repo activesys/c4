@@ -109,7 +109,7 @@ def agent(agent_binary, shm_manager_binary, registry_dir, tmp_path):
     Function 级隔离的 Agent 实例。
 
     生命周期:
-      1. 制备 tmp_path 作为 /etc/c4/ 替代（agent.json + config.json + mcp-registry/）
+      1. 制备 tmp_path 作为配置目录（~/.local/c4/ 等效）替代（agent.json + config.json + mcp-registry/）
       2. 启动 c4_shm_manager（MCP 进程）
       3. 启动 c4_agent --config-dir <tmp_path>
       4. 轮询 GET /api/services 直到返回 200（Agent 就绪）
@@ -170,7 +170,7 @@ class AgentHandle:
 
     base_url: str          # http://127.0.0.1:{port}
     process: Popen         # Agent 子进程句柄
-    config_dir: Path       # 配置目录（/etc/c4/ 等效路径）
+    config_dir: Path       # 配置目录（~/.local/c4/ 等效路径）
 
     def get_services(self) -> dict:
         """GET /api/services → JSON"""

@@ -39,7 +39,7 @@ class TestStart:
         操作：启动 SUT，MCP initialize，调用 start。
         预期：返回 "success"。asfp2_server 侧可见 TCP 连接。
         """
-        instance_id = "tc1"
+        instance_id = "c4_tc1"
         isolated_shm(instance_id)
         asfp2_servers(9900)
 
@@ -48,8 +48,7 @@ class TestStart:
         assert iid == instance_id
 
         resp = mcp.call_tool(
-            "start",
-            {"config_path": config_path},        )
+            "start", {"instance_id": instance_id, "config_path": config_path},        )
         _assert_mcp_success(resp)
 
     # ──────────────────────────────────────────────
@@ -64,7 +63,7 @@ class TestStart:
         操作：调用 start。
         预期：返回 "success"。3 个 asfp2_server 均可见连接。
         """
-        instance_id = "tc2"
+        instance_id = "c4_tc2"
         isolated_shm(instance_id)
         asfp2_servers(9901, 9902, 9903)
 
@@ -73,8 +72,7 @@ class TestStart:
         assert iid == instance_id
 
         resp = mcp.call_tool(
-            "start",
-            {"config_path": config_path},        )
+            "start", {"instance_id": instance_id, "config_path": config_path},        )
         _assert_mcp_success(resp)
 
     # ──────────────────────────────────────────────
@@ -89,7 +87,7 @@ class TestStart:
         操作：调用 start。
         预期：返回 "success"（无实例需启动，调用 shm_open + mmap 后直接返回）。
         """
-        instance_id = "tc3"
+        instance_id = "c4_tc3"
         isolated_shm(instance_id)
 
         # 构建空实例配置 — writer 端正常，reader 端为空数组
@@ -125,8 +123,7 @@ class TestStart:
         assert iid == instance_id
 
         resp = mcp.call_tool(
-            "start",
-            {"config_path": config_path},        )
+            "start", {"instance_id": instance_id, "config_path": config_path},        )
         _assert_mcp_success(resp)
 
     # ──────────────────────────────────────────────
@@ -141,7 +138,7 @@ class TestStart:
         操作：再次调用 start。
         预期：isError: true，错误码 ALREADY_RUNNING。
         """
-        instance_id = "tc4"
+        instance_id = "c4_tc4"
         isolated_shm(instance_id)
         asfp2_servers(9904)
 
@@ -149,7 +146,7 @@ class TestStart:
         config_path, iid = prepare_environment(cfg, instance_id)
         assert iid == instance_id
 
-        args = {"config_path": config_path}
+        args = {"instance_id": instance_id, "config_path": config_path}
 
         # 第一次 start — 应成功
         resp1 = mcp.call_tool("start", args)
@@ -169,7 +166,7 @@ class TestStart:
         操作：调用 stop。
         预期：返回 success（幂等），isError: false。
         """
-        instance_id = "tc5"
+        instance_id = "c4_tc5"
         isolated_shm(instance_id)
 
         resp_stop = mcp.call_tool("stop", {})
@@ -187,7 +184,7 @@ class TestStart:
         操作：调用 start。
         预期：isError: true，SHM_ID_NOT_ASSIGNED。
         """
-        instance_id = "tc6"
+        instance_id = "c4_tc6"
         isolated_shm(instance_id)
 
         cfg = _make_client_config(port=9906)
@@ -215,8 +212,7 @@ class TestStart:
 
             # 调用 start — 应检测到 shm_id 未分配
             resp = mcp.call_tool(
-                "start",
-                {"config_path": config_path},
+                "start", {"instance_id": instance_id, "config_path": config_path},
             )
             _assert_mcp_error(resp, "SHM_ID_NOT_ASSIGNED")
         finally:
@@ -237,7 +233,7 @@ class TestStart:
         操作：调用 start。
         预期：isError: true，CONFIG_PARSE_ERROR。
         """
-        instance_id = "tc7"
+        instance_id = "c4_tc7"
         isolated_shm(instance_id)
 
         # 先用有效配置创建 SHM（prepare_environment 需要它）
@@ -255,8 +251,7 @@ class TestStart:
             json.dump(invalid_cfg, f)
 
         resp = mcp.call_tool(
-            "start",
-            {"config_path": config_path},
+            "start", {"instance_id": instance_id, "config_path": config_path},
         )
         _assert_mcp_error(resp, "CONFIG_PARSE_ERROR")
 
@@ -267,16 +262,15 @@ class TestStart:
     def test_tc8_config_path_missing(self, mcp, isolated_shm):
         """
         前置：MCP initialize 完成。
-        操作：调用 start，config_path 指向不存在的文件路径。
+        操作：调用 start，提供 instance_id 但不提供 config_path 参数。
         预期：isError: true，CONFIG_PATH_MISSING。
         """
-        instance_id = "tc8"
+        instance_id = "c4_tc8"
         isolated_shm(instance_id)
 
-        # 传入不存在的文件路径 — SUT 立即返回 CONFIG_PATH_MISSING
+        # 不传 config_path 参数 — SUT 返回 CONFIG_PATH_MISSING
         resp = mcp.call_tool(
-            "start",
-            {"config_path": "/tmp/nonexistent_config_xyz.json"},
+            "start", {"instance_id": instance_id},
         )
         _assert_mcp_error(resp, "CONFIG_PATH_MISSING")
 
@@ -290,7 +284,7 @@ class TestStart:
         操作：调用 start。
         预期：isError: true，SHM_OPEN_FAILED。
         """
-        instance_id = "tc9"
+        instance_id = "c4_tc9"
         isolated_shm(instance_id)
 
         # 写入配置文件但不创建 SHM — shm_id 必须为合法值才能通过 validateConfig
@@ -305,8 +299,7 @@ class TestStart:
 
         try:
             resp = mcp.call_tool(
-                "start",
-                {"config_path": config_path},
+                "start", {"instance_id": instance_id, "config_path": config_path},
             )
             _assert_mcp_error(resp, "SHM_OPEN_FAILED")
         finally:
@@ -327,7 +320,7 @@ class TestStart:
         操作：调用 start。
         预期：isError: true，SHM_CORRUPTED。
         """
-        instance_id = "tc10"
+        instance_id = "c4_tc10"
         isolated_shm(instance_id)
 
         cfg = _make_client_config(port=9910)
@@ -335,7 +328,7 @@ class TestStart:
         assert iid == instance_id
 
         # 通过 mmap 修改 Header magic 前 4 字节
-        shm_path = f"/dev/shm/c4_{instance_id}"
+        shm_path = f"/dev/shm/{instance_id}"
         fd = os.open(shm_path, os.O_RDWR)
         try:
             shm = mmap.mmap(fd, 32, mmap.MAP_SHARED, mmap.PROT_WRITE)
@@ -351,8 +344,7 @@ class TestStart:
         )
 
         resp = mcp.call_tool(
-            "start",
-            {"config_path": config_path},        )
+            "start", {"instance_id": instance_id, "config_path": config_path},        )
         _assert_mcp_error(resp, "SHM_CORRUPTED")
 
     # ──────────────────────────────────────────────
@@ -369,7 +361,7 @@ class TestStart:
           - 返回 isError: true，CONNECT_FAILED
           - 可达实例（port 9901）的连接被 tear down → asfp2_server 侧无活跃连接
         """
-        instance_id = "tc11"
+        instance_id = "c4_tc11"
         isolated_shm(instance_id)
         asfp2_servers(9901)
 
@@ -378,6 +370,5 @@ class TestStart:
         assert iid == instance_id
 
         resp = mcp.call_tool(
-            "start",
-            {"config_path": config_path},        )
+            "start", {"instance_id": instance_id, "config_path": config_path},        )
         _assert_mcp_error(resp, "CONNECT_FAILED")

@@ -50,7 +50,7 @@ else:
 ```
 1. create_shm({instance_id, config_path}) → 初始 shm 创建 + 配置回填（shm_ids 已填入）
 2. 修改配置文件 → 添加新采集点（新 point 的 shm_id=0）
-3. adjust_shm({config_path}) → 读配置，计算 required_points，分配/扩容
+3. adjust_shm({instance_id, config_path}) → 读配置，计算 required_points，分配/扩容
 4. 验证 shm 状态 + 配置回填
 ```
 
@@ -76,13 +76,13 @@ c4/test/c4_fun_00054/
 1. initialize (MCP 握手，无需 roots 能力；配置路径通过 config_path 参数传入)
 2. create_shm({instance_id, config_path}) → SUT 直接读取配置文件 → 创建/回填
 3. （Python 修改配置文件）
-4. adjust_shm({config_path}) → SUT 读取配置 → 执行分配 → 返回结果
+4. adjust_shm({instance_id, config_path}) → SUT 读取配置 → 执行分配 → 返回结果
 5. 直接读取共享内存（`read_shm_header` / `read_shm_block`）→ 验证状态一致性
 ```
 
 ### 2.3 共享内存验证
 
-Python 通过 `os.open("/dev/shm/c4_{id}", os.O_RDONLY)` + `mmap` 直接读取，
+Python 通过 `os.open("/dev/shm/{instance_id}", os.O_RDONLY)` + `mmap` 直接读取，
 用 `struct.unpack` 按偏移解析各字段（同 C4_FUN_00053）。
 **不使用 `query_status` MCP 工具**——所有验证均通过直接 shm 读取完成。
 

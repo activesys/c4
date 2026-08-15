@@ -50,7 +50,7 @@ class TestStopRestart:
         前置：标准配置。asfp2_server -p 9900 已监听。SUT 已 start。
         操作：确认连接 → stop → 确认连接断开。
         """
-        iid = "tc1_001"
+        iid = "c4_tc1001"
         isolated_shm(iid)
         port = 9900
 
@@ -60,7 +60,7 @@ class TestStopRestart:
         server = run_asfp2_server(port)
         try:
             # 前置：SUT 已 start
-            client = start_asfp2_client(config_path)
+            client = start_asfp2_client(config_path, iid)
 
             # 确认 asfp2_server 侧有连接
             _assert_has_connection(port)
@@ -87,7 +87,7 @@ class TestStopRestart:
         前置：MCP initialize 完成，start 从未调用。
         操作：调用 stop。
         """
-        iid = "tc2_002"
+        iid = "c4_tc2002"
         isolated_shm(iid)
 
         config = _make_standard_config(iid)
@@ -114,7 +114,7 @@ class TestStopRestart:
         前置：start 已成功。
         操作：再次调用 start。
         """
-        iid = "tc3_003"
+        iid = "c4_tc3003"
         isolated_shm(iid)
         port = 9900
 
@@ -124,12 +124,11 @@ class TestStopRestart:
         server = run_asfp2_server(port)
         try:
             # 前置：start 已成功
-            client = start_asfp2_client(config_path)
+            client = start_asfp2_client(config_path, iid)
 
             # 操作：再次 start
             resp = client.call_tool(
-                "start",
-                {"config_path": config_path},
+                "start", {"instance_id": iid, "config_path": config_path},
             )
             _assert_mcp_error(resp, "ALREADY_RUNNING")
 
@@ -151,7 +150,7 @@ class TestStopRestart:
         前置：标准配置。SUT 已 start，port 9900 有连接。
         操作：stop → start → 确认 port 9900 重新连接。
         """
-        iid = "tc4_004"
+        iid = "c4_tc4004"
         isolated_shm(iid)
         port = 9900
 
@@ -161,7 +160,7 @@ class TestStopRestart:
         server = run_asfp2_server(port)
         try:
             # 前置：SUT 已 start
-            client = start_asfp2_client(config_path)
+            client = start_asfp2_client(config_path, iid)
             _assert_has_connection(port)
 
             # 操作：stop
@@ -171,8 +170,7 @@ class TestStopRestart:
 
             # 操作：start（同一 config_path）
             resp = client.call_tool(
-                "start",
-                {"config_path": config_path},
+                "start", {"instance_id": iid, "config_path": config_path},
             )
             _assert_mcp_success(resp)
 
@@ -197,7 +195,7 @@ class TestStopRestart:
         前置：标准配置。SUT 已 start。
         操作：stop → 启动 c4_shm_manager → adjust_shm → 关闭 → start。
         """
-        iid = "tc5_005"
+        iid = "c4_tc5005"
         isolated_shm(iid)
         port = 9900
 
@@ -207,7 +205,7 @@ class TestStopRestart:
         server = run_asfp2_server(port)
         try:
             # 前置：SUT 已 start
-            client = start_asfp2_client(config_path)
+            client = start_asfp2_client(config_path, iid)
             _assert_has_connection(port)
 
             # 操作：stop
@@ -216,8 +214,7 @@ class TestStopRestart:
 
             # 操作：start（配置未变更，直接重启）
             resp = client.call_tool(
-                "start",
-                {"config_path": config_path},
+                "start", {"instance_id": iid, "config_path": config_path},
             )
             _assert_mcp_success(resp)
 
@@ -242,7 +239,7 @@ class TestStopRestart:
         前置：标准配置。SUT 已 start。
         操作：stop → start（第 1 轮）→ stop → start（第 2 轮）→ stop → start（第 3 轮）。
         """
-        iid = "tc6_006"
+        iid = "c4_tc6006"
         isolated_shm(iid)
         port = 9900
 
@@ -252,7 +249,7 @@ class TestStopRestart:
         server = run_asfp2_server(port)
         try:
             # 前置：SUT 已 start
-            client = start_asfp2_client(config_path)
+            client = start_asfp2_client(config_path, iid)
 
             for round_num in range(1, 4):
                 # stop
@@ -261,7 +258,7 @@ class TestStopRestart:
                 _assert_no_connection(port)
 
                 # start
-                resp = client.call_tool("start", {"config_path": config_path})
+                resp = client.call_tool("start", {"instance_id": iid, "config_path": config_path})
                 _assert_mcp_success(resp)
                 _assert_has_connection(port)
 
@@ -286,7 +283,7 @@ class TestStopRestart:
         前置：SUT 已 start。
         操作：stop（成功）→ stop。
         """
-        iid = "tc7_007"
+        iid = "c4_tc7007"
         isolated_shm(iid)
         port = 9900
 
@@ -296,7 +293,7 @@ class TestStopRestart:
         server = run_asfp2_server(port)
         try:
             # 前置：SUT 已 start
-            client = start_asfp2_client(config_path)
+            client = start_asfp2_client(config_path, iid)
 
             # 第一次 stop — 成功
             resp = client.call_tool("stop", {})
@@ -327,7 +324,7 @@ class TestStopRestart:
           4. start（新 config_path）
         验证：新地址 127.0.0.2:9901 收到连接，旧地址 127.0.0.1:9900 无连接。
         """
-        iid = "tc8_008"
+        iid = "c4_tc8008"
         isolated_shm(iid)
         old_port = 9900
         new_port = 9901
@@ -338,7 +335,7 @@ class TestStopRestart:
         old_server = run_asfp2_server(old_port)
         try:
             # 前置：SUT 已 start (port=9900)
-            client = start_asfp2_client(config_path)
+            client = start_asfp2_client(config_path, iid)
             _assert_has_connection(old_port)
 
             # 操作 1: stop
@@ -359,8 +356,7 @@ class TestStopRestart:
                 try:
                     # 操作 4: start（新 config_path）
                     resp = client.call_tool(
-                        "start",
-                        {"config_path": changed_path},
+                        "start", {"instance_id": iid, "config_path": changed_path},
                     )
                     # 若 127.0.0.2 不可达，start 返回 CONNECT_FAILED
                     if resp["result"].get("isError", False):
@@ -407,7 +403,7 @@ class TestStopRestart:
           4. 配置改回标准配置 → adjust_shm
           5. start → success，port 9900 连接恢复。
         """
-        iid = "tc9_009"
+        iid = "c4_tc9009"
         isolated_shm(iid)
         port = 9900
 
@@ -417,7 +413,7 @@ class TestStopRestart:
         server = run_asfp2_server(port)
         try:
             # 前置：SUT 已 start
-            client = start_asfp2_client(config_path)
+            client = start_asfp2_client(config_path, iid)
             _assert_has_connection(port)
 
             # 操作 1: stop
@@ -434,15 +430,13 @@ class TestStopRestart:
             try:
                 # 操作 3: start → CONNECT_FAILED
                 resp = client.call_tool(
-                    "start",
-                    {"config_path": unreachable_path},
+                    "start", {"instance_id": iid, "config_path": unreachable_path},
                 )
                 _assert_mcp_error(resp, "CONNECT_FAILED")
 
                 # 操作 4: 改回标准配置 → start → success
                 resp = client.call_tool(
-                    "start",
-                    {"config_path": config_path},
+                    "start", {"instance_id": iid, "config_path": config_path},
                 )
                 _assert_mcp_success(resp)
 
@@ -475,7 +469,7 @@ class TestStopRestart:
           2. stop SUT → start SUT（同配置，无新注入）
           3. 验证 asfp2_server (port B) 再次收到相同数据
         """
-        iid = "tc10_010"
+        iid = "c4_tc10010"
         isolated_shm(iid)
         inject_port = 9905
         target_port = 9906
@@ -502,8 +496,7 @@ class TestStopRestart:
             inject_binary = _find_c4_asfp2_server_binary()
             inject_client = McpClient(inject_binary)
             resp = inject_client.call_tool(
-                "start",
-                {"config_path": config_path},
+                "start", {"instance_id": iid, "config_path": config_path},
             )
             _assert_mcp_success(resp)
             _assert_port_listening(inject_port)
@@ -529,8 +522,7 @@ class TestStopRestart:
 
             # SUT start
             resp = sut_client.call_tool(
-                "start",
-                {"config_path": config_path},
+                "start", {"instance_id": iid, "config_path": config_path},
             )
             _assert_mcp_success(resp)
 
@@ -554,8 +546,7 @@ class TestStopRestart:
 
             # 重启 — 同配置
             resp = sut_client.call_tool(
-                "start",
-                {"config_path": config_path},
+                "start", {"instance_id": iid, "config_path": config_path},
             )
             _assert_mcp_success(resp)
 

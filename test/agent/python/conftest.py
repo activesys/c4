@@ -390,6 +390,7 @@ def write_agent_json(
     """
     config_dir.mkdir(parents=True, exist_ok=True)
     agent_config = {
+        "instance_id": "c4_test",
         "model": {
             "provider": "deepseek",
             "name": "deepseek-chat",
@@ -407,7 +408,6 @@ def write_agent_json(
         },
         "shm_manager": {
             "binary": shm_manager_binary,
-            "instance_id": "c4_test",
             "config_path": str(config_dir / "config.json"),
         },
         "state": {
@@ -781,7 +781,7 @@ def agent(
       5. yield AgentHandle(base_url, process, config_dir)
       6. teardown: SIGTERM → 等待 10s → SIGKILL → ipcrm 清理 shm → session atexit 兜底
     """
-    config_dir = tmp_path / "etc_c4"
+    config_dir = tmp_path / "c4_config"
     port = _find_free_port()
 
     # 1. 制备 agent.json

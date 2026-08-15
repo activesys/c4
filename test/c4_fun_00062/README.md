@@ -216,7 +216,7 @@ c4_modbus_client 的 `fun`（Modbus 功能码 1/2/3/4）与 modbusd 的 `funcode
 ### TC6: config_path 缺失 → CONFIG_PATH_MISSING
 
 - **前置**：启动 SUT，MCP initialize，共享内存正常
-- **操作**：调用 `start`，不提供 `config_path` 参数（`arguments: {}`）
+- **操作**：调用 `start`，提供 `instance_id` 但不提供 `config_path` 参数（`arguments: {"instance_id": "c4_fun62tc6"}`）
 - **预期**：`isError: true`，错误码 `CONFIG_PATH_MISSING`
 
 ### TC7: 配置文件格式错误 → CONFIG_PARSE_ERROR

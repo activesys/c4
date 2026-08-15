@@ -65,7 +65,7 @@ class TestModbusClientStart:
         start_modbus_client, isolated_shm,
     ):
         """TC1: 单实例单点，start 返回 success（连接已建立）。"""
-        instance_id = "fun62_tc1"
+        instance_id = "c4_fun62tc1"
         isolated_shm(instance_id)
         port = _free_port()
 
@@ -84,7 +84,7 @@ class TestModbusClientStart:
         config_path, _ = prepare_environment(_make_c4_config(c4_insts), instance_id)
 
         sut = start_modbus_client()
-        resp = sut.call_tool("start", {"config_path": config_path})
+        resp = sut.call_tool("start", {"instance_id": instance_id, "config_path": config_path})
         _assert_mcp_success(resp)
 
     # ── TC2: 多实例启动 — 3 个实例各自连接 ──────────
@@ -94,7 +94,7 @@ class TestModbusClientStart:
         start_modbus_client, isolated_shm,
     ):
         """TC2: 3 个实例均指向同一 modbusd，各自 1 个 point，addr 不同，start 成功。"""
-        instance_id = "fun62_tc2"
+        instance_id = "c4_fun62tc2"
         isolated_shm(instance_id)
         port = _free_port()
 
@@ -116,20 +116,20 @@ class TestModbusClientStart:
         config_path, _ = prepare_environment(_make_c4_config(c4_insts), instance_id)
 
         sut = start_modbus_client()
-        resp = sut.call_tool("start", {"config_path": config_path})
+        resp = sut.call_tool("start", {"instance_id": instance_id, "config_path": config_path})
         _assert_mcp_success(resp)
 
     # ── TC3: 空实例列表 — 0 个实例 ──────────
 
     def test_tc3_empty_instances(self, prepare_environment, start_modbus_client, isolated_shm):
         """TC3: c4_modbus_client: []，start 成功（无实例，但仍需 shm_open + magic 校验）。"""
-        instance_id = "fun62_tc3"
+        instance_id = "c4_fun62tc3"
         isolated_shm(instance_id)
 
         config_path, _ = prepare_environment(_make_c4_config([]), instance_id)
 
         sut = start_modbus_client()
-        resp = sut.call_tool("start", {"config_path": config_path})
+        resp = sut.call_tool("start", {"instance_id": instance_id, "config_path": config_path})
         _assert_mcp_success(resp)
 
     # ── TC4: 重复调用 start → ALREADY_RUNNING ──────────
@@ -139,7 +139,7 @@ class TestModbusClientStart:
         start_modbus_client, isolated_shm,
     ):
         """TC4: 首次 start 成功，再次 start 返回 ALREADY_RUNNING。"""
-        instance_id = "fun62_tc4"
+        instance_id = "c4_fun62tc4"
         isolated_shm(instance_id)
         port = _free_port()
 
@@ -158,10 +158,10 @@ class TestModbusClientStart:
         config_path, _ = prepare_environment(_make_c4_config(c4_insts), instance_id)
 
         sut = start_modbus_client()
-        resp = sut.call_tool("start", {"config_path": config_path})
+        resp = sut.call_tool("start", {"instance_id": instance_id, "config_path": config_path})
         _assert_mcp_success(resp)
 
-        resp = sut.call_tool("start", {"config_path": config_path})
+        resp = sut.call_tool("start", {"instance_id": instance_id, "config_path": config_path})
         _assert_mcp_error(resp, "ALREADY_RUNNING")
 
     # ── TC5: start 未调用前调用 stop → 幂等 success ──────────
@@ -175,9 +175,9 @@ class TestModbusClientStart:
     # ── TC6: config_path 缺失 → CONFIG_PATH_MISSING ──────────
 
     def test_tc6_config_path_missing(self, start_modbus_client):
-        """TC6: start 不提供 config_path → CONFIG_PATH_MISSING。"""
+        """TC6: start 提供 instance_id 但不提供 config_path → CONFIG_PATH_MISSING。"""
         sut = start_modbus_client()
-        resp = sut.call_tool("start", {})
+        resp = sut.call_tool("start", {"instance_id": "c4_fun62tc6"})
         _assert_mcp_error(resp, "CONFIG_PATH_MISSING")
 
     # ── TC7: 配置文件格式错误 → CONFIG_PARSE_ERROR ──────────
@@ -198,7 +198,7 @@ class TestModbusClientStart:
         (a) JSON 语法错误
         (b) 合法 JSON 但缺少 c4_modbus_client 段
         """
-        instance_id = f"fun62_tc7_{abs(hash(bad_config_content)) % 100000}"
+        instance_id = f"c4_fun62tc7{abs(hash(bad_config_content)) % 100000}"
         isolated_shm(instance_id)
 
         # 先创建共享内存（无配置文件 → 默认 10 万点）
@@ -215,7 +215,7 @@ class TestModbusClientStart:
 
         try:
             sut = start_modbus_client()
-            resp = sut.call_tool("start", {"config_path": bad_config_path})
+            resp = sut.call_tool("start", {"instance_id": instance_id, "config_path": bad_config_path})
             _assert_mcp_error(resp, "CONFIG_PARSE_ERROR")
         finally:
             os.unlink(bad_config_path)
@@ -226,7 +226,7 @@ class TestModbusClientStart:
         self, start_modbusd, write_redis, start_modbus_client, isolated_shm,
     ):
         """TC8: 不创建共享内存，手工 shm_id=1 → SHM_OPEN_FAILED。"""
-        instance_id = "fun62_tc8"
+        instance_id = "c4_fun62tc8"
         isolated_shm(instance_id)
         port = _free_port()
 
@@ -247,7 +247,7 @@ class TestModbusClientStart:
 
         try:
             sut = start_modbus_client()
-            resp = sut.call_tool("start", {"config_path": config_path})
+            resp = sut.call_tool("start", {"instance_id": instance_id, "config_path": config_path})
             _assert_mcp_error(resp, "SHM_OPEN_FAILED")
         finally:
             os.unlink(config_path)
@@ -259,7 +259,7 @@ class TestModbusClientStart:
         start_modbus_client, isolated_shm,
     ):
         """TC9: 修改 Header magic 为 0xDEADBEEF → SHM_CORRUPTED。"""
-        instance_id = "fun62_tc9"
+        instance_id = "c4_fun62tc9"
         isolated_shm(instance_id)
         port = _free_port()
 
@@ -288,7 +288,7 @@ class TestModbusClientStart:
             os.close(fd)
 
         sut = start_modbus_client()
-        resp = sut.call_tool("start", {"config_path": config_path})
+        resp = sut.call_tool("start", {"instance_id": instance_id, "config_path": config_path})
         _assert_mcp_error(resp, "SHM_CORRUPTED")
 
     # ── TC10: shm_id 未分配（=0）→ SHM_ID_NOT_ASSIGNED ──────────
@@ -300,11 +300,11 @@ class TestModbusClientStart:
         """TC10: shm 存在但配置 shm_id=0 → SHM_ID_NOT_ASSIGNED。
 
         说明：README 规格为「create_shm 但跳过 adjust_shm → shm_id 仍为 0」。
-        实测 c4_shm_manager.create_shm(config_path) 会回填 shm_id（0→1），故改用
-        create_shm（不带 config_path → 默认 10 万点、不回填）+ 单独写 shm_id=0 的配置，
+        实测 c4_shm_manager.create_shm(instance_id, config_path) 会回填 shm_id（0→1），故改用
+        create_shm（带 instance_id 不带 config_path → 默认 10 万点、不回填）+ 单独写 shm_id=0 的配置，
         以构造「shm 存在 + shm_id=0」的前提。
         """
-        instance_id = "fun62_tc10"
+        instance_id = "c4_fun62tc10"
         isolated_shm(instance_id)
         port = _free_port()
 
@@ -331,7 +331,7 @@ class TestModbusClientStart:
 
         try:
             sut = start_modbus_client()
-            resp = sut.call_tool("start", {"config_path": config_path})
+            resp = sut.call_tool("start", {"instance_id": instance_id, "config_path": config_path})
             _assert_mcp_error(resp, "SHM_ID_NOT_ASSIGNED")
         finally:
             os.unlink(config_path)
@@ -370,7 +370,7 @@ class TestModbusClientStart:
         start_modbus_client, isolated_shm, points, desc,
     ):
         """TC11: point 字段非法 → INVALID_POINT。"""
-        instance_id = f"fun62_tc11_{abs(hash(desc)) % 100000}"
+        instance_id = f"c4_fun62tc11{abs(hash(desc)) % 100000}"
         isolated_shm(instance_id)
         port = _free_port()
 
@@ -386,7 +386,7 @@ class TestModbusClientStart:
         config_path, _ = prepare_environment(_make_c4_config(c4_insts), instance_id)
 
         sut = start_modbus_client()
-        resp = sut.call_tool("start", {"config_path": config_path})
+        resp = sut.call_tool("start", {"instance_id": instance_id, "config_path": config_path})
         _assert_mcp_error(resp, "INVALID_POINT")
 
     # ── TC12: 设备不可达 → CONNECT_FAILED（tear down）──────────
@@ -396,7 +396,7 @@ class TestModbusClientStart:
         start_modbus_client, isolated_shm,
     ):
         """TC12: 实例 1 可达、实例 2 不可达 → CONNECT_FAILED，实例 1 被 tear down。"""
-        instance_id = "fun62_tc12"
+        instance_id = "c4_fun62tc12"
         isolated_shm(instance_id)
         port = _free_port()
         unreachable_port = _free_port()  # 无监听
@@ -420,7 +420,7 @@ class TestModbusClientStart:
         config_path, _ = prepare_environment(_make_c4_config(c4_insts), instance_id)
 
         sut = start_modbus_client()
-        resp = sut.call_tool("start", {"config_path": config_path})
+        resp = sut.call_tool("start", {"instance_id": instance_id, "config_path": config_path})
         _assert_mcp_error(resp, "CONNECT_FAILED")
 
         # tear-down 验证：实例 1（shm_id=1）的 goroutine 已被 tear down，write_seq 不再递增

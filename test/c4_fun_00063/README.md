@@ -152,7 +152,7 @@ Go 编译的 `c4_modbus_client` 二进制，通过 MCP stdio JSON-RPC 控制（�
 - **前置**：标准配置，SUT 已 `start`
 - **操作**：
   1. 调用 `stop` → `"success"`
-  2. 启动 `c4_shm_manager` → `adjust_shm(config_path)` → `"success"` → 关闭
+  2. 启动 `c4_shm_manager` → `adjust_shm(instance_id, config_path)` → `"success"` → 关闭
   3. 调用 `start`（同一 config_path）
   4. 记录 `write_seq` 为 `seq_before`，等待 ≥1 轮询周期
 - **预期**：三步全链路正确，`write_seq > seq_before`（数据流恢复）

@@ -266,7 +266,7 @@ class TestPureReclaim:
 
         README §4.1 TC1 — 全部 4 个验证步骤。
         """
-        iid = "test_tc1"
+        iid = "c4_testtc1"
         isolated_shm(iid)
 
         config = _make_initial_config(writer_points=5)
@@ -290,7 +290,7 @@ class TestPureReclaim:
             )
 
             resp = mcp.call_tool(
-                "adjust_shm", {"config_path": config_path},
+                "adjust_shm", {"instance_id": iid, "config_path": config_path},
             )
             _assert_mcp_success(resp)
 
@@ -331,7 +331,7 @@ class TestPureReclaim:
 
         README §4.1 TC2 — max=14，all 7 blocks state=1 → iec104 orphan reclaimed。
         """
-        iid = "test_tc2"
+        iid = "c4_testtc2"
         isolated_shm(iid)
 
         config = _make_multi_writer_config()
@@ -368,7 +368,7 @@ class TestPureReclaim:
             remove_writer_section(config_path, "c4_iec104_client")
 
             resp = mcp.call_tool(
-                "adjust_shm", {"config_path": config_path},
+                "adjust_shm", {"instance_id": iid, "config_path": config_path},
             )
             _assert_mcp_success(resp)
 
@@ -410,7 +410,7 @@ class TestPureReclaim:
 
         README §4.1 TC3 — 回收 block[3..5]，新点 p6→3, p7→4 复用空闲 block。
         """
-        iid = "test_tc3"
+        iid = "c4_testtc3"
         isolated_shm(iid)
 
         config = _make_initial_config(writer_points=5)
@@ -440,7 +440,7 @@ class TestPureReclaim:
             )
 
             resp = mcp.call_tool(
-                "adjust_shm", {"config_path": config_path},
+                "adjust_shm", {"instance_id": iid, "config_path": config_path},
             )
             _assert_mcp_success(resp)
 
@@ -486,7 +486,7 @@ class TestNoDelete:
 
         README §4.2 TC4。
         """
-        iid = "test_tc4"
+        iid = "c4_testtc4"
         isolated_shm(iid)
 
         config = _make_initial_config(writer_points=3)
@@ -504,7 +504,7 @@ class TestNoDelete:
             set_header_point_count(path, 3)
 
             resp = mcp.call_tool(
-                "adjust_shm", {"config_path": config_path},
+                "adjust_shm", {"instance_id": iid, "config_path": config_path},
             )
             _assert_mcp_success(resp)
 
@@ -528,7 +528,7 @@ class TestNoDelete:
         required_points=0，但 writer/reader 列表非空，走正常回收路径：
         所有 state=1 block 均为孤儿 → 全部回收，point_count→0，返回 success。
         """
-        iid = "test_tc5"
+        iid = "c4_testtc5"
         isolated_shm(iid)
 
         config = _make_initial_config(writer_points=3)
@@ -553,7 +553,7 @@ class TestNoDelete:
                 json.dump(cfg, f)
 
             resp = mcp.call_tool(
-                "adjust_shm", {"config_path": config_path},
+                "adjust_shm", {"instance_id": iid, "config_path": config_path},
             )
             _assert_mcp_success(resp)
 
@@ -584,7 +584,7 @@ class TestStateConsistency:
 
         README §4.3 TC6 — 通过 read_shm_header 直接读取，不使用 query_status。
         """
-        iid = "test_tc6"
+        iid = "c4_testtc6"
         isolated_shm(iid)
 
         config = _make_initial_config(writer_points=6)
@@ -606,7 +606,7 @@ class TestStateConsistency:
             )
 
             resp = mcp.call_tool(
-                "adjust_shm", {"config_path": config_path},
+                "adjust_shm", {"instance_id": iid, "config_path": config_path},
             )
             _assert_mcp_success(resp)
 
@@ -626,7 +626,7 @@ class TestStateConsistency:
 
         README §4.3 TC7 — p5 保持 shm_id=5（不重新编号），reader shm_ids 匹配。
         """
-        iid = "test_tc7"
+        iid = "c4_testtc7"
         isolated_shm(iid)
 
         config = _make_initial_config(writer_points=5)
@@ -659,7 +659,7 @@ class TestStateConsistency:
             )
 
             resp = mcp.call_tool(
-                "adjust_shm", {"config_path": config_path},
+                "adjust_shm", {"instance_id": iid, "config_path": config_path},
             )
             _assert_mcp_success(resp)
 
@@ -709,7 +709,7 @@ class TestStateConsistency:
         README §4.3 TC8 — 回收的 block[4..5] state=0（不是 "state 不变"），
         保留的 block[1..3] magic/state=1/reserved/type 不变。
         """
-        iid = "test_tc8"
+        iid = "c4_testtc8"
         isolated_shm(iid)
 
         config = _make_initial_config(writer_points=5)
@@ -736,7 +736,7 @@ class TestStateConsistency:
             )
 
             resp = mcp.call_tool(
-                "adjust_shm", {"config_path": config_path},
+                "adjust_shm", {"instance_id": iid, "config_path": config_path},
             )
             _assert_mcp_success(resp)
 
@@ -789,7 +789,7 @@ class TestStateConsistency:
         block[3]/[5] 保持 state=1（保留），
         block[2]/[4] state=0 不变（从未激活不受影响）。
         """
-        iid = "test_tc9"
+        iid = "c4_testtc9"
         isolated_shm(iid)
 
         config = _make_initial_config(writer_points=5)
@@ -822,7 +822,7 @@ class TestStateConsistency:
             )
 
             resp = mcp.call_tool(
-                "adjust_shm", {"config_path": config_path},
+                "adjust_shm", {"instance_id": iid, "config_path": config_path},
             )
             _assert_mcp_success(resp)
 
@@ -860,7 +860,7 @@ class TestStateConsistency:
 
         README §4.3 TC10 — 最小删除单位，验证单个点删除触发正确回收。
         """
-        iid = "test_tc10"
+        iid = "c4_testtc10"
         isolated_shm(iid)
 
         config = _make_initial_config(writer_points=6)
@@ -883,7 +883,7 @@ class TestStateConsistency:
             )
 
             resp = mcp.call_tool(
-                "adjust_shm", {"config_path": config_path},
+                "adjust_shm", {"instance_id": iid, "config_path": config_path},
             )
             _assert_mcp_success(resp)
 
@@ -912,7 +912,7 @@ class TestStateConsistency:
         README §4.3 TC11 — 第一次删除 p4,p5，第二次删除 p2,p3。
         验证第二次在已有回收结果的 shm 上正确识别新增孤儿。
         """
-        iid = "test_tc11"
+        iid = "c4_testtc11"
         isolated_shm(iid)
 
         config = _make_initial_config(writer_points=5)
@@ -935,7 +935,7 @@ class TestStateConsistency:
             )
 
             resp = mcp.call_tool(
-                "adjust_shm", {"config_path": config_path},
+                "adjust_shm", {"instance_id": iid, "config_path": config_path},
             )
             _assert_mcp_success(resp)
 
@@ -963,7 +963,7 @@ class TestStateConsistency:
             )
 
             resp = mcp.call_tool(
-                "adjust_shm", {"config_path": config_path},
+                "adjust_shm", {"instance_id": iid, "config_path": config_path},
             )
             # 验证 2a：返回 success
             _assert_mcp_success(resp)
@@ -1013,7 +1013,7 @@ class TestErrorPaths:
 
         README §4.4 TC12 — 不调用 create_shm，直接 adjust_shm。
         """
-        iid = "test_tc12"
+        iid = "c4_testtc12"
         isolated_shm(iid)
 
         config = _make_initial_config(writer_points=2)
@@ -1022,7 +1022,7 @@ class TestErrorPaths:
         try:
             # 不调用 create_shm，直接 adjust_shm
             resp = mcp.call_tool(
-                "adjust_shm", {"config_path": config_path},
+                "adjust_shm", {"instance_id": iid, "config_path": config_path},
             )
             _assert_mcp_error(resp, "SHM_NOT_CREATED")
 
@@ -1034,7 +1034,7 @@ class TestErrorPaths:
 
         README §4.4 TC13 — adjust_shm 的 config_path 参数为空。
         """
-        iid = "test_tc13"
+        iid = "c4_testtc13"
         isolated_shm(iid)
 
         config = _make_initial_config(writer_points=2)
@@ -1048,7 +1048,7 @@ class TestErrorPaths:
 
             # adjust_shm 的 config_path 为空 → CONFIG_PATH_MISSING
             resp = mcp.call_tool(
-                "adjust_shm", {"config_path": ""},
+                "adjust_shm", {"instance_id": iid, "config_path": ""},
             )
             _assert_mcp_error(resp, "CONFIG_PATH_MISSING")
 
@@ -1060,7 +1060,7 @@ class TestErrorPaths:
 
         README §4.4 TC14 — writer 列表为空。
         """
-        iid = "test_tc14"
+        iid = "c4_testtc14"
         isolated_shm(iid)
 
         config = _make_initial_config(writer_points=2)
@@ -1079,7 +1079,7 @@ class TestErrorPaths:
                 json.dump(cfg, f)
 
             resp = mcp.call_tool(
-                "adjust_shm", {"config_path": config_path},
+                "adjust_shm", {"instance_id": iid, "config_path": config_path},
             )
             _assert_mcp_error(resp, "CONFIG_MISSING_SECTION")
 

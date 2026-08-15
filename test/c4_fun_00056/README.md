@@ -104,7 +104,7 @@ Go 编译的 `c4_shm_manager` 二进制，通过 MCP stdio JSON-RPC 通信。
 1. create_shm({instance_id, config_path}) → 初始 shm + 配置回填
 2. 直接写入 shm → 模拟 Writer 激活，state=1
 3. 修改配置文件 → 删除旧点 + 添加新点
-4. adjust_shm({config_path}) → 回收孤儿块 → 分配新点 → 返回结果
+4. adjust_shm({instance_id, config_path}) → 回收孤儿块 → 分配新点 → 返回结果
 5. 直接读取 shm → 验证 block state + Header + 配置回填
 ```
 
@@ -282,7 +282,7 @@ max_points  = 20
 | 项目 | 内容 |
 |------|------|
 | **前置** | create_shm 后，config_path 参数为空 |
-| **操作** | `adjust_shm({config_path: ""})` |
+| **操作** | `adjust_shm({instance_id, config_path: ""})` |
 | **预期** | `CONFIG_PATH_MISSING` 错误 |
 
 ---

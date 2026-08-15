@@ -67,7 +67,7 @@ def _start_acquisition(
     config_path, _ = prepare_environment(_make_c4_config(instances), instance_id)
 
     sut = start_modbus_client()
-    resp = sut.call_tool("start", {"config_path": config_path})
+    resp = sut.call_tool("start", {"instance_id": instance_id, "config_path": config_path})
     _assert_mcp_success(resp)
     return sut, shm_path(instance_id)
 
@@ -95,7 +95,7 @@ class TestModbusAcquisition:
         start_modbus_client, isolated_shm,
     ):
         """TC1: fun=3, UINT16，value=0x1234。"""
-        instance_id = "fun12_tc1"
+        instance_id = "c4_fun12tc1"
 
         def build(port):
             return [
@@ -122,7 +122,7 @@ class TestModbusAcquisition:
         start_modbus_client, isolated_shm,
     ):
         """TC2: ABCD 字节序 → c4 hton=1, swap=2。"""
-        instance_id = "fun12_tc2"
+        instance_id = "c4_fun12tc2"
 
         def build(port):
             return [
@@ -149,7 +149,7 @@ class TestModbusAcquisition:
         start_modbus_client, isolated_shm,
     ):
         """TC3: BADC 字节序 → c4 hton=0, swap=2。"""
-        instance_id = "fun12_tc3"
+        instance_id = "c4_fun12tc3"
 
         def build(port):
             return [
@@ -176,7 +176,7 @@ class TestModbusAcquisition:
         start_modbus_client, isolated_shm,
     ):
         """TC4: CDAB 字节序 → c4 hton=1, swap=0。"""
-        instance_id = "fun12_tc4"
+        instance_id = "c4_fun12tc4"
 
         def build(port):
             return [
@@ -203,7 +203,7 @@ class TestModbusAcquisition:
         start_modbus_client, isolated_shm,
     ):
         """TC5: DCBA 字节序 → c4 hton=0, swap=0。"""
-        instance_id = "fun12_tc5"
+        instance_id = "c4_fun12tc5"
 
         def build(port):
             return [
@@ -230,7 +230,7 @@ class TestModbusAcquisition:
         start_modbus_client, isolated_shm,
     ):
         """TC6: 3 个 point 覆盖 INT32/UINT32/FLOAT32（ABCD 字节序）。"""
-        instance_id = "fun12_tc6"
+        instance_id = "c4_fun12tc6"
 
         def build(port):
             return [
@@ -271,7 +271,7 @@ class TestModbusAcquisition:
         start_modbus_client, isolated_shm,
     ):
         """TC7: fun=1, BIT，value=1。"""
-        instance_id = "fun12_tc7"
+        instance_id = "c4_fun12tc7"
 
         def build(port):
             return [
@@ -297,7 +297,7 @@ class TestModbusAcquisition:
         start_modbus_client, isolated_shm,
     ):
         """TC8: fun=2, BOOLEAN，value=0。"""
-        instance_id = "fun12_tc8"
+        instance_id = "c4_fun12tc8"
 
         def build(port):
             return [
@@ -323,7 +323,7 @@ class TestModbusAcquisition:
         start_modbus_client, isolated_shm,
     ):
         """TC9: fun=4, UINT16，value=0xBEEF。"""
-        instance_id = "fun12_tc9"
+        instance_id = "c4_fun12tc9"
 
         def build(port):
             return [
@@ -350,7 +350,7 @@ class TestModbusAcquisition:
         start_modbus_client, isolated_shm,
     ):
         """TC10: 相邻 FLOAT32 point（addr 1000/1002）触发批处理合并，数据仍正确。"""
-        instance_id = "fun12_tc10"
+        instance_id = "c4_fun12tc10"
 
         def build(port):
             return [
@@ -384,7 +384,7 @@ class TestModbusAcquisition:
         start_modbus_client, isolated_shm,
     ):
         """TC11: 不相邻 UINT16 point（addr 1000/2000）拆分批次，数据仍正确。"""
-        instance_id = "fun12_tc11"
+        instance_id = "c4_fun12tc11"
 
         def build(port):
             return [
@@ -418,7 +418,7 @@ class TestModbusAcquisition:
         start_modbus_client, isolated_shm,
     ):
         """TC12: modbusd 停止后 write_seq 停止递增，重启后恢复。"""
-        instance_id = "fun12_tc12"
+        instance_id = "c4_fun12tc12"
         isolated_shm(instance_id)
         port = _free_port()
 
@@ -439,7 +439,7 @@ class TestModbusAcquisition:
         config_path, _ = prepare_environment(_make_c4_config(c4_insts), instance_id)
 
         sut = start_modbus_client()
-        resp = sut.call_tool("start", {"config_path": config_path})
+        resp = sut.call_tool("start", {"instance_id": instance_id, "config_path": config_path})
         _assert_mcp_success(resp)
 
         sp = shm_path(instance_id)
@@ -479,7 +479,7 @@ class TestModbusAcquisition:
         start_modbus_client, isolated_shm,
     ):
         """TC13: timer 周期轮询，改写 Redis 值后 shm value 覆盖为新值。"""
-        instance_id = "fun12_tc13"
+        instance_id = "c4_fun12tc13"
 
         def build(port):
             return [

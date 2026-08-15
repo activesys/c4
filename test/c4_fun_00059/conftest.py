@@ -502,7 +502,7 @@ def isolated_shm():
     def register(instance_id: str) -> None:
         registered.append(instance_id)
         try:
-            shm_unlink(f"/c4_{instance_id}")
+            shm_unlink(f"/{instance_id}")
         except OSError:
             pass
 
@@ -510,7 +510,7 @@ def isolated_shm():
 
     for iid in registered:
         try:
-            shm_unlink(f"/c4_{iid}")
+            shm_unlink(f"/{iid}")
         except OSError:
             pass
 
@@ -543,8 +543,7 @@ def prepare_environment(shm_mgr_client):
 
         # 步骤 3: adjust_shm — 分配 shm_id 给所有 point
         resp = shm_mgr_client.call_tool(
-            "adjust_shm",
-            {"config_path": config_path},
+            "adjust_shm", {"instance_id": instance_id, "config_path": config_path},
         )
         if resp["result"].get("isError", False):
             raise RuntimeError(

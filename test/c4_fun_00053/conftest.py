@@ -187,7 +187,7 @@ def isolated_shm(mcp):
     def register(instance_id: str) -> None:
         registered.append(instance_id)
         try:
-            shm_unlink(f"/c4_{instance_id}")
+            shm_unlink(f"/{instance_id}")
         except OSError:
             pass
 
@@ -195,6 +195,6 @@ def isolated_shm(mcp):
 
     for iid in registered:
         try:
-            shm_unlink(f"/c4_{iid}")
+            shm_unlink(f"/{iid}")
         except OSError:
             pass

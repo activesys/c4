@@ -64,7 +64,7 @@ Go 编译的 `c4_asfp2_server` 二进制，通过 Python `subprocess.Popen` 启�
 
 ### 2.4 共享内存验证
 
-Python 通过 `os.open("/dev/shm/c4_{id}", os.O_RDONLY)` + `mmap` 直接读取共享内存，
+Python 通过 `os.open("/dev/shm/{instance_id}", os.O_RDONLY)` + `mmap` 直接读取共享内存，
 用 `struct.unpack` 按偏移解析 Header 字段。
 
 ### 2.5 端口监听验证
@@ -181,7 +181,7 @@ Python 通过 `socket.create_connection(("127.0.0.1", port), timeout=1)` 验证�
 ### TC9: config_path 缺失 → CONFIG_PATH_MISSING
 
 - **前置**：启动 `c4_asfp2_server`，MCP initialize
-- **操作**：调用 `start`，不提供 `config_path` 参数（`arguments: {}`）
+- **操作**：调用 `start`，提供 `instance_id` 但不提供 `config_path` 参数（`arguments: {"instance_id": "c4_testtc9"}`）
 - **预期**：返回 `isError: true`，错误码 `CONFIG_PATH_MISSING`
 
 ### TC10: 配置文件格式错误 → CONFIG_PARSE_ERROR
@@ -210,7 +210,7 @@ Python 通过 `socket.create_connection(("127.0.0.1", port), timeout=1)` 验证�
 
 - 每行一个 JSON 对象（行分隔），不是流式 JSON
 - `initialize` 握手：Python 发送 `initialize` → 读取 SUT 的 `initialize` 响应 → 发送 `initialized` 通知
-- `start` 的 `config_path` 参数通过 `tools/call` 的 `arguments` 字段传递（绝对路径字符串），
+- `start` 的 `instance_id` 和 `config_path` 参数通过 `tools/call` 的 `arguments` 字段传递（绝对路径字符串），
   SUT 直接读取该路径指向的配置文件，不再通过 `roots/list` 获取配置路径
 
 ### 5.3 端口冲突处理
@@ -223,7 +223,7 @@ TC6 需要确保端口在测试前未被占用。建议 conftest.py 的 `isolate
 
 - Python 通过 `mmap` 直接读写共享内存进行验证
 - 修改 Header magic（TC8）：`mmap[0:4] = struct.pack(">I", 0xDEADBEEF)`
-- 路径：`/dev/shm/c4_{instance_id}`
+- 路径：`/dev/shm/{instance_id}`
 - 测试结束后必须 `shm_unlink`，建议在 fixture teardown 中清理
 
 ### 5.5 SUT 编译
@@ -233,7 +233,7 @@ TC6 需要确保端口在测试前未被占用。建议 conftest.py 的 `isolate
 
 ### 5.6 隔离性
 
-- 每个测试用例使用独立的 `instance_id`（如 `test_tc1`、`test_tc2`），
+- 每个测试用例使用独立的 `instance_id`（如 `c4_testtc1`、`c4_testtc2`），
   确保共享内存路径不冲突
 - 每个测试用例使用独立端口，避免 TC2 与 TC1 的 9000 端口冲突
 - fixture teardown 中清理共享内存、关闭 SUT 进程、删除临时配置文件

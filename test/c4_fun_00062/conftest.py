@@ -339,12 +339,12 @@ def wait_write_seq_advanced(
     raise RuntimeError(f"write_seq did not advance within {timeout}s")
 
 
-def _run_adjust_shm(config_path: str) -> None:
+def _run_adjust_shm(config_path: str, instance_id: str) -> None:
     """启动独立 c4_shm_manager → adjust_shm → 关闭（供 Stop-Start 协议二次调整）。"""
     binary = _find_shm_manager_binary()
     client = McpClient(binary)
     try:
-        resp = client.call_tool("adjust_shm", {"config_path": config_path})
+        resp = client.call_tool("adjust_shm", {"instance_id": instance_id, "config_path": config_path})
         if resp["result"].get("isError", False):
             raise RuntimeError(
                 f"adjust_shm failed: {resp['result']['content'][0]['text']}"
@@ -589,7 +589,7 @@ def isolated_shm():
     def register(instance_id: str) -> None:
         registered.append(instance_id)
         try:
-            shm_unlink(f"/c4_{instance_id}")
+            shm_unlink(f"/{instance_id}")
         except OSError:
             pass
 
@@ -597,7 +597,7 @@ def isolated_shm():
 
     for iid in registered:
         try:
-            shm_unlink(f"/c4_{iid}")
+            shm_unlink(f"/{iid}")
         except OSError:
             pass
 
@@ -627,8 +627,7 @@ def prepare_environment(shm_mgr_client):
             )
 
         resp = shm_mgr_client.call_tool(
-            "adjust_shm",
-            {"config_path": config_path},
+            "adjust_shm", {"instance_id": instance_id, "config_path": config_path},
         )
         if resp["result"].get("isError", False):
             raise RuntimeError(

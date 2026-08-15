@@ -166,10 +166,10 @@ writer_points=2，max_points=4。pt_a → shm_id=1，pt_b → shm_id=2。
 - **操作**：调用 `start`
 - **预期**：`isError: true`，`CONFIG_PARSE_ERROR`
 
-### TC8: config_path 指向不存在的文件 → CONFIG_PATH_MISSING
+### TC8: config_path 缺失 → CONFIG_PATH_MISSING
 
 - **前置**：MCP initialize 完成
-- **操作**：调用 `start`，`config_path` 指向不存在的文件路径
+- **操作**：调用 `start`，提供 `instance_id` 但不提供 `config_path` 参数
 - **预期**：返回 `isError: true`，`CONFIG_PATH_MISSING`
 
 ### TC9: 共享内存不存在 → SHM_OPEN_FAILED

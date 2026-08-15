@@ -291,7 +291,7 @@ def test_tc1_equal_swap(mcp, isolated_shm):
 
     预期：point_count=10 不变，writer5 复用 writer3 的 block[5..7]。
     """
-    iid = f"tc1_{uuid.uuid4().hex[:8]}"
+    iid = f"c4_tc1{uuid.uuid4().hex[:8]}"
     config_path, temp_dir = _create_and_activate(mcp, isolated_shm, iid)
 
     try:
@@ -306,7 +306,7 @@ def test_tc1_equal_swap(mcp, isolated_shm):
         _write_config(config_path, cfg)
 
         # adjust_shm
-        resp = mcp.call_tool("adjust_shm", {"config_path": config_path})
+        resp = mcp.call_tool("adjust_shm", {"instance_id": iid, "config_path": config_path})
         _assert_mcp_success(resp)
 
         activate_blocks_from_config(shm_path(iid), config_path)
@@ -369,7 +369,7 @@ def test_tc2_net_increase(mcp, isolated_shm):
 
     预期：required_points=12 ≤ max=20，writer5 的 5 点从 [5..7]+[11..12] 分配。
     """
-    iid = f"tc2_{uuid.uuid4().hex[:8]}"
+    iid = f"c4_tc2{uuid.uuid4().hex[:8]}"
     config_path, temp_dir = _create_and_activate(mcp, isolated_shm, iid)
 
     try:
@@ -384,7 +384,7 @@ def test_tc2_net_increase(mcp, isolated_shm):
         ])
         _write_config(config_path, cfg)
 
-        resp = mcp.call_tool("adjust_shm", {"config_path": config_path})
+        resp = mcp.call_tool("adjust_shm", {"instance_id": iid, "config_path": config_path})
         _assert_mcp_success(resp)
 
         activate_blocks_from_config(shm_path(iid), config_path)
@@ -438,7 +438,7 @@ def test_tc3_net_decrease(mcp, isolated_shm):
 
     预期：required_points=8 ≤ max=20，writer5 的 4 点从 [5..8] 分配。
     """
-    iid = f"tc3_{uuid.uuid4().hex[:8]}"
+    iid = f"c4_tc3{uuid.uuid4().hex[:8]}"
     config_path, temp_dir = _create_and_activate(mcp, isolated_shm, iid)
 
     try:
@@ -453,7 +453,7 @@ def test_tc3_net_decrease(mcp, isolated_shm):
         ])
         _write_config(config_path, cfg)
 
-        resp = mcp.call_tool("adjust_shm", {"config_path": config_path})
+        resp = mcp.call_tool("adjust_shm", {"instance_id": iid, "config_path": config_path})
         _assert_mcp_success(resp)
 
         activate_blocks_from_config(shm_path(iid), config_path)
@@ -501,7 +501,7 @@ def test_tc4_mixed_expand(mcp, isolated_shm):
 
     预期：required_points=22 > max=20，扩容至 44。reserved++。
     """
-    iid = f"tc4_{uuid.uuid4().hex[:8]}"
+    iid = f"c4_tc4{uuid.uuid4().hex[:8]}"
     config_path, temp_dir = _create_and_activate(mcp, isolated_shm, iid)
 
     try:
@@ -512,7 +512,7 @@ def test_tc4_mixed_expand(mcp, isolated_shm):
         ])
         _write_config(config_path, cfg)
 
-        resp = mcp.call_tool("adjust_shm", {"config_path": config_path})
+        resp = mcp.call_tool("adjust_shm", {"instance_id": iid, "config_path": config_path})
         _assert_mcp_success(resp)
 
         activate_blocks_from_config(shm_path(iid), config_path)
@@ -567,7 +567,7 @@ def test_tc5_single_point_swap(mcp, isolated_shm):
 
     预期：block[2] 被回收后复用给 writer5。
     """
-    iid = f"tc5_{uuid.uuid4().hex[:8]}"
+    iid = f"c4_tc5{uuid.uuid4().hex[:8]}"
     config_path, temp_dir = _create_and_activate(mcp, isolated_shm, iid)
 
     try:
@@ -586,7 +586,7 @@ def test_tc5_single_point_swap(mcp, isolated_shm):
         ])
         _write_config(config_path, cfg)
 
-        resp = mcp.call_tool("adjust_shm", {"config_path": config_path})
+        resp = mcp.call_tool("adjust_shm", {"instance_id": iid, "config_path": config_path})
         _assert_mcp_success(resp)
 
         activate_blocks_from_config(shm_path(iid), config_path)
@@ -637,7 +637,7 @@ def test_tc6_full_reclaim(mcp, isolated_shm):
 
     预期：adjust_shm 返回 success（不返回 CONFIG_MISSING_SECTION）。
     """
-    iid = f"tc6_{uuid.uuid4().hex[:8]}"
+    iid = f"c4_tc6{uuid.uuid4().hex[:8]}"
     config_path, temp_dir = _create_and_activate(mcp, isolated_shm, iid)
 
     try:
@@ -648,7 +648,7 @@ def test_tc6_full_reclaim(mcp, isolated_shm):
             cfg.pop(w, None)
         _write_config(config_path, cfg)
 
-        resp = mcp.call_tool("adjust_shm", {"config_path": config_path})
+        resp = mcp.call_tool("adjust_shm", {"instance_id": iid, "config_path": config_path})
         _assert_mcp_success(resp)
 
         activate_blocks_from_config(shm_path(iid), config_path)
@@ -686,7 +686,7 @@ def test_tc7_reclaim_then_reallocate(mcp, isolated_shm):
 
     预期：writer5 的 5 点从 [1..5] 顺序分配。
     """
-    iid = f"tc7_{uuid.uuid4().hex[:8]}"
+    iid = f"c4_tc7{uuid.uuid4().hex[:8]}"
     config_path, temp_dir = _create_and_activate(mcp, isolated_shm, iid)
 
     try:
@@ -698,7 +698,7 @@ def test_tc7_reclaim_then_reallocate(mcp, isolated_shm):
             cfg.pop(w, None)
         _write_config(config_path, cfg)
 
-        resp = mcp.call_tool("adjust_shm", {"config_path": config_path})
+        resp = mcp.call_tool("adjust_shm", {"instance_id": iid, "config_path": config_path})
         _assert_mcp_success(resp)
 
         activate_blocks_from_config(shm_path(iid), config_path)
@@ -719,7 +719,7 @@ def test_tc7_reclaim_then_reallocate(mcp, isolated_shm):
         }]
         _write_config(config_path, cfg)
 
-        resp = mcp.call_tool("adjust_shm", {"config_path": config_path})
+        resp = mcp.call_tool("adjust_shm", {"instance_id": iid, "config_path": config_path})
         _assert_mcp_success(resp)
 
         activate_blocks_from_config(full_path, config_path)
@@ -759,7 +759,7 @@ def test_tc8_post_expand_mixed(mcp, isolated_shm):
     第一次：新增 writer5（15 点）→ 扩容至 max=50，point_count=25
     第二次：删除 writer3（3 点）+ 新增 writer6（8 点）
     """
-    iid = f"tc8_{uuid.uuid4().hex[:8]}"
+    iid = f"c4_tc8{uuid.uuid4().hex[:8]}"
     config_path, temp_dir = _create_and_activate(mcp, isolated_shm, iid)
 
     try:
@@ -771,7 +771,7 @@ def test_tc8_post_expand_mixed(mcp, isolated_shm):
         ])
         _write_config(config_path, cfg)
 
-        resp = mcp.call_tool("adjust_shm", {"config_path": config_path})
+        resp = mcp.call_tool("adjust_shm", {"instance_id": iid, "config_path": config_path})
         _assert_mcp_success(resp)
 
         activate_blocks_from_config(shm_path(iid), config_path)
@@ -800,7 +800,7 @@ def test_tc8_post_expand_mixed(mcp, isolated_shm):
         ])
         _write_config(config_path, cfg)
 
-        resp = mcp.call_tool("adjust_shm", {"config_path": config_path})
+        resp = mcp.call_tool("adjust_shm", {"instance_id": iid, "config_path": config_path})
         _assert_mcp_success(resp)
 
         activate_blocks_from_config(full_path, config_path)
@@ -846,7 +846,7 @@ def test_tc9_retained_points_unchanged(mcp, isolated_shm):
 
     验证每个被保留的 writer 逐点不变。
     """
-    iid = f"tc9_{uuid.uuid4().hex[:8]}"
+    iid = f"c4_tc9{uuid.uuid4().hex[:8]}"
     config_path, temp_dir = _create_and_activate(mcp, isolated_shm, iid)
 
     try:
@@ -863,7 +863,7 @@ def test_tc9_retained_points_unchanged(mcp, isolated_shm):
         ])
         _write_config(config_path, cfg)
 
-        resp = mcp.call_tool("adjust_shm", {"config_path": config_path})
+        resp = mcp.call_tool("adjust_shm", {"instance_id": iid, "config_path": config_path})
         _assert_mcp_success(resp)
 
         activate_blocks_from_config(shm_path(iid), config_path)
@@ -928,7 +928,7 @@ def test_tc10_block_integrity(mcp, isolated_shm):
 
     对所有 block[1..20] 逐块验证 magic、state。
     """
-    iid = f"tc10_{uuid.uuid4().hex[:8]}"
+    iid = f"c4_tc10{uuid.uuid4().hex[:8]}"
     config_path, temp_dir = _create_and_activate(mcp, isolated_shm, iid)
 
     try:
@@ -946,7 +946,7 @@ def test_tc10_block_integrity(mcp, isolated_shm):
         ])
         _write_config(config_path, cfg)
 
-        resp = mcp.call_tool("adjust_shm", {"config_path": config_path})
+        resp = mcp.call_tool("adjust_shm", {"instance_id": iid, "config_path": config_path})
         _assert_mcp_success(resp)
 
         activate_blocks_from_config(shm_path(iid), config_path)
@@ -981,7 +981,7 @@ def test_tc11_config_writeback(mcp, isolated_shm):
     验证配置回填：writer5 shm_ids 回填、已有 writer shm_ids 不变、
     writer3 已移除、无 shm_id=0 残留。
     """
-    iid = f"tc11_{uuid.uuid4().hex[:8]}"
+    iid = f"c4_tc11{uuid.uuid4().hex[:8]}"
     config_path, temp_dir = _create_and_activate(mcp, isolated_shm, iid)
 
     try:
@@ -998,7 +998,7 @@ def test_tc11_config_writeback(mcp, isolated_shm):
         ])
         _write_config(config_path, cfg)
 
-        resp = mcp.call_tool("adjust_shm", {"config_path": config_path})
+        resp = mcp.call_tool("adjust_shm", {"instance_id": iid, "config_path": config_path})
         _assert_mcp_success(resp)
 
         backfilled = _read_config(config_path)
@@ -1041,7 +1041,7 @@ def test_tc11_config_writeback(mcp, isolated_shm):
 @pytest.mark.timeout(30)
 def test_tc12_shm_not_created(mcp, isolated_shm):
     """TC12: 不调用 create_shm，直接 adjust_shm → SHM_NOT_CREATED。"""
-    iid = f"tc12_{uuid.uuid4().hex[:8]}"
+    iid = f"c4_tc12{uuid.uuid4().hex[:8]}"
     isolated_shm(iid)
     temp_dir = tempfile.mkdtemp(prefix="c4_test_")
     config_path = os.path.join(temp_dir, "config.json")
@@ -1050,7 +1050,7 @@ def test_tc12_shm_not_created(mcp, isolated_shm):
         cfg = build_initial_config()
         _write_config(config_path, cfg)
 
-        resp = mcp.call_tool("adjust_shm", {"config_path": config_path})
+        resp = mcp.call_tool("adjust_shm", {"instance_id": iid, "config_path": config_path})
         _assert_mcp_error(resp, "SHM_NOT_CREATED")
 
     finally:
@@ -1063,11 +1063,11 @@ def test_tc12_shm_not_created(mcp, isolated_shm):
 @pytest.mark.timeout(30)
 def test_tc13_config_path_missing(mcp, isolated_shm):
     """TC13: create_shm 后，adjust_shm 的 config_path 参数为空 → CONFIG_PATH_MISSING。"""
-    iid = f"tc13_{uuid.uuid4().hex[:8]}"
+    iid = f"c4_tc13{uuid.uuid4().hex[:8]}"
     config_path, temp_dir = _create_and_activate(mcp, isolated_shm, iid)
 
     try:
-        resp = mcp.call_tool("adjust_shm", {"config_path": ""})
+        resp = mcp.call_tool("adjust_shm", {"instance_id": iid, "config_path": ""})
         _assert_mcp_error(resp, "CONFIG_PATH_MISSING")
 
     finally:
@@ -1080,7 +1080,7 @@ def test_tc13_config_path_missing(mcp, isolated_shm):
 @pytest.mark.timeout(30)
 def test_tc14_config_missing_section(mcp, isolated_shm):
     """TC14: writer=[] 但 reader 非空 → CONFIG_MISSING_SECTION。"""
-    iid = f"tc14_{uuid.uuid4().hex[:8]}"
+    iid = f"c4_tc14{uuid.uuid4().hex[:8]}"
     config_path, temp_dir = _create_and_activate(mcp, isolated_shm, iid)
 
     try:
@@ -1091,7 +1091,7 @@ def test_tc14_config_missing_section(mcp, isolated_shm):
         # reader 保持非空（reader1 仍在）
         _write_config(config_path, cfg)
 
-        resp = mcp.call_tool("adjust_shm", {"config_path": config_path})
+        resp = mcp.call_tool("adjust_shm", {"instance_id": iid, "config_path": config_path})
         _assert_mcp_error(resp, "CONFIG_MISSING_SECTION")
 
     finally:
@@ -1108,7 +1108,7 @@ def test_tc15_duplicate_key(mcp, isolated_shm):
     key 格式: {device_id}.{point_id}
     writer1 有 w1.p1 → writer5 也创建 w1.p1 → 冲突。
     """
-    iid = f"tc15_{uuid.uuid4().hex[:8]}"
+    iid = f"c4_tc15{uuid.uuid4().hex[:8]}"
     config_path, temp_dir = _create_and_activate(mcp, isolated_shm, iid)
 
     try:
@@ -1120,7 +1120,7 @@ def test_tc15_duplicate_key(mcp, isolated_shm):
         ])
         _write_config(config_path, cfg)
 
-        resp = mcp.call_tool("adjust_shm", {"config_path": config_path})
+        resp = mcp.call_tool("adjust_shm", {"instance_id": iid, "config_path": config_path})
         _assert_mcp_error(resp, "DUPLICATE_KEY")
 
     finally:
@@ -1133,7 +1133,7 @@ def test_tc15_duplicate_key(mcp, isolated_shm):
 @pytest.mark.timeout(30)
 def test_tc16_unknown_reader_key(mcp, isolated_shm):
     """TC16: Reader 的 key 引用已被删除的 Writer point → UNKNOWN_READER_KEY。"""
-    iid = f"tc16_{uuid.uuid4().hex[:8]}"
+    iid = f"c4_tc16{uuid.uuid4().hex[:8]}"
     config_path, temp_dir = _create_and_activate(mcp, isolated_shm, iid)
 
     try:
@@ -1142,7 +1142,7 @@ def test_tc16_unknown_reader_key(mcp, isolated_shm):
         remove_writer_section(cfg, "writer1")
         _write_config(config_path, cfg)
 
-        resp = mcp.call_tool("adjust_shm", {"config_path": config_path})
+        resp = mcp.call_tool("adjust_shm", {"instance_id": iid, "config_path": config_path})
         _assert_mcp_error(resp, "UNKNOWN_READER_KEY")
 
     finally:

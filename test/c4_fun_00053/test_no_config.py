@@ -93,7 +93,7 @@ class TestNoConfigShmCreation:
 
     def test_tc1_no_config_path(self, mcp, isolated_shm):
         """TC1: 不传 config_path → 创建 100k 默认 shm。"""
-        iid = "test_tc1"
+        iid = "c4_testtc1"
         isolated_shm(iid)
 
         resp = mcp.call_tool(
@@ -108,7 +108,7 @@ class TestNoConfigShmCreation:
 
     def test_tc2_file_not_found(self, mcp, isolated_shm):
         """TC2: config_path 指向的文件不存在 → 100k 默认 shm。"""
-        iid = "test_tc2"
+        iid = "c4_testtc2"
         isolated_shm(iid)
 
         resp = mcp.call_tool(
@@ -123,7 +123,7 @@ class TestNoConfigShmCreation:
 
     def test_tc3_empty_json(self, mcp, isolated_shm):
         """TC3: 文件内容 {} → 100k 默认 shm，且原文件不被修改。"""
-        iid = "test_tc3"
+        iid = "c4_testtc3"
         isolated_shm(iid)
 
         # 创建临时空 JSON 文件
@@ -157,7 +157,7 @@ class TestNoConfigShmCreation:
 
     def test_tc4_duplicate_create(self, mcp, isolated_shm):
         """TC4: 同一 instance_id 创建两次 → 第二次返回 SHM_ALREADY_EXISTS。"""
-        iid = "test_tc4"
+        iid = "c4_testtc4"
         isolated_shm(iid)
 
         # 第一次创建 — 成功
@@ -178,7 +178,7 @@ class TestNoConfigShmCreation:
 
     def test_tc5_header_validation(self, mcp, isolated_shm):
         """TC5: 创建后读取 shm Header，逐字段校验 + 文件大小。"""
-        iid = "test_tc5"
+        iid = "c4_testtc5"
         isolated_shm(iid)
 
         mcp.call_tool(
@@ -191,7 +191,7 @@ class TestNoConfigShmCreation:
 
     def test_tc6_block_initialization(self, mcp, isolated_shm):
         """TC6: 抽检 shm_id=1, 50000, 100000 三个 Data Block。"""
-        iid = "test_tc6"
+        iid = "c4_testtc6"
         isolated_shm(iid)
 
         mcp.call_tool(
@@ -208,7 +208,7 @@ class TestNoConfigShmCreation:
 
     def test_tc7_query_status(self, mcp, isolated_shm):
         """TC7: create_shm 后调用 query_status，验证返回值一致性。"""
-        iid = "test_tc7"
+        iid = "c4_testtc7"
         isolated_shm(iid)
 
         mcp.call_tool(
@@ -235,7 +235,7 @@ class TestNoConfigShmCreation:
 
     def test_tc8_empty_config_path(self, mcp, isolated_shm):
         """TC8: config_path 为空字符串 → 创建 100k 默认 shm。"""
-        iid = "test_tc8"
+        iid = "c4_testtc8"
         isolated_shm(iid)
 
         resp = mcp.call_tool(

@@ -146,15 +146,14 @@ class TestAsfp2ServerStart:
         self, prepare_environment, start_asfp2_server, isolated_shm
     ):
         """TC1: 配置 1 个 Server 实例、port=9000、2 个 point — 启动成功，端口监听。"""
-        iid = "test_tc1"
+        iid = "c4_testtc1"
         isolated_shm(iid)
 
         config = _make_single_instance_config(iid, port=9000, num_points=2)
         config_path, _ = prepare_environment(config, iid)
 
         resp = start_asfp2_server.call_tool(
-            "start",
-            {"config_path": config_path},
+            "start", {"instance_id": iid, "config_path": config_path},
         )
         assert resp["result"].get("isError", False) is False, (
             f"start failed: {resp}"
@@ -170,7 +169,7 @@ class TestAsfp2ServerStart:
         self, prepare_environment, start_asfp2_server, isolated_shm
     ):
         """TC2: 配置 3 个 Server 实例，端口 9100/9101/9102 — 全部启动成功，端口监听。"""
-        iid = "test_tc2"
+        iid = "c4_testtc2"
         isolated_shm(iid)
 
         instance_infos = [
@@ -182,8 +181,7 @@ class TestAsfp2ServerStart:
         config_path, _ = prepare_environment(config, iid)
 
         resp = start_asfp2_server.call_tool(
-            "start",
-            {"config_path": config_path},
+            "start", {"instance_id": iid, "config_path": config_path},
         )
         assert resp["result"].get("isError", False) is False, (
             f"start failed: {resp}"
@@ -201,15 +199,14 @@ class TestAsfp2ServerStart:
         self, prepare_environment, start_asfp2_server, isolated_shm
     ):
         """TC3: 空实例列表 — start 成功，无端口监听。"""
-        iid = "test_tc3"
+        iid = "c4_testtc3"
         isolated_shm(iid)
 
         config = _make_empty_instance_config()
         config_path, _ = prepare_environment(config, iid)
 
         resp = start_asfp2_server.call_tool(
-            "start",
-            {"config_path": config_path},
+            "start", {"instance_id": iid, "config_path": config_path},
         )
         assert resp["result"].get("isError", False) is False, (
             f"start failed: {resp}"
@@ -228,7 +225,7 @@ class TestAsfp2ServerStart:
         self, prepare_environment, start_asfp2_server, isolated_shm
     ):
         """TC4: SELF-CONTAINED — 首次 start 成功，再次 start 返回     ALREADY_RUNNING。"""
-        iid = "test_tc4"
+        iid = "c4_testtc4"
         isolated_shm(iid)
 
         config = _make_single_instance_config(iid, port=9080, num_points=1)
@@ -236,16 +233,14 @@ class TestAsfp2ServerStart:
 
         # 首次 start
         resp1 = start_asfp2_server.call_tool(
-            "start",
-            {"config_path": config_path},
+            "start", {"instance_id": iid, "config_path": config_path},
         )
         assert resp1["result"].get("isError", False) is False
         assert resp1["result"]["content"][0]["text"] == "success"
 
         # 再次 start — 应返回     ALREADY_RUNNING
         resp2 = start_asfp2_server.call_tool(
-            "start",
-            {"config_path": config_path},
+            "start", {"instance_id": iid, "config_path": config_path},
         )
         _assert_mcp_error(resp2, "ALREADY_RUNNING")
 
@@ -265,7 +260,7 @@ class TestAsfp2ServerStart:
         self, prepare_environment, start_asfp2_server, isolated_shm
     ):
         """TC6: 2 个实例同一端口 9200 — PORT_CONFLICT，端口未被监听。"""
-        iid = "test_tc6"
+        iid = "c4_testtc6"
         isolated_shm(iid)
 
         # 两个实例使用同一端口
@@ -276,8 +271,7 @@ class TestAsfp2ServerStart:
         config_path, _ = prepare_environment(config, iid)
 
         resp = start_asfp2_server.call_tool(
-            "start",
-            {"config_path": config_path},
+            "start", {"instance_id": iid, "config_path": config_path},
         )
         _assert_mcp_error(resp, "PORT_CONFLICT")
 
@@ -292,7 +286,7 @@ class TestAsfp2ServerStart:
         self, start_asfp2_server, isolated_shm
     ):
         """TC7: 未创建共享内存 — start 返回 SHM_OPEN_FAILED。"""
-        iid = "test_tc7"
+        iid = "c4_testtc7"
         isolated_shm(iid)
 
         # 创建正常配置文件但不创建 shm
@@ -301,8 +295,7 @@ class TestAsfp2ServerStart:
 
         try:
             resp = start_asfp2_server.call_tool(
-                "start",
-                {"config_path": config_path},
+                "start", {"instance_id": iid, "config_path": config_path},
             )
             _assert_mcp_error(resp, "SHM_OPEN_FAILED")
         finally:
@@ -314,7 +307,7 @@ class TestAsfp2ServerStart:
         self, prepare_environment, start_asfp2_server, isolated_shm
     ):
         """TC8: 修改 Header magic 为 0xDEADBEEF — start 返回 SHM_CORRUPTED。"""
-        iid = "test_tc8"
+        iid = "c4_testtc8"
         isolated_shm(iid)
 
         config = _make_single_instance_config(iid, port=9060, num_points=1)
@@ -331,8 +324,7 @@ class TestAsfp2ServerStart:
             os.close(fd)
 
         resp = start_asfp2_server.call_tool(
-            "start",
-            {"config_path": config_path},
+            "start", {"instance_id": iid, "config_path": config_path},
         )
         _assert_mcp_error(resp, "SHM_CORRUPTED")
 
@@ -342,7 +334,7 @@ class TestAsfp2ServerStart:
         """TC9: start 未提供 config_path — 返回 CONFIG_PATH_MISSING。"""
         resp = start_asfp2_server.call_tool(
             "start",
-            {},
+            {"instance_id": "c4_testtc9"},
         )
         _assert_mcp_error(resp, "CONFIG_PATH_MISSING")
 
@@ -365,7 +357,7 @@ class TestAsfp2ServerStart:
         (a) JSON 语法错误
         (b) 合法 JSON 但缺少 c4_asfp2_server key
         """
-        iid = f"test_tc10_{abs(hash(bad_config_content)) % 100000}"
+        iid = f"c4_testtc10{abs(hash(bad_config_content)) % 100000}"
         isolated_shm(iid)
 
         # 先创建 shm（无配置文件 → 默认 10 万点）
@@ -386,8 +378,7 @@ class TestAsfp2ServerStart:
 
         try:
             resp = start_asfp2_server.call_tool(
-                "start",
-                {"config_path": bad_config_path},
+                "start", {"instance_id": iid, "config_path": bad_config_path},
             )
             _assert_mcp_error(resp, "CONFIG_PARSE_ERROR")
         finally:

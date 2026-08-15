@@ -95,13 +95,13 @@ class TestStopRestart:
         start_modbus_client, isolated_shm,
     ):
         """TC1: stop 在运行状态返回 success，write_seq 停止递增。"""
-        instance_id = "fun63_tc1"
+        instance_id = "c4_fun63tc1"
         sut, config_path, sp, _ = _setup_standard(
             start_modbusd, write_redis, prepare_environment, start_modbus_client,
             isolated_shm, instance_id,
         )
 
-        _assert_mcp_success(sut.call_tool("start", {"config_path": config_path}))
+        _assert_mcp_success(sut.call_tool("start", {"instance_id": instance_id, "config_path": config_path}))
 
         seq0 = read_shm_block(sp, 1)["write_seq"]
         wait_write_seq_advanced(sp, 1, seq0)
@@ -128,15 +128,15 @@ class TestStopRestart:
         start_modbus_client, isolated_shm,
     ):
         """TC3: start 在已运行状态返回 ALREADY_RUNNING。"""
-        instance_id = "fun63_tc3"
+        instance_id = "c4_fun63tc3"
         sut, config_path, sp, _ = _setup_standard(
             start_modbusd, write_redis, prepare_environment, start_modbus_client,
             isolated_shm, instance_id,
         )
 
-        _assert_mcp_success(sut.call_tool("start", {"config_path": config_path}))
+        _assert_mcp_success(sut.call_tool("start", {"instance_id": instance_id, "config_path": config_path}))
         _assert_mcp_error(
-            sut.call_tool("start", {"config_path": config_path}), "ALREADY_RUNNING"
+            sut.call_tool("start", {"instance_id": instance_id, "config_path": config_path}), "ALREADY_RUNNING"
         )
 
     # ── TC4: 简单重启（stop → start，无配置变更）──────────
@@ -146,15 +146,15 @@ class TestStopRestart:
         start_modbus_client, isolated_shm,
     ):
         """TC4: stop → start 后数据流恢复。"""
-        instance_id = "fun63_tc4"
+        instance_id = "c4_fun63tc4"
         sut, config_path, sp, _ = _setup_standard(
             start_modbusd, write_redis, prepare_environment, start_modbus_client,
             isolated_shm, instance_id,
         )
 
-        _assert_mcp_success(sut.call_tool("start", {"config_path": config_path}))
+        _assert_mcp_success(sut.call_tool("start", {"instance_id": instance_id, "config_path": config_path}))
         _assert_mcp_success(sut.call_tool("stop", {}))
-        _assert_mcp_success(sut.call_tool("start", {"config_path": config_path}))
+        _assert_mcp_success(sut.call_tool("start", {"instance_id": instance_id, "config_path": config_path}))
 
         seq_before = read_shm_block(sp, 1)["write_seq"]
         wait_write_seq_advanced(sp, 1, seq_before)
@@ -166,18 +166,18 @@ class TestStopRestart:
         start_modbus_client, isolated_shm,
     ):
         """TC5: stop → adjust_shm → start 三步全链路正确。"""
-        instance_id = "fun63_tc5"
+        instance_id = "c4_fun63tc5"
         sut, config_path, sp, _ = _setup_standard(
             start_modbusd, write_redis, prepare_environment, start_modbus_client,
             isolated_shm, instance_id,
         )
 
-        _assert_mcp_success(sut.call_tool("start", {"config_path": config_path}))
+        _assert_mcp_success(sut.call_tool("start", {"instance_id": instance_id, "config_path": config_path}))
         _assert_mcp_success(sut.call_tool("stop", {}))
 
-        _run_adjust_shm(config_path)
+        _run_adjust_shm(config_path, instance_id)
 
-        _assert_mcp_success(sut.call_tool("start", {"config_path": config_path}))
+        _assert_mcp_success(sut.call_tool("start", {"instance_id": instance_id, "config_path": config_path}))
 
         seq_before = read_shm_block(sp, 1)["write_seq"]
         wait_write_seq_advanced(sp, 1, seq_before)
@@ -189,17 +189,17 @@ class TestStopRestart:
         start_modbus_client, isolated_shm,
     ):
         """TC6: 三轮 stop/start 循环，每次重启后轮询均恢复。"""
-        instance_id = "fun63_tc6"
+        instance_id = "c4_fun63tc6"
         sut, config_path, sp, _ = _setup_standard(
             start_modbusd, write_redis, prepare_environment, start_modbus_client,
             isolated_shm, instance_id,
         )
 
-        _assert_mcp_success(sut.call_tool("start", {"config_path": config_path}))
+        _assert_mcp_success(sut.call_tool("start", {"instance_id": instance_id, "config_path": config_path}))
 
         for _ in range(3):
             _assert_mcp_success(sut.call_tool("stop", {}))
-            _assert_mcp_success(sut.call_tool("start", {"config_path": config_path}))
+            _assert_mcp_success(sut.call_tool("start", {"instance_id": instance_id, "config_path": config_path}))
             seq_before = read_shm_block(sp, 1)["write_seq"]
             wait_write_seq_advanced(sp, 1, seq_before)
 
@@ -210,13 +210,13 @@ class TestStopRestart:
         start_modbus_client, isolated_shm,
     ):
         """TC7: 连续两次 stop 均返回 success（幂等）。"""
-        instance_id = "fun63_tc7"
+        instance_id = "c4_fun63tc7"
         sut, config_path, sp, _ = _setup_standard(
             start_modbusd, write_redis, prepare_environment, start_modbus_client,
             isolated_shm, instance_id,
         )
 
-        _assert_mcp_success(sut.call_tool("start", {"config_path": config_path}))
+        _assert_mcp_success(sut.call_tool("start", {"instance_id": instance_id, "config_path": config_path}))
         _assert_mcp_success(sut.call_tool("stop", {}))
         _assert_mcp_success(sut.call_tool("stop", {}))
 
@@ -227,13 +227,13 @@ class TestStopRestart:
         start_modbus_client, isolated_shm,
     ):
         """TC8: 重启时新端口 + 新 point 均生效。"""
-        instance_id = "fun63_tc8"
+        instance_id = "c4_fun63tc8"
         sut, config_path, sp, port = _setup_standard(
             start_modbusd, write_redis, prepare_environment, start_modbus_client,
             isolated_shm, instance_id,
         )
 
-        _assert_mcp_success(sut.call_tool("start", {"config_path": config_path}))
+        _assert_mcp_success(sut.call_tool("start", {"instance_id": instance_id, "config_path": config_path}))
         _assert_mcp_success(sut.call_tool("stop", {}))
 
         port2 = _free_port()
@@ -260,7 +260,7 @@ class TestStopRestart:
         ]
         new_config_path = _write_config_file(_make_c4_config(c4_insts2))
 
-        _run_adjust_shm(new_config_path)
+        _run_adjust_shm(new_config_path, instance_id)
 
         with open(new_config_path, "r") as f:
             new_cfg = json.load(f)
@@ -270,7 +270,7 @@ class TestStopRestart:
             if pt["addr"] == 2000
         )
 
-        _assert_mcp_success(sut.call_tool("start", {"config_path": new_config_path}))
+        _assert_mcp_success(sut.call_tool("start", {"instance_id": instance_id, "config_path": new_config_path}))
 
         for sid in (1, 2, new_shm_id):
             seq_before = read_shm_block(sp, sid)["write_seq"]
@@ -283,29 +283,29 @@ class TestStopRestart:
         start_modbus_client, isolated_shm,
     ):
         """TC9: CONNECT_FAILED 后修正配置重试成功。"""
-        instance_id = "fun63_tc9"
+        instance_id = "c4_fun63tc9"
         sut, config_path, sp, port = _setup_standard(
             start_modbusd, write_redis, prepare_environment, start_modbus_client,
             isolated_shm, instance_id,
         )
 
-        _assert_mcp_success(sut.call_tool("start", {"config_path": config_path}))
+        _assert_mcp_success(sut.call_tool("start", {"instance_id": instance_id, "config_path": config_path}))
         _assert_mcp_success(sut.call_tool("stop", {}))
 
         unreachable_path = _write_config_file(
             _make_c4_config(_standard_c4_instances(502, ip="192.0.2.1", t0=2))
         )
-        _run_adjust_shm(unreachable_path)
+        _run_adjust_shm(unreachable_path, instance_id)
         _assert_mcp_error(
-            sut.call_tool("start", {"config_path": unreachable_path}),
+            sut.call_tool("start", {"instance_id": instance_id, "config_path": unreachable_path}),
             "CONNECT_FAILED",
         )
 
         recover_path = _write_config_file(
             _make_c4_config(_standard_c4_instances(port))
         )
-        _run_adjust_shm(recover_path)
-        _assert_mcp_success(sut.call_tool("start", {"config_path": recover_path}))
+        _run_adjust_shm(recover_path, instance_id)
+        _assert_mcp_success(sut.call_tool("start", {"instance_id": instance_id, "config_path": recover_path}))
 
         seq_before = read_shm_block(sp, 1)["write_seq"]
         wait_write_seq_advanced(sp, 1, seq_before)

@@ -432,7 +432,7 @@ def isolated_shm():
     def register(instance_id: str) -> None:
         registered.append(instance_id)
         try:
-            shm_unlink(f"/c4_{instance_id}")
+            shm_unlink(f"/{instance_id}")
         except OSError:
             pass
 
@@ -440,7 +440,7 @@ def isolated_shm():
 
     for iid in registered:
         try:
-            shm_unlink(f"/c4_{iid}")
+            shm_unlink(f"/{iid}")
         except OSError:
             pass
 
@@ -482,8 +482,7 @@ def prepare_environment(shm_mgr_client):
 
         # adjust_shm
         resp = shm_mgr_client.call_tool(
-            "adjust_shm",
-            {"config_path": config_path},
+            "adjust_shm", {"instance_id": instance_id, "config_path": config_path},
         )
         if resp["result"].get("isError", False):
             raise RuntimeError(
@@ -508,15 +507,15 @@ def prepare_environment(shm_mgr_client):
 @pytest.fixture
 def start_asfp2_client():
     """
-    Function 级 fixture — 返回工厂函数 (config_path) → McpClient。
+    Function 级 fixture — 返回工厂函数 (config_path, instance_id) → McpClient。
 
     内部完成：启动 c4_asfp2_client → MCP initialize → list_tools 验证 →
-    调用 start 工具（config_path 参数）。teardown 关闭所有创建的 client。
+    调用 start 工具（instance_id + config_path 参数）。teardown 关闭所有创建的 client。
     """
     binary = _find_asfp2_client_binary()
     clients: list[McpClient] = []
 
-    def _start(config_path: str) -> McpClient:
+    def _start(config_path: str, instance_id: str) -> McpClient:
         client = McpClient(binary)
 
         # 验证工具注册
@@ -536,8 +535,7 @@ def start_asfp2_client():
 
         # 调用 start — 配置路径通过 config_path 参数传递
         resp = client.call_tool(
-            "start",
-            {"config_path": config_path},
+            "start", {"instance_id": instance_id, "config_path": config_path},
         )
         _assert_mcp_success(resp)
 
@@ -556,7 +554,7 @@ def start_asfp2_client():
 # ──────────────────────────────────────────────
 
 
-def _make_standard_config(instance_id: str = "test_stop_restart"):
+def _make_standard_config(instance_id: str = "c4_teststoprestart"):
     """§3.1 标准配置：mock_writer + 单客户端 port=9900，2 points。
 
     c4_modbus_client 为 mock 写者，c4_asfp2_client 为被测读端。
@@ -607,7 +605,7 @@ def _make_standard_config(instance_id: str = "test_stop_restart"):
     }
 
 
-def _make_changed_config(instance_id: str = "test_changed"):
+def _make_changed_config(instance_id: str = "c4_testchanged"):
     """§3.2 变更后配置：ip=127.0.0.2，port=9901，新增 point（addr=2000）。"""
     return {
         "c4_shm_manager": {
@@ -655,7 +653,7 @@ def _make_changed_config(instance_id: str = "test_changed"):
     }
 
 
-def _make_unreachable_config(instance_id: str = "test_unreachable"):
+def _make_unreachable_config(instance_id: str = "c4_testunreachable"):
     """不可达目标配置：ip=192.0.2.1（TEST-NET-1），port=9999。"""
     return {
         "c4_shm_manager": {
@@ -756,28 +754,26 @@ def _make_tc10_config(instance_id: str, inject_port: int, target_port: int):
 # ──────────────────────────────────────────────
 
 
-def _run_adjust_shm(config_path: str, instance_id: Optional[str] = None):
+def _run_adjust_shm(config_path: str, instance_id: str):
     """
     启动独立 c4_shm_manager 子进程，MCP initialize，
-    必要时 create_shm，然后 adjust_shm，关闭进程。
+    create_shm，然后 adjust_shm，关闭进程。
 
     用于 TC 中 stop 后调整 SHM 布局再 start 的场景。
     """
     binary = _find_shm_manager_binary()
     client = McpClient(binary)
 
-    if instance_id is not None:
-        resp = client.call_tool(
-            "create_shm",
-            {"instance_id": instance_id, "config_path": config_path},
-        )
-        text = resp["result"]["content"][0]["text"]
-        if resp["result"].get("isError", False) and "ALREADY_EXISTS" not in text:
-            raise RuntimeError(f"create_shm failed: {text}")
+    resp = client.call_tool(
+        "create_shm",
+        {"instance_id": instance_id, "config_path": config_path},
+    )
+    text = resp["result"]["content"][0]["text"]
+    if resp["result"].get("isError", False) and "ALREADY_EXISTS" not in text:
+        raise RuntimeError(f"create_shm failed: {text}")
 
     resp = client.call_tool(
-        "adjust_shm",
-        {"config_path": config_path},
+        "adjust_shm", {"instance_id": instance_id, "config_path": config_path},
     )
     client.close()
 

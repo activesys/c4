@@ -127,7 +127,7 @@ class TestReceive:
     # ── TC1: 基本数据接收 — UINT16 ──
 
     def test_tc1_basic(self, prepare_environment, start_asfp2_server, isolated_shm):
-        iid = "test_tc1"
+        iid = "c4_testtc1"
         isolated_shm(iid)
 
         port = _next_free_port()
@@ -135,7 +135,7 @@ class TestReceive:
         config_path, iid = prepare_environment(config, iid)
 
         resp = start_asfp2_server.call_tool(
-            "start", {"config_path": config_path},
+            "start", {"instance_id": iid, "config_path": config_path},
         )
         assert resp["result"].get("isError", False) is False
         assert resp["result"]["content"][0]["text"] == "success"
@@ -155,7 +155,7 @@ class TestReceive:
     # ── TC2: 无属性优化 ──
 
     def test_tc2_no_attr(self, prepare_environment, start_asfp2_server, isolated_shm):
-        iid = "test_tc2"
+        iid = "c4_testtc2"
         isolated_shm(iid)
 
         port = _next_free_port()
@@ -163,7 +163,7 @@ class TestReceive:
         config_path, iid = prepare_environment(config, iid)
 
         resp = start_asfp2_server.call_tool(
-            "start", {"config_path": config_path},
+            "start", {"instance_id": iid, "config_path": config_path},
         )
         assert resp["result"].get("isError", False) is False
         assert resp["result"]["content"][0]["text"] == "success"
@@ -181,7 +181,7 @@ class TestReceive:
     # ── TC3: key_range — 多 key 连续发送 ──
 
     def test_tc3_multi_key(self, prepare_environment, start_asfp2_server, isolated_shm):
-        iid = "test_tc3"
+        iid = "c4_testtc3"
         isolated_shm(iid)
 
         port = _next_free_port()
@@ -189,7 +189,7 @@ class TestReceive:
         config_path, iid = prepare_environment(config, iid)
 
         resp = start_asfp2_server.call_tool(
-            "start", {"config_path": config_path},
+            "start", {"instance_id": iid, "config_path": config_path},
         )
         assert resp["result"].get("isError", False) is False
         assert resp["result"]["content"][0]["text"] == "success"
@@ -212,7 +212,7 @@ class TestReceive:
     # ── TC4: 变长类型过滤 — STRING 被丢弃 ──
 
     def test_tc4_string_filter(self, prepare_environment, start_asfp2_server, isolated_shm):
-        iid = "test_tc4"
+        iid = "c4_testtc4"
         isolated_shm(iid)
 
         port = _next_free_port()
@@ -220,7 +220,7 @@ class TestReceive:
         config_path, iid = prepare_environment(config, iid)
 
         resp = start_asfp2_server.call_tool(
-            "start", {"config_path": config_path},
+            "start", {"instance_id": iid, "config_path": config_path},
         )
         assert resp["result"].get("isError", False) is False
         assert resp["result"]["content"][0]["text"] == "success"
@@ -238,7 +238,7 @@ class TestReceive:
     # ── TC5: BOOLEAN 类型 ──
 
     def test_tc5_boolean(self, prepare_environment, start_asfp2_server, isolated_shm):
-        iid = "test_tc5"
+        iid = "c4_testtc5"
         isolated_shm(iid)
 
         port = _next_free_port()
@@ -246,7 +246,7 @@ class TestReceive:
         config_path, iid = prepare_environment(config, iid)
 
         resp = start_asfp2_server.call_tool(
-            "start", {"config_path": config_path},
+            "start", {"instance_id": iid, "config_path": config_path},
         )
         assert resp["result"].get("isError", False) is False
         assert resp["result"]["content"][0]["text"] == "success"
@@ -267,7 +267,7 @@ class TestReceive:
     # ── TC6: BIT 类型 ──
 
     def test_tc6_bit(self, prepare_environment, start_asfp2_server, isolated_shm):
-        iid = "test_tc6"
+        iid = "c4_testtc6"
         isolated_shm(iid)
 
         port = _next_free_port()
@@ -275,7 +275,7 @@ class TestReceive:
         config_path, iid = prepare_environment(config, iid)
 
         resp = start_asfp2_server.call_tool(
-            "start", {"config_path": config_path},
+            "start", {"instance_id": iid, "config_path": config_path},
         )
         assert resp["result"].get("isError", False) is False
         assert resp["result"]["content"][0]["text"] == "success"
@@ -296,7 +296,7 @@ class TestReceive:
     # ── TC7: FLOAT32 类型 ──
 
     def test_tc7_float32(self, prepare_environment, start_asfp2_server, isolated_shm):
-        iid = "test_tc7"
+        iid = "c4_testtc7"
         isolated_shm(iid)
 
         port = _next_free_port()
@@ -304,7 +304,7 @@ class TestReceive:
         config_path, iid = prepare_environment(config, iid)
 
         resp = start_asfp2_server.call_tool(
-            "start", {"config_path": config_path},
+            "start", {"instance_id": iid, "config_path": config_path},
         )
         assert resp["result"].get("isError", False) is False
         assert resp["result"]["content"][0]["text"] == "success"
@@ -323,7 +323,7 @@ class TestReceive:
     # ── TC8: v2.1.0 扩展格式 ──
 
     def test_tc8_v210(self, prepare_environment, start_asfp2_server, isolated_shm):
-        iid = "test_tc8"
+        iid = "c4_testtc8"
         isolated_shm(iid)
 
         port = _next_free_port()
@@ -331,7 +331,7 @@ class TestReceive:
         config_path, iid = prepare_environment(config, iid)
 
         resp = start_asfp2_server.call_tool(
-            "start", {"config_path": config_path},
+            "start", {"instance_id": iid, "config_path": config_path},
         )
         assert resp["result"].get("isError", False) is False
         assert resp["result"]["content"][0]["text"] == "success"
@@ -349,7 +349,7 @@ class TestReceive:
     # ── TC9: LARGE_DATA_BLOCK 类型 — 被过滤 ──
 
     def test_tc9_large_data_block(self, tmp_path, prepare_environment, start_asfp2_server, isolated_shm):
-        iid = "test_tc9"
+        iid = "c4_testtc9"
         isolated_shm(iid)
 
         port = _next_free_port()
@@ -361,7 +361,7 @@ class TestReceive:
         config_path, iid = prepare_environment(config, iid)
 
         resp = start_asfp2_server.call_tool(
-            "start", {"config_path": config_path},
+            "start", {"instance_id": iid, "config_path": config_path},
         )
         assert resp["result"].get("isError", False) is False
         assert resp["result"]["content"][0]["text"] == "success"
@@ -387,7 +387,7 @@ class TestReceive:
     # ── TC10: 多连接并发 ──
 
     def test_tc10_concurrent(self, prepare_environment, start_asfp2_server, isolated_shm):
-        iid = "test_tc10"
+        iid = "c4_testtc10"
         isolated_shm(iid)
 
         port = _next_free_port()
@@ -395,7 +395,7 @@ class TestReceive:
         config_path, iid = prepare_environment(config, iid)
 
         resp = start_asfp2_server.call_tool(
-            "start", {"config_path": config_path},
+            "start", {"instance_id": iid, "config_path": config_path},
         )
         assert resp["result"].get("isError", False) is False
         assert resp["result"]["content"][0]["text"] == "success"
@@ -448,7 +448,7 @@ class TestReceive:
 
     @pytest.mark.parametrize("dtype", [13, 14])
     def test_tc11_blob_bitstring(self, dtype, prepare_environment, start_asfp2_server, isolated_shm):
-        iid = f"test_tc11_{dtype}"
+        iid = f"c4_testtc11{dtype}"
         isolated_shm(iid)
 
         port = _next_free_port()
@@ -456,7 +456,7 @@ class TestReceive:
         config_path, iid = prepare_environment(config, iid)
 
         resp = start_asfp2_server.call_tool(
-            "start", {"config_path": config_path},
+            "start", {"instance_id": iid, "config_path": config_path},
         )
         assert resp["result"].get("isError", False) is False
         assert resp["result"]["content"][0]["text"] == "success"
@@ -474,7 +474,7 @@ class TestReceive:
     # ── TC12: UINT64 — 8 字节整型边界 ──
 
     def test_tc12_uint64(self, prepare_environment, start_asfp2_server, isolated_shm):
-        iid = "test_tc12"
+        iid = "c4_testtc12"
         isolated_shm(iid)
 
         port = _next_free_port()
@@ -482,7 +482,7 @@ class TestReceive:
         config_path, iid = prepare_environment(config, iid)
 
         resp = start_asfp2_server.call_tool(
-            "start", {"config_path": config_path},
+            "start", {"instance_id": iid, "config_path": config_path},
         )
         assert resp["result"].get("isError", False) is False
         assert resp["result"]["content"][0]["text"] == "success"
@@ -501,7 +501,7 @@ class TestReceive:
     # ── TC13: v2.1.1 整数类型 — 基本解析 ──
 
     def test_tc13_v211_uint16(self, prepare_environment, start_asfp2_server, isolated_shm):
-        iid = "test_tc13"
+        iid = "c4_testtc13"
         isolated_shm(iid)
 
         port = _next_free_port()
@@ -509,7 +509,7 @@ class TestReceive:
         config_path, iid = prepare_environment(config, iid)
 
         resp = start_asfp2_server.call_tool(
-            "start", {"config_path": config_path},
+            "start", {"instance_id": iid, "config_path": config_path},
         )
         assert resp["result"].get("isError", False) is False
         assert resp["result"]["content"][0]["text"] == "success"
@@ -527,7 +527,7 @@ class TestReceive:
     # ── TC14: v2.1.1 FLOAT32 网络序 ──
 
     def test_tc14_v211_float32(self, prepare_environment, start_asfp2_server, isolated_shm):
-        iid = "test_tc14"
+        iid = "c4_testtc14"
         isolated_shm(iid)
 
         port = _next_free_port()
@@ -535,7 +535,7 @@ class TestReceive:
         config_path, iid = prepare_environment(config, iid)
 
         resp = start_asfp2_server.call_tool(
-            "start", {"config_path": config_path},
+            "start", {"instance_id": iid, "config_path": config_path},
         )
         assert resp["result"].get("isError", False) is False
         assert resp["result"]["content"][0]["text"] == "success"
@@ -554,7 +554,7 @@ class TestReceive:
     # ── TC15: v2.1.0 FLOAT32 ──
 
     def test_tc15_v210_float32(self, prepare_environment, start_asfp2_server, isolated_shm):
-        iid = "test_tc15"
+        iid = "c4_testtc15"
         isolated_shm(iid)
 
         port = _next_free_port()
@@ -562,7 +562,7 @@ class TestReceive:
         config_path, iid = prepare_environment(config, iid)
 
         resp = start_asfp2_server.call_tool(
-            "start", {"config_path": config_path},
+            "start", {"instance_id": iid, "config_path": config_path},
         )
         assert resp["result"].get("isError", False) is False
         assert resp["result"]["content"][0]["text"] == "success"
@@ -598,7 +598,7 @@ def _create_shm_with_config(shm_mgr_client, config_dict, instance_id):
 
 
 def test_malformed_writer_not_array(shm_mgr_client, isolated_shm):
-    iid = "malformed_writer"
+    iid = "c4_malformedwriter"
     isolated_shm(iid)
     err = _create_shm_with_config(shm_mgr_client, {
         "c4_shm_manager": {"writer": ["c4_asfp2_server"], "reader": ["c4_asfp2_client"]},
@@ -609,7 +609,7 @@ def test_malformed_writer_not_array(shm_mgr_client, isolated_shm):
 
 
 def test_malformed_instance_not_object(shm_mgr_client, isolated_shm):
-    iid = "malformed_inst"
+    iid = "c4_malformedinst"
     isolated_shm(iid)
     err = _create_shm_with_config(shm_mgr_client, {
         "c4_shm_manager": {"writer": ["c4_asfp2_server"], "reader": ["c4_asfp2_client"]},
@@ -620,7 +620,7 @@ def test_malformed_instance_not_object(shm_mgr_client, isolated_shm):
 
 
 def test_malformed_point_not_object(shm_mgr_client, isolated_shm):
-    iid = "malformed_point"
+    iid = "c4_malformedpoint"
     isolated_shm(iid)
     err = _create_shm_with_config(shm_mgr_client, {
         "c4_shm_manager": {"writer": ["c4_asfp2_server"], "reader": ["c4_asfp2_client"]},

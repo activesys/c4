@@ -49,7 +49,7 @@ Go 编译的 `c4_asfp2_server` 二进制，通过 Python `subprocess.Popen` 启�
    → 启动 c4_shm_manager → create_shm → adjust_shm → 回填 shm_id
    → 关闭 c4_shm_manager → 返回 (config_path, instance_id)
 2. start_asfp2_server fixture 启动 c4_asfp2_server 子进程
-3. 测试用例调用 start_asfp2_server.call_tool("start", {"config_path": config_path})
+3. 测试用例调用 start_asfp2_server.call_tool("start", {"instance_id": ..., "config_path": config_path})
 4. 测试用例调用 start_asfp2_server.call_tool("stop", {})
 ```
 
@@ -201,7 +201,7 @@ def wait_port_released(port: int, timeout: float = 3.0, interval: float = 0.1):
 - **前置**：已按 §3.1 标准配置完成 prepare_environment，`start` 调用成功
 - **操作**：
   1. 调用 `stop` → 确认返回 `"success"`
-  2. 调用 `start`（传入同一 config_path 参数）
+  2. 调用 `start`（传入 instance_id 和同一 config_path 参数）
   3. `socket.create_connection(("127.0.0.1", 9000))` 确认端口重新监听 → 关闭连接
   4. 通过 `mmap` 读取 shm block shm_id=1（addr=1000）和 shm_id=2（addr=1001），
      记录 `write_seq` 为 `seq_before`
@@ -219,10 +219,10 @@ def wait_port_released(port: int, timeout: float = 3.0, interval: float = 0.1):
 - **前置**：已按 §3.1 标准配置完成 prepare_environment，`start` 调用成功
 - **操作**：
   1. 调用 `stop` → 确认返回 `"success"`
-  2. 启动 `c4_shm_manager`，MCP initialize，调用 `adjust_shm`（传入 config_path 参数）
+  2. 启动 `c4_shm_manager`，MCP initialize，调用 `adjust_shm`（传入 instance_id 和 config_path 参数）
      → 返回 `"success"`
   3. 关闭 `c4_shm_manager`
-  4. 调用 `start`（传入同一 config_path 参数）
+  4. 调用 `start`（传入 instance_id 和同一 config_path 参数）
   5. `socket.create_connection(("127.0.0.1", 9000))` 确认端口重新监听 → 关闭连接
    6. 通过 `mmap` 读取 shm block shm_id=1（addr=1000）和 shm_id=2（addr=1001），
      记录 `write_seq` 为 `seq_before`
@@ -261,7 +261,7 @@ def wait_port_released(port: int, timeout: float = 3.0, interval: float = 0.1):
   2. 准备端口冲突配置（§3.2）：两个实例均为 `port: 9000`，
      通过 `prepare_environment` 写入新的配置文件
   3. 启动 `c4_shm_manager` → `create_shm`（若需要）→ `adjust_shm` → 关闭
-   4. 调用 `start`，传入新 config_path 参数
+   4. 调用 `start`，传入 instance_id 和新 config_path 参数
 - **预期**：
   - `start` 返回 `isError: true`，`content[0].text` 以 `PORT_CONFLICT` 开头
 - **说明**：重启时的 `start` 仍需完整校验配置（包括端口唯一性），与首次启动行为一致。
@@ -286,7 +286,7 @@ def wait_port_released(port: int, timeout: float = 3.0, interval: float = 0.1):
   2. 修改配置：将 port 从 9000 改为 **9001**，保留原有 2 个 point（addr=1000,1001），
      新增一个 point（addr=2000, shm_id=0）。通过 `prepare_environment` 写入新配置文件
   3. 启动 `c4_shm_manager` → `adjust_shm` → 关闭（会为新 point 分配 shm_id，已有点 shm_id 不变）
-  4. 调用 `start`，传入新 config_path 参数
+  4. 调用 `start`，传入 instance_id 和新 config_path 参数
   5. 验证**端口 9001** 已监听（`socket.create_connection`）
   6. 验证**端口 9000** 已释放（`wait_port_released`）
   7. 验证**旧 point（addr=1000,1001）数据流**：
@@ -311,9 +311,9 @@ def wait_port_released(port: int, timeout: float = 3.0, interval: float = 0.1):
 - **操作**：
   1. 调用 `stop` → 确认返回 `"success"`
   2. 准备**端口冲突配置**（§3.2），通过 `prepare_environment` 写入 → `adjust_shm`
-  3. 调用 `start`（传入冲突 config_path 参数）→ **预期失败**，返回 `PORT_CONFLICT`
+  3. 调用 `start`（传入 instance_id 和冲突 config_path 参数）→ **预期失败**，返回 `PORT_CONFLICT`
   4. 准备**修正配置**（单实例，port=9000，1 point），通过 `prepare_environment` 写入 → `adjust_shm`
-   5. 再次调用 `start`（传入修正后 config_path 参数）
+   5. 再次调用 `start`（传入 instance_id 和修正后 config_path 参数）
   6. 验证端口 9000 已监听
 - **预期**：
   - 步骤 3 `start` 返回 `isError: true`，`PORT_CONFLICT`
@@ -357,7 +357,7 @@ addr=1001 → shm_id=2。TC4/TC5/TC6 均可依赖此分配验证数据流。
 - `prepare_environment` 和 `start_asfp2_server` 均为 function scope
 - 每个 TC 自包含完整的 start → 操作 → stop 生命周期
 - 不同 TC 之间无状态依赖，pytest 可任意排序
-- `prepare_environment` 的 instance_id 按 TC 独立命名（如 `test_tc1`、`test_tc8`）
+- `prepare_environment` 的 instance_id 按 TC 独立命名（如 `c4_testtc1`、`c4_testtc8`）
 
 ### 5.4 端口释放检测（轮询重试）
 
@@ -368,7 +368,7 @@ conftest.py 应提供 `wait_port_released(port, timeout=3.0, interval=0.1)` help
 
 TC5 和 TC7 需要在 `stop` 和 `start` 之间调用 `c4_shm_manager.adjust_shm`。
 应单独启动 `c4_shm_manager` 子进程、MCP initialize、调用 `adjust_shm`、关闭进程。
-conftest.py 可提供 `run_adjust_shm(config_path)` helper 封装此流程。
+conftest.py 可提供 `run_adjust_shm(instance_id, config_path)` helper 封装此流程。
 
 ### 5.6 asfp2_client 数据发送
 
@@ -383,7 +383,7 @@ asfp2_client -s 127.0.0.1 -p <port> -b <begin_addr> -e <end_addr> -t <count> -d 
 
 ### 5.7 隔离性
 
-- 每个测试用例使用独立的 `instance_id`（如 `test_tc1`、`test_tc2`），确保共享内存路径不冲突
+- 每个测试用例使用独立的 `instance_id`（如 `c4_testtc1`、`c4_testtc2`），确保共享内存路径不冲突
 - TC1–TC6 均使用标准配置 port 9000；function-scoped teardown 确保端口在用例间释放，顺序执行无冲突
 - TC7 PORT_CONFLICT 配置也使用 port 9000，依赖 TC 间顺序执行和 teardown 释放
 - TC9 配置变更后使用 port 9001，不与其他 TC 冲突

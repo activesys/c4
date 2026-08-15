@@ -109,7 +109,7 @@ class TestWithConfigShmCreation:
     # ── TC9: 单 Writer 2x 分配 ─────────────────
 
     def test_tc9_single_writer_2x(self, mcp, isolated_shm):
-        iid = "test_tc9"
+        iid = "c4_testtc9"
         isolated_shm(iid)
 
         config = _make_config(
@@ -150,7 +150,7 @@ class TestWithConfigShmCreation:
     # ── TC10: 多 Writer 聚合 ───────────────────
 
     def test_tc10_multi_writer(self, mcp, isolated_shm):
-        iid = "test_tc10"
+        iid = "c4_testtc10"
         isolated_shm(iid)
 
         config = _make_config(
@@ -191,7 +191,7 @@ class TestWithConfigShmCreation:
     # ── TC11: Reader 回填 ─────────────────────
 
     def test_tc11_reader_backfill(self, mcp, isolated_shm):
-        iid = "test_tc11"
+        iid = "c4_testtc11"
         isolated_shm(iid)
 
         config = _make_config(
@@ -234,7 +234,7 @@ class TestWithConfigShmCreation:
     # ── TC12: writer 为空 ──────────────────────
 
     def test_tc12_empty_writer(self, mcp, isolated_shm):
-        iid = "test_tc12"
+        iid = "c4_testtc12"
         isolated_shm(iid)
 
         config = _make_config(
@@ -257,7 +257,7 @@ class TestWithConfigShmCreation:
     # ── TC13: reader 为空 ──────────────────────
 
     def test_tc13_empty_reader(self, mcp, isolated_shm):
-        iid = "test_tc13"
+        iid = "c4_testtc13"
         isolated_shm(iid)
 
         config = _make_config(
@@ -283,7 +283,7 @@ class TestWithConfigShmCreation:
     # ── TC14: 重复 key ─────────────────────────
 
     def test_tc14_duplicate_key(self, mcp, isolated_shm):
-        iid = "test_tc14"
+        iid = "c4_testtc14"
         isolated_shm(iid)
 
         # same service id "device1" × same point id "temp" → key collision
@@ -313,7 +313,7 @@ class TestWithConfigShmCreation:
     # ── TC15: Reader key 不存在 ────────────────
 
     def test_tc15_unknown_reader_key(self, mcp, isolated_shm):
-        iid = "test_tc15"
+        iid = "c4_testtc15"
         isolated_shm(iid)
 
         config = _make_config(
@@ -346,7 +346,7 @@ class TestWithConfigShmCreation:
     # ── TC16: 配置文件回填 ─────────────────────
 
     def test_tc16_config_writeback(self, mcp, isolated_shm):
-        iid = "test_tc16"
+        iid = "c4_testtc16"
         isolated_shm(iid)
 
         config = _make_config(
@@ -400,7 +400,7 @@ class TestWithConfigShmCreation:
     # ── TC17: query_status 交叉验证 ─────────────
 
     def test_tc17_query_status(self, mcp, isolated_shm):
-        iid = "test_tc17"
+        iid = "c4_testtc17"
         isolated_shm(iid)
 
         config = _make_config(
@@ -442,7 +442,7 @@ class TestWithConfigShmCreation:
     # ── TC18: config JSON 格式错误 ──────────────
 
     def test_tc18_malformed_json(self, mcp, isolated_shm):
-        iid = "test_tc18"
+        iid = "c4_testtc18"
         isolated_shm(iid)
 
         # Write invalid JSON to config file
@@ -461,7 +461,7 @@ class TestWithConfigShmCreation:
     # ── TC19: 缺少 c4_shm_manager 段 ──────────
 
     def test_tc19_missing_shm_manager_section(self, mcp, isolated_shm):
-        iid = "test_tc19"
+        iid = "c4_testtc19"
         isolated_shm(iid)
 
         config = {
@@ -483,7 +483,7 @@ class TestWithConfigShmCreation:
     # ── TC20: 分支 2 重复创建 ──────────────────
 
     def test_tc20_duplicate_create_with_config(self, mcp, isolated_shm):
-        iid = "test_tc20"
+        iid = "c4_testtc20"
         isolated_shm(iid)
 
         config = _make_config(
@@ -516,7 +516,7 @@ class TestWithConfigShmCreation:
     # ── TC21: writer 类型无 config section ──────
 
     def test_tc21_unknown_writer_type(self, mcp, isolated_shm):
-        iid = "test_tc21"
+        iid = "c4_testtc21"
         isolated_shm(iid)
 
         # writer lists "c4_unknown_service" which has no section in config
@@ -540,7 +540,7 @@ class TestWithConfigShmCreation:
     # ── TC22: Reader backfill 保留额外字段 ──────
 
     def test_tc22_reader_field_preservation(self, mcp, isolated_shm):
-        iid = "test_tc22"
+        iid = "c4_testtc22"
         isolated_shm(iid)
 
         config = _make_config(
@@ -574,7 +574,7 @@ class TestWithConfigShmCreation:
     # ── TC23: 分支 2 Data Block 边界验证 ────────
 
     def test_tc23_block_boundary(self, mcp, isolated_shm):
-        iid = "test_tc23"
+        iid = "c4_testtc23"
         isolated_shm(iid)
 
         config = _make_config(

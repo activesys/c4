@@ -146,10 +146,9 @@ def _run_asfp2_client(
 #  Helper: run adjust_shm via c4_shm_manager
 # ──────────────────────────────────────────────
 
-def _run_adjust_shm(config_path: str, instance_id: str | None = None):
+def _run_adjust_shm(config_path: str, instance_id: str):
     """
-    启动 c4_shm_manager 子进程，MCP initialize，调用 adjust_shm，关闭进程。
-    如果指定 instance_id，先调用 create_shm（若 shm 已存在则忽略错误）。
+    启动 c4_shm_manager 子进程，MCP initialize，调用 create_shm + adjust_shm，关闭进程。
     """
     # 复用 c4_fun_00057 的 McpClient 和二进制发现
     McpClient = _c57.McpClient
@@ -158,15 +157,13 @@ def _run_adjust_shm(config_path: str, instance_id: str | None = None):
     binary = _find_shm_manager_binary()
     client = McpClient(binary)
 
-    if instance_id is not None:
-        client.call_tool(
-            "create_shm",
-            {"instance_id": instance_id, "config_path": config_path},
-        )
+    client.call_tool(
+        "create_shm",
+        {"instance_id": instance_id, "config_path": config_path},
+    )
 
     resp = client.call_tool(
-        "adjust_shm",
-        {"config_path": config_path},
+        "adjust_shm", {"instance_id": instance_id, "config_path": config_path},
     )
     client.close()
 
@@ -202,7 +199,7 @@ def _prepare_config_with_shm(config_dict: dict, instance_id: str, register_clean
 #  Config factories (§3)
 # ──────────────────────────────────────────────
 
-def _make_standard_config(instance_id: str = "test_stop_restart", port: int = 9000):
+def _make_standard_config(instance_id: str = "c4_teststoprestart", port: int = 9000):
     """§3.1 标准配置：单实例 2 point (addr=1000, 1001)。"""
     return {
         "c4_shm_manager": {
@@ -262,7 +259,7 @@ def _make_port_conflict_config():
 
 
 def _make_modified_config(
-    instance_id: str = "test_stop_restart",
+    instance_id: str = "c4_teststoprestart",
     port: int = 9001,
     include_old_points: bool = True,
 ):
@@ -298,7 +295,7 @@ def _make_modified_config(
     }
 
 
-def _make_corrected_config(instance_id: str = "test_stop_restart", port: int = 9000):
+def _make_corrected_config(instance_id: str = "c4_teststoprestart", port: int = 9000):
     """TC10 修正配置：单实例 1 point (addr=1000)。"""
     return {
         "c4_shm_manager": {

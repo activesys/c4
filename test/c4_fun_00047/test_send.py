@@ -126,7 +126,7 @@ class TestSend:
 
     # ── TC11: reconnect ──
     def test_tc11_tcp_reconnect(self, prepare_environment, isolated_shm):
-        iid = "tc11"
+        iid = "c4_tc11"
         config = _make_standard_config()
         for inst in config["c4_asfp2_client"]:
             inst["t0"] = 5
@@ -164,7 +164,7 @@ class TestSend:
 
     # ── TC12: KeepAlive reconnect ──
     def test_tc12_keepalive_reconnect(self, prepare_environment, isolated_shm):
-        iid = "tc12"
+        iid = "c4_tc12"
         config = _make_standard_config()
         for inst in config["c4_asfp2_client"]:
             inst["t1"] = 2; inst["t2"] = 1; inst["t0"] = 5; inst["timer"] = 1000

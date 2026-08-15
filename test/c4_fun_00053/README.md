@@ -29,7 +29,7 @@ C4_FUN_00053 有两条分支：
 
 | 项目 | 期望值 | 来源 |
 |------|--------|------|
-| shm 路径 | `/dev/shm/c4_{instance_id}` | §2.5.1 |
+| shm 路径 | `/dev/shm/{instance_id}` | §2.5.1 |
 | shm 文件大小 | `(100000 + 1) × 32 = 3,200,032` 字节 | §2.2 |
 | 返回结果 | `"success"` | §3.3.2 |
 
@@ -93,7 +93,7 @@ Go 编译的 `c4_shm_manager` 二进制，通过 Python `subprocess.Popen` 启�
 
 ### 2.3 共享内存验证
 
-Python 通过 `os.open("/dev/shm/c4_{id}", os.O_RDONLY)` + `mmap` 直接读取共享内存，
+Python 通过 `os.open("/dev/shm/{instance_id}", os.O_RDONLY)` + `mmap` 直接读取共享内存，
 用 `struct.unpack` 按偏移解析各字段。
 
 ---
@@ -105,24 +105,24 @@ Python 通过 `os.open("/dev/shm/c4_{id}", os.O_RDONLY)` + `mmap` 直接读取�
 ### TC1: 不传 config_path → 创建 100k 默认 shm
 
 - **前置**：无配置文件注册
-- **操作**：调用 `create_shm({instance_id: "test_tc1"})`，不传 config_path
+- **操作**：调用 `create_shm({instance_id: "c4_testtc1"})`，不传 config_path
 - **预期**：返回 `"success"`
-- **清理**：`shm_unlink("/c4_test_tc1")`
+- **清理**：`shm_unlink("/c4_testtc1")`
 
 ### TC2: config_path 指向的文件不存在 → 创建 100k 默认 shm
 
 - **前置**：确保 `/tmp/c4_no_such_config.json` 不存在
-- **操作**：调用 `create_shm({instance_id: "test_tc2", config_path: "/tmp/c4_no_such_config.json"})`
+- **操作**：调用 `create_shm({instance_id: "c4_testtc2", config_path: "/tmp/c4_no_such_config.json"})`
 - **预期**：返回 `"success"`
-- **清理**：`shm_unlink("/c4_test_tc2")`
+- **清理**：`shm_unlink("/c4_testtc2")`
 
 ### TC3: config_path 指向空 JSON 文件 → 创建 100k 默认 shm
 
 - **前置**：创建 `/tmp/c4_empty_config.json`，内容 `{}`（空 JSON）
-- **操作**：调用 `create_shm({instance_id: "test_tc3", config_path: "/tmp/c4_empty_config.json"})`
+- **操作**：调用 `create_shm({instance_id: "c4_testtc3", config_path: "/tmp/c4_empty_config.json"})`
 - **预期**：返回 `"success"`，创建默认 10 万点共享内存（文件内容为空 JSON 等价于无配置）
 - **额外验证**：`/tmp/c4_empty_config.json` 未被修改（内容仍为 `{}`）
-- **清理**：`shm_unlink("/c4_test_tc3")`，删除 `/tmp/c4_empty_config.json`
+- **清理**：`shm_unlink("/c4_testtc3")`，删除 `/tmp/c4_empty_config.json`
 
 ### TC4: 重复创建 → SHM_ALREADY_EXISTS
 
@@ -134,7 +134,7 @@ Python 通过 `os.open("/dev/shm/c4_{id}", os.O_RDONLY)` + `mmap` 直接读取�
 ### TC5: Header 全字段校验
 
 - **前置**：TC1 成功后
-- **操作**：打开 `/dev/shm/c4_test_tc1`，读取前 32 字节
+- **操作**：打开 `/dev/shm/c4_testtc1`，读取前 32 字节
 - **预期**：各字段值与 §1 中 Header 表一致
 - **额外验证**：`os.fstat` 文件大小 = `3,200,032` 字节
 
@@ -155,9 +155,9 @@ Python 通过 `os.open("/dev/shm/c4_{id}", os.O_RDONLY)` + `mmap` 直接读取�
 ### TC8: config_path 为空字符串 → 创建 100k 默认 shm
 
 - **前置**：无
-- **操作**：调用 `create_shm({instance_id: "test_tc8", config_path: ""})`
+- **操作**：调用 `create_shm({instance_id: "c4_testtc8", config_path: ""})`
 - **预期**：返回 `"success"`，创建默认 10 万点共享内存（config_path 为空等价于未传）
-- **清理**：`shm_unlink("/c4_test_tc8")`
+- **清理**：`shm_unlink("/c4_testtc8")`
 
 > **测试顺序依赖**：TC4 依赖 TC1~TC3 之一已成功创建 shm。TC5、TC6、TC7 依赖 TC1。
 > 若 TC1 失败，TC4~TC7 均会被跳过。建议为 TC4~TC7 各自独立创建/销毁 shm，
@@ -179,7 +179,7 @@ Python 通过 `os.open("/dev/shm/c4_{id}", os.O_RDONLY)` + `mmap` 直接读取�
 
 ### 4.2 共享内存清理
 
-- 测试结束后必须 `shm_unlink`（Python: `os.unlink("/dev/shm/c4_{id}")` 或通过 ctypes 调用 `shm_unlink`）
+- 测试结束后必须 `shm_unlink`（Python: `os.unlink("/dev/shm/{instance_id}")` 或通过 ctypes 调用 `shm_unlink`）
 - 建议在 `conftest.py` 的 fixture **setup** 中先尝试 `shm_unlink` 预防性清理（防止前一次运行崩溃残留 shm 导致 `O_EXCL` 失败）
 - fixture **teardown** 中再次清理，确保无论测试成败都释放共享内存
 

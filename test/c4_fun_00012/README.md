@@ -48,7 +48,7 @@ redis_tool ──写值──> Redis ──MGET──> modbusd ──Modbus响�
 
 ### 2.3 共享内存验证
 
-Python 通过 `mmap` 读取 `/dev/shm/c4_{instance_id}`，Data Block 布局（32 字节）：
+Python 通过 `mmap` 读取 `/dev/shm/{instance_id}`，Data Block 布局（32 字节）：
 
 | 字段 | 偏移 | 大小 | Python struct |
 |------|------|------|---------------|

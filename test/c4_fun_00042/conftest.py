@@ -29,7 +29,7 @@ def prepare_environment(shm_mgr_client):
     """
     Function 级 fixture — 准备配置文件 + 共享内存。
     返回工厂函数 (config_dict, instance_id) → (config_path, instance_id)。
-    内部完成 create_shm(config_path) + adjust_shm(config_path)，并在返回前关闭 shm_manager。
+    内部完成 create_shm(instance_id, config_path) + adjust_shm(instance_id, config_path)，并在返回前关闭 shm_manager。
     """
     temp_files: list[str] = []
 
@@ -52,8 +52,7 @@ def prepare_environment(shm_mgr_client):
 
         # 步骤 3: adjust_shm — 重新读取配置、分配 shm_id、必要时扩容
         resp = shm_mgr_client.call_tool(
-            "adjust_shm",
-            {"config_path": config_path},
+            "adjust_shm", {"instance_id": instance_id, "config_path": config_path},
         )
         if resp["result"].get("isError", False):
             raise RuntimeError(
@@ -76,9 +75,9 @@ def prepare_environment(shm_mgr_client):
 
 # ──────────────────────────────────────────────
 #  Fixture: isolated_shm（config_path 参数方式）
-#  c4_asfp2_server 的 start 会在 /dev/shm 下按名称序选择唯一 c4_* 共享内存，
-#  因此每个用例启动前清空 /dev/shm 下所有 c4_* 对象，保证本用例的 create_shm
-#  是唯一存在的共享内存，避免残留对象被错误选中。
+#  start 通过 instance_id 直接打开 /dev/shm/{instance_id} 共享内存，
+#  因此每个用例启动前清空 /dev/shm 下残留的 c4_* 对象，保证本用例的
+#  create_shm 是唯一存在的共享内存，避免残留对象干扰。
 # ──────────────────────────────────────────────
 
 
@@ -102,7 +101,7 @@ def isolated_shm():
         registered.append(instance_id)
         _wipe_c4_shm()
         try:
-            shm_unlink(f"/c4_{instance_id}")
+            shm_unlink(f"/{instance_id}")
         except OSError:
             pass
 
@@ -110,7 +109,7 @@ def isolated_shm():
 
     for iid in registered:
         try:
-            shm_unlink(f"/c4_{iid}")
+            shm_unlink(f"/{iid}")
         except OSError:
             pass
 

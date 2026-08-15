@@ -36,7 +36,7 @@ def shm_unlink(name: str) -> None:
 
 
 def shm_path(instance_id: str) -> str:
-    return f"/dev/shm/c4_{instance_id}"
+    return f"/dev/shm/{instance_id}"
 
 
 def read_shm_header(full_path: str) -> dict:

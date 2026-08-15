@@ -43,7 +43,7 @@ class TestStopRestart:
         self, prepare_environment, start_asfp2_server, isolated_shm
     ):
         """TC1: stop 在运行状态返回 success 并释放端口。"""
-        iid = "test_tc1"
+        iid = "c4_testtc1"
         isolated_shm(iid)
         port = 9000
 
@@ -52,7 +52,7 @@ class TestStopRestart:
 
         # 前置: start 成功，端口监听
         resp = start_asfp2_server.call_tool(
-        "start", {"config_path": config_path},
+        "start", {"instance_id": iid, "config_path": config_path},
         )
         _assert_mcp_success(resp)
         _assert_port_listening(port)
@@ -70,7 +70,7 @@ class TestStopRestart:
         self, prepare_environment, start_asfp2_server, isolated_shm
     ):
         """TC2: stop 在未启动状态幂等返回 success。"""
-        iid = "test_tc2"
+        iid = "c4_testtc2"
         isolated_shm(iid)
 
         config = _make_standard_config(iid)
@@ -88,7 +88,7 @@ class TestStopRestart:
         self, prepare_environment, start_asfp2_server, isolated_shm
     ):
         """TC3: start 在已运行状态返回 ALREADY_RUNNING。"""
-        iid = "test_tc3"
+        iid = "c4_testtc3"
         isolated_shm(iid)
         port = 9000
 
@@ -96,13 +96,13 @@ class TestStopRestart:
         config_path, _ = prepare_environment(config, iid)
 
         resp = start_asfp2_server.call_tool(
-        "start", {"config_path": config_path},
+        "start", {"instance_id": iid, "config_path": config_path},
         )
         _assert_mcp_success(resp)
 
         # 同一 SUT 进程，无间隔 stop — 再次调用 start
         resp = start_asfp2_server.call_tool(
-        "start", {"config_path": config_path},
+        "start", {"instance_id": iid, "config_path": config_path},
         )
         _assert_mcp_error(resp, "ALREADY_RUNNING")
 
@@ -117,7 +117,7 @@ class TestStopRestart:
         self, prepare_environment, start_asfp2_server, isolated_shm
     ):
         """TC4: stop → start 重启后端口重新监听、数据流恢复。"""
-        iid = "test_tc4"
+        iid = "c4_testtc4"
         isolated_shm(iid)
         port = 9000
 
@@ -125,14 +125,14 @@ class TestStopRestart:
         config_path, _ = prepare_environment(config, iid)
 
         # 前置: start 成功
-        resp = start_asfp2_server.call_tool("start", {"config_path": config_path})
+        resp = start_asfp2_server.call_tool("start", {"instance_id": iid, "config_path": config_path})
         _assert_mcp_success(resp)
 
         # 操作: stop → start
         resp = start_asfp2_server.call_tool("stop", {})
         _assert_mcp_success(resp)
 
-        resp = start_asfp2_server.call_tool("start", {"config_path": config_path})
+        resp = start_asfp2_server.call_tool("start", {"instance_id": iid, "config_path": config_path})
         _assert_mcp_success(resp)
 
         # 验证: 端口重新监听
@@ -167,21 +167,21 @@ class TestStopRestart:
         self, prepare_environment, start_asfp2_server, isolated_shm
     ):
         """TC5: stop → start 链路验证（adjust_shm 由 TC9 覆盖）。"""
-        iid = "test_tc5"
+        iid = "c4_testtc5"
         isolated_shm(iid)
         port = 9000
 
         config = _make_standard_config(iid, port)
         config_path, _ = prepare_environment(config, iid)
 
-        resp = start_asfp2_server.call_tool("start", {"config_path": config_path})
+        resp = start_asfp2_server.call_tool("start", {"instance_id": iid, "config_path": config_path})
         _assert_mcp_success(resp)
 
         resp = start_asfp2_server.call_tool("stop", {})
         _assert_mcp_success(resp)
 
         # 配置未变更时 adjust_shm 为 no-op，直接 start 即可
-        resp = start_asfp2_server.call_tool("start", {"config_path": config_path})
+        resp = start_asfp2_server.call_tool("start", {"instance_id": iid, "config_path": config_path})
         _assert_mcp_success(resp)
 
         _assert_port_listening(port)
@@ -209,7 +209,7 @@ class TestStopRestart:
         self, prepare_environment, start_asfp2_server, isolated_shm
     ):
         """TC6: 两轮 stop/start 循环，每次均正确。"""
-        iid = "test_tc6"
+        iid = "c4_testtc6"
         isolated_shm(iid)
         port = 9000
 
@@ -217,14 +217,14 @@ class TestStopRestart:
         config_path, _ = prepare_environment(config, iid)
 
         # 前置: start 成功
-        resp = start_asfp2_server.call_tool("start", {"config_path": config_path})
+        resp = start_asfp2_server.call_tool("start", {"instance_id": iid, "config_path": config_path})
         _assert_mcp_success(resp)
 
         # 第 1 轮: stop → start
         resp = start_asfp2_server.call_tool("stop", {})
         _assert_mcp_success(resp)
 
-        resp = start_asfp2_server.call_tool("start", {"config_path": config_path})
+        resp = start_asfp2_server.call_tool("start", {"instance_id": iid, "config_path": config_path})
         _assert_mcp_success(resp)
         _assert_port_listening(port)
 
@@ -232,7 +232,7 @@ class TestStopRestart:
         resp = start_asfp2_server.call_tool("stop", {})
         _assert_mcp_success(resp)
 
-        resp = start_asfp2_server.call_tool("start", {"config_path": config_path})
+        resp = start_asfp2_server.call_tool("start", {"instance_id": iid, "config_path": config_path})
         _assert_mcp_success(resp)
         _assert_port_listening(port)
 
@@ -265,7 +265,7 @@ class TestStopRestart:
         self, prepare_environment, start_asfp2_server, isolated_shm
     ):
         """TC7: 重启时 PORT_CONFLICT 检测仍然生效。"""
-        iid = "test_tc7"
+        iid = "c4_testtc7"
         isolated_shm(iid)
         port = 9000
 
@@ -273,7 +273,7 @@ class TestStopRestart:
         config_path, _ = prepare_environment(config, iid)
 
         # 前置: start 成功
-        resp = start_asfp2_server.call_tool("start", {"config_path": config_path})
+        resp = start_asfp2_server.call_tool("start", {"instance_id": iid, "config_path": config_path})
         _assert_mcp_success(resp)
 
         # 操作: stop
@@ -282,11 +282,11 @@ class TestStopRestart:
 
         # 准备端口冲突配置
         conflict_config = _make_port_conflict_config()
-        conflict_path = _prepare_config_with_shm(conflict_config, "test_tc7c", isolated_shm)
+        conflict_path = _prepare_config_with_shm(conflict_config, "c4_testtc7c", isolated_shm)
 
         # 用冲突配置调用 start → 预期 PORT_CONFLICT
         resp = start_asfp2_server.call_tool(
-        "start", {"config_path": conflict_path},
+        "start", {"instance_id": iid, "config_path": conflict_path},
         )
         _assert_mcp_error(resp, "PORT_CONFLICT")
 
@@ -298,7 +298,7 @@ class TestStopRestart:
         self, prepare_environment, start_asfp2_server, isolated_shm
     ):
         """TC8: 连续两次 stop，第二次幂等返回 success。"""
-        iid = "test_tc8"
+        iid = "c4_testtc8"
         isolated_shm(iid)
         port = 9000
 
@@ -306,7 +306,7 @@ class TestStopRestart:
         config_path, _ = prepare_environment(config, iid)
 
         resp = start_asfp2_server.call_tool(
-        "start", {"config_path": config_path},
+        "start", {"instance_id": iid, "config_path": config_path},
         )
         _assert_mcp_success(resp)
 
@@ -326,7 +326,7 @@ class TestStopRestart:
         self, prepare_environment, start_asfp2_server, isolated_shm
     ):
         """TC9: 重启时配置变更（新端口 + 新 point）生效。"""
-        iid = "test_tc9"
+        iid = "c4_testtc9"
         isolated_shm(iid)
         old_port = 9000
         new_port = 9001
@@ -335,7 +335,7 @@ class TestStopRestart:
         config_path, _ = prepare_environment(config, iid)
 
         # 前置: start 成功 (port=9000)
-        resp = start_asfp2_server.call_tool("start", {"config_path": config_path})
+        resp = start_asfp2_server.call_tool("start", {"instance_id": iid, "config_path": config_path})
         _assert_mcp_success(resp)
 
         # 操作: stop
@@ -347,7 +347,7 @@ class TestStopRestart:
         modified_path = _prepare_config_with_shm(modified_config, iid, isolated_shm)
 
         # start 使用新配置
-        resp = start_asfp2_server.call_tool("start", {"config_path": modified_path})
+        resp = start_asfp2_server.call_tool("start", {"instance_id": iid, "config_path": modified_path})
         _assert_mcp_success(resp)
 
         # 验证: 新端口 9001 监听，旧端口 9000 释放
@@ -396,7 +396,7 @@ class TestStopRestart:
         self, prepare_environment, start_asfp2_server, isolated_shm
     ):
         """TC10: PORT_CONFLICT 失败后用修正配置恢复启动成功。"""
-        iid = "test_tc10"
+        iid = "c4_testtc10"
         isolated_shm(iid)
         port = 9000
 
@@ -404,7 +404,7 @@ class TestStopRestart:
         config_path, _ = prepare_environment(config, iid)
 
         # 前置: start 成功
-        resp = start_asfp2_server.call_tool("start", {"config_path": config_path})
+        resp = start_asfp2_server.call_tool("start", {"instance_id": iid, "config_path": config_path})
         _assert_mcp_success(resp)
 
         # 操作: stop
@@ -413,10 +413,10 @@ class TestStopRestart:
 
         # 准备端口冲突配置
         conflict_config = _make_port_conflict_config()
-        conflict_path = _prepare_config_with_shm(conflict_config, "test_tc10c", isolated_shm)
+        conflict_path = _prepare_config_with_shm(conflict_config, "c4_testtc10c", isolated_shm)
 
         # start 用冲突配置 → 预期 PORT_CONFLICT
-        resp = start_asfp2_server.call_tool("start", {"config_path": conflict_path})
+        resp = start_asfp2_server.call_tool("start", {"instance_id": iid, "config_path": conflict_path})
         _assert_mcp_error(resp, "PORT_CONFLICT")
 
         # 准备修正配置（单实例 port=9000, 1 point）
@@ -425,7 +425,7 @@ class TestStopRestart:
 
         # 再次调用 start 用修正配置 → 预期成功
         resp = start_asfp2_server.call_tool(
-            "start", {"config_path": corrected_path},
+            "start", {"instance_id": iid, "config_path": corrected_path},
         )
         _assert_mcp_success(resp)
 

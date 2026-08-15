@@ -64,7 +64,7 @@ Python 仅负责进程编排、tcpdump 启停、pcap 解析和 stdout 解析。*
 ### 2.3 测试时序
 
 ```
-1. c4_shm_manager → create_shm(instance_id, config_path) → adjust_shm(config_path) → 关闭
+1. c4_shm_manager → create_shm(instance_id, config_path) → adjust_shm(instance_id, config_path) → 关闭
 2. c4_asfp2_server (port A) → start → 就绪
 3. c4_asfp2_client (SUT) → start → 连接 port B
 4. asfp2_server --t1 0 --t2 0 -p 9800 > /tmp/rx.txt 2>&1 & → 启动验证端

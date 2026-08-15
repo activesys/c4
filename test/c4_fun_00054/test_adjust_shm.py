@@ -185,7 +185,7 @@ class TestNoExpand:
 
     def test_tc1_no_expand_add_one(self, mcp, isolated_shm):
         """TC1: 不扩容 — 新增 1 个采集点（3≤4），空闲块分配。"""
-        iid = "test_tc1"
+        iid = "c4_testtc1"
         isolated_shm(iid)
 
         config = _make_initial_config(writer_points=2)
@@ -215,7 +215,7 @@ class TestNoExpand:
 
             # 操作：adjust_shm
             resp = mcp.call_tool(
-                "adjust_shm", {"config_path": config_path},
+                "adjust_shm", {"instance_id": iid, "config_path": config_path},
             )
             _assert_mcp_success(resp)
 
@@ -251,7 +251,7 @@ class TestNoExpand:
 
     def test_tc2_idempotent_no_change(self, mcp, isolated_shm):
         """TC2: 不扩容 — 无新增点（幂等性）。"""
-        iid = "test_tc2"
+        iid = "c4_testtc2"
         isolated_shm(iid)
 
         config = _make_initial_config(writer_points=3)      # max_points=6
@@ -270,7 +270,7 @@ class TestNoExpand:
 
             # 不修改配置，直接调用 adjust_shm
             resp = mcp.call_tool(
-                "adjust_shm", {"config_path": config_path},
+                "adjust_shm", {"instance_id": iid, "config_path": config_path},
             )
             _assert_mcp_success(resp)
 
@@ -295,7 +295,7 @@ class TestNoExpand:
 
     def test_tc3_boundary_equal_max(self, mcp, isolated_shm):
         """TC3: 不扩容 — 边界 required_points == max_points。"""
-        iid = "test_tc3"
+        iid = "c4_testtc3"
         isolated_shm(iid)
 
         config = _make_initial_config(writer_points=2)      # max_points=4
@@ -320,7 +320,7 @@ class TestNoExpand:
             )
 
             resp = mcp.call_tool(
-                "adjust_shm", {"config_path": config_path},
+                "adjust_shm", {"instance_id": iid, "config_path": config_path},
             )
             _assert_mcp_success(resp)
 
@@ -355,7 +355,7 @@ class TestExpand:
 
     def test_tc4_expand_single_writer(self, mcp, isolated_shm):
         """TC4: 扩容 — 单 Writer 新点超容量 (5＞4 → max=10)。"""
-        iid = "test_tc4"
+        iid = "c4_testtc4"
         isolated_shm(iid)
 
         config = _make_initial_config(writer_points=2)
@@ -379,7 +379,7 @@ class TestExpand:
             )
 
             resp = mcp.call_tool(
-                "adjust_shm", {"config_path": config_path},
+                "adjust_shm", {"instance_id": iid, "config_path": config_path},
             )
             _assert_mcp_success(resp)
 
@@ -412,7 +412,7 @@ class TestExpand:
 
     def test_tc5_expand_multi_writer(self, mcp, isolated_shm):
         """TC5: 扩容 — 多 Writer 聚合超容量 (6＞4 → max=12)。"""
-        iid = "test_tc5"
+        iid = "c4_testtc5"
         isolated_shm(iid)
 
         config = _make_initial_config(writer_points=2)
@@ -434,7 +434,7 @@ class TestExpand:
             add_writer_to_config(config_path, "c4_iec104_client", iec104_points)
 
             resp = mcp.call_tool(
-                "adjust_shm", {"config_path": config_path},
+                "adjust_shm", {"instance_id": iid, "config_path": config_path},
             )
             _assert_mcp_success(resp)
 
@@ -459,7 +459,7 @@ class TestExpand:
 
     def test_tc6_expand_large_growth(self, mcp, isolated_shm):
         """TC6: 扩容 — 大幅增长 (10＞4 → max=20)。"""
-        iid = "test_tc6"
+        iid = "c4_testtc6"
         isolated_shm(iid)
 
         config = _make_initial_config(writer_points=2)
@@ -483,7 +483,7 @@ class TestExpand:
             )
 
             resp = mcp.call_tool(
-                "adjust_shm", {"config_path": config_path},
+                "adjust_shm", {"instance_id": iid, "config_path": config_path},
             )
             _assert_mcp_success(resp)
 
@@ -518,7 +518,7 @@ class TestConfigErrors:
 
     def test_tc7_missing_shm_manager_section(self, mcp, isolated_shm):
         """TC7: adjust_shm 缺少 c4_shm_manager 段。"""
-        iid = "test_tc7"
+        iid = "c4_testtc7"
         isolated_shm(iid)
 
         config = _make_initial_config(writer_points=2)
@@ -541,7 +541,7 @@ class TestConfigErrors:
                 json.dump(cfg, f)
 
             resp = mcp.call_tool(
-                "adjust_shm", {"config_path": config_path},
+                "adjust_shm", {"instance_id": iid, "config_path": config_path},
             )
             _assert_mcp_error(resp, "CONFIG_MISSING_SECTION")
 
@@ -556,7 +556,7 @@ class TestConfigErrors:
 
     def test_tc8_empty_writer(self, mcp, isolated_shm):
         """TC8: adjust_shm writer 为空。"""
-        iid = "test_tc8"
+        iid = "c4_testtc8"
         isolated_shm(iid)
 
         config = _make_initial_config(writer_points=2)
@@ -578,7 +578,7 @@ class TestConfigErrors:
                 json.dump(cfg, f)
 
             resp = mcp.call_tool(
-                "adjust_shm", {"config_path": config_path},
+                "adjust_shm", {"instance_id": iid, "config_path": config_path},
             )
             _assert_mcp_error(resp, "CONFIG_MISSING_SECTION")
 
@@ -592,7 +592,7 @@ class TestConfigErrors:
 
     def test_tc9_empty_reader(self, mcp, isolated_shm):
         """TC9: adjust_shm reader 为空。"""
-        iid = "test_tc9"
+        iid = "c4_testtc9"
         isolated_shm(iid)
 
         config = _make_initial_config(writer_points=2, reader_points=1)
@@ -614,7 +614,7 @@ class TestConfigErrors:
                 json.dump(cfg, f)
 
             resp = mcp.call_tool(
-                "adjust_shm", {"config_path": config_path},
+                "adjust_shm", {"instance_id": iid, "config_path": config_path},
             )
             _assert_mcp_error(resp, "CONFIG_MISSING_SECTION")
 
@@ -628,7 +628,7 @@ class TestConfigErrors:
 
     def test_tc10_malformed_json(self, mcp, isolated_shm):
         """TC10: config JSON 格式错误。"""
-        iid = "test_tc10"
+        iid = "c4_testtc10"
         isolated_shm(iid)
 
         config = _make_initial_config(writer_points=2)
@@ -648,7 +648,7 @@ class TestConfigErrors:
                 f.write("{broken json")
 
             resp = mcp.call_tool(
-                "adjust_shm", {"config_path": config_path},
+                "adjust_shm", {"instance_id": iid, "config_path": config_path},
             )
             _assert_mcp_error(resp, "CONFIG")
 
@@ -662,7 +662,7 @@ class TestConfigErrors:
 
     def test_tc11_duplicate_key(self, mcp, isolated_shm):
         """TC11: 重复 key → DUPLICATE_KEY。"""
-        iid = "test_tc11"
+        iid = "c4_testtc11"
         isolated_shm(iid)
 
         config = _make_initial_config(writer_points=2)
@@ -684,7 +684,7 @@ class TestConfigErrors:
             )
 
             resp = mcp.call_tool(
-                "adjust_shm", {"config_path": config_path},
+                "adjust_shm", {"instance_id": iid, "config_path": config_path},
             )
             _assert_mcp_error(resp, "DUPLICATE_KEY")
 
@@ -698,7 +698,7 @@ class TestConfigErrors:
 
     def test_tc12_unknown_reader_key(self, mcp, isolated_shm):
         """TC12: Reader key 不存在 → UNKNOWN_READER_KEY。"""
-        iid = "test_tc12"
+        iid = "c4_testtc12"
         isolated_shm(iid)
 
         config = _make_initial_config(writer_points=2, reader_points=1)
@@ -722,7 +722,7 @@ class TestConfigErrors:
                 json.dump(cfg, f)
 
             resp = mcp.call_tool(
-                "adjust_shm", {"config_path": config_path},
+                "adjust_shm", {"instance_id": iid, "config_path": config_path},
             )
             _assert_mcp_error(resp, "UNKNOWN_READER_KEY")
 
@@ -736,7 +736,7 @@ class TestConfigErrors:
 
     def test_tc22_empty_config_object(self, mcp, isolated_shm):
         """TC22: 空配置文件 {} → adjust_shm 幂等 no-op（success）。"""
-        iid = "test_tc22"
+        iid = "c4_testtc22"
         isolated_shm(iid)
 
         config = _make_initial_config(writer_points=2)
@@ -756,7 +756,7 @@ class TestConfigErrors:
                 f.write("{}")
 
             resp = mcp.call_tool(
-                "adjust_shm", {"config_path": config_path},
+                "adjust_shm", {"instance_id": iid, "config_path": config_path},
             )
             _assert_mcp_success(resp)
 
@@ -779,7 +779,7 @@ class TestInfraErrors:
 
     def test_tc13_shm_not_created(self, mcp, isolated_shm):
         """TC13: SHM 未创建 → SHM_NOT_CREATED。"""
-        iid = "test_tc13"
+        iid = "c4_testtc13"
         isolated_shm(iid)
 
         config = _make_initial_config(writer_points=2)
@@ -788,7 +788,7 @@ class TestInfraErrors:
         try:
             # 不调用 create_shm，直接 adjust_shm
             resp = mcp.call_tool(
-                "adjust_shm", {"config_path": config_path},
+                "adjust_shm", {"instance_id": iid, "config_path": config_path},
             )
             _assert_mcp_error(resp, "SHM_NOT_CREATED")
 
@@ -797,7 +797,7 @@ class TestInfraErrors:
 
     def test_tc14_missing_config_path(self, mcp, isolated_shm):
         """TC14: adjust_shm 缺少 config_path → CONFIG_PATH_MISSING。"""
-        iid = "test_tc14"
+        iid = "c4_testtc14"
         isolated_shm(iid)
 
         config = _make_initial_config(writer_points=2)
@@ -814,7 +814,7 @@ class TestInfraErrors:
 
             # adjust_shm 不传 config_path（空字符串）
             resp = mcp.call_tool(
-                "adjust_shm", {"config_path": ""},
+                "adjust_shm", {"instance_id": iid, "config_path": ""},
             )
             _assert_mcp_error(resp, "CONFIG_PATH_MISSING")
 
@@ -837,7 +837,7 @@ class TestConfigWriteback:
 
     def test_tc15_writer_shm_ids_all_filled(self, mcp, isolated_shm):
         """TC15: 配置回填 — Writer shm_ids 全部填充且无重复。"""
-        iid = "test_tc15"
+        iid = "c4_testtc15"
         isolated_shm(iid)
 
         config = _make_initial_config(writer_points=2)      # max=4
@@ -859,7 +859,7 @@ class TestConfigWriteback:
             )
 
             resp = mcp.call_tool(
-                "adjust_shm", {"config_path": config_path},
+                "adjust_shm", {"instance_id": iid, "config_path": config_path},
             )
             _assert_mcp_success(resp)
 
@@ -880,7 +880,7 @@ class TestConfigWriteback:
 
     def test_tc16_reader_shm_ids_match_writer(self, mcp, isolated_shm):
         """TC16: 配置回填 — Reader shm_ids 匹配 Writer 同 key 的 shm_id。"""
-        iid = "test_tc16"
+        iid = "c4_testtc16"
         isolated_shm(iid)
 
         config = _make_initial_config(writer_points=2, reader_points=1)
@@ -909,7 +909,7 @@ class TestConfigWriteback:
                 json.dump(cfg, f)
 
             resp = mcp.call_tool(
-                "adjust_shm", {"config_path": config_path},
+                "adjust_shm", {"instance_id": iid, "config_path": config_path},
             )
             _assert_mcp_success(resp)
 
@@ -931,7 +931,7 @@ class TestConfigWriteback:
 
     def test_tc17_non_shm_id_fields_preserved(self, mcp, isolated_shm):
         """TC17: 配置回填 — 非 shm_id 字段保留不变。"""
-        iid = "test_tc17"
+        iid = "c4_testtc17"
         isolated_shm(iid)
 
         # 构造含额外字段的配置
@@ -977,7 +977,7 @@ class TestConfigWriteback:
             )
 
             resp = mcp.call_tool(
-                "adjust_shm", {"config_path": config_path},
+                "adjust_shm", {"instance_id": iid, "config_path": config_path},
             )
             _assert_mcp_success(resp)
 
@@ -1032,7 +1032,7 @@ class TestStateConsistency:
 
     def test_tc18_header_consistency_no_expand(self, mcp, isolated_shm):
         """TC18: 不扩容后 Header 状态一致性。"""
-        iid = "test_tc18"
+        iid = "c4_testtc18"
         isolated_shm(iid)
 
         config = _make_initial_config(writer_points=2)
@@ -1051,7 +1051,7 @@ class TestStateConsistency:
             )
 
             resp = mcp.call_tool(
-                "adjust_shm", {"config_path": config_path},
+                "adjust_shm", {"instance_id": iid, "config_path": config_path},
             )
             _assert_mcp_success(resp)
 
@@ -1063,7 +1063,7 @@ class TestStateConsistency:
 
     def test_tc19_header_consistency_expand(self, mcp, isolated_shm):
         """TC19: 扩容后 Header 状态一致性。"""
-        iid = "test_tc19"
+        iid = "c4_testtc19"
         isolated_shm(iid)
 
         config = _make_initial_config(writer_points=2)
@@ -1086,7 +1086,7 @@ class TestStateConsistency:
             )
 
             resp = mcp.call_tool(
-                "adjust_shm", {"config_path": config_path},
+                "adjust_shm", {"instance_id": iid, "config_path": config_path},
             )
             _assert_mcp_success(resp)
 
@@ -1107,7 +1107,7 @@ class TestStateConsistency:
 
     def test_tc21_block_integrity_after_expand(self, mcp, isolated_shm):
         """TC21: Block 内容完整性（扩容后）— 已有 block 不变，新增 block 初始化。"""
-        iid = "test_tc21"
+        iid = "c4_testtc21"
         isolated_shm(iid)
 
         config = _make_initial_config(writer_points=2)
@@ -1135,7 +1135,7 @@ class TestStateConsistency:
             )
 
             resp = mcp.call_tool(
-                "adjust_shm", {"config_path": config_path},
+                "adjust_shm", {"instance_id": iid, "config_path": config_path},
             )
             _assert_mcp_success(resp)
 
@@ -1165,7 +1165,7 @@ class TestStateConsistency:
 
     def test_tc23_chained_expansion(self, mcp, isolated_shm):
         """TC23: 链式扩容 — 两次 adjust_shm 均触发扩容。"""
-        iid = "test_tc23"
+        iid = "c4_testtc23"
         isolated_shm(iid)
 
         config = _make_initial_config(writer_points=2)
@@ -1192,7 +1192,7 @@ class TestStateConsistency:
             )
 
             resp = mcp.call_tool(
-                "adjust_shm", {"config_path": config_path},
+                "adjust_shm", {"instance_id": iid, "config_path": config_path},
             )
             _assert_mcp_success(resp)
 
@@ -1211,7 +1211,7 @@ class TestStateConsistency:
             )
 
             resp = mcp.call_tool(
-                "adjust_shm", {"config_path": config_path},
+                "adjust_shm", {"instance_id": iid, "config_path": config_path},
             )
             _assert_mcp_success(resp)
 
@@ -1242,7 +1242,7 @@ class TestStateConsistency:
 
     def test_tc24_default_shm_transition(self, mcp, isolated_shm):
         """TC24: 默认 shm 上调用 adjust_shm（无配置创建 → 引入配置）。"""
-        iid = "test_tc24"
+        iid = "c4_testtc24"
         isolated_shm(iid)
 
         # 前置：create_shm 无配置文件 → max=100000, point_count=0
@@ -1267,7 +1267,7 @@ class TestStateConsistency:
         try:
             # adjust_shm，config_path 指向新配置文件
             resp = mcp.call_tool(
-                "adjust_shm", {"config_path": config_path},
+                "adjust_shm", {"instance_id": iid, "config_path": config_path},
             )
             _assert_mcp_success(resp)
 
