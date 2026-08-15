@@ -379,7 +379,7 @@ step-decomposer 输出 AccessPlanSteps 后，后续操作全部是确定性代�
 **mergeConfigFromSteps(steps, configPath)**：合并 + 备份 + 原子写入 config.json
 
 ```
-1. 读取现有 /etc/c4/config.json：
+1. 读取现有 ~/.local/c4/config.json：
    - 不存在 → 创建空结构；新文件写入后也备份一份 config.json.bak
    - 存在且有效 → 先复制当前内容到 config.json.bak（失败前快照）
    - 存在但损坏（JSON 解析失败）→ 若 config.json.bak 存在则恢复之，否则创建空结构
@@ -395,21 +395,21 @@ step-decomposer 输出 AccessPlanSteps 后，后续操作全部是确定性代�
 Stop 阶段:
   for 每个数据路径 MCP 服务（不含 c4_shm_manager）: call stop()
   if 任一失败:                                  ← stop 不读 config，非 config 类失败
-    for 已停止的服务: call start(config_path)     ← 回滚：只 restart，不恢复 config
+    for 已停止的服务: call start(instance_id, config_path)     ← 回滚：只 restart，不恢复 config
     abort 操作
 
 adjust_shm 阶段:
-  call adjust_shm(config_path)                  ← config.json 路径作为工具参数传入
+  call adjust_shm(instance_id, config_path)                  ← config.json 路径作为工具参数传入
   if 失败:
     if 错误码为 CONFIG_MISSING_SECTION / DUPLICATE_KEY / UNKNOWN_READER_KEY:
       将 config.json.bak 恢复为 config.json      ← config 有问题，回退配置
-    for 已停止的服务: call start(config_path)     ← 统一 restart
+    for 已停止的服务: call start(instance_id, config_path)     ← 统一 restart
     abort 操作
   （SHM_NOT_CREATED / SHM_SYSCALL_FAILED 等非 config 类失败：
     不恢复 config，后续用户解决 shm 问题后只需重试 adjust_shm → start）
 
 Start 阶段:
-  for 每个 MCP 服务: call start(config_path)    ← config.json 路径作为工具参数传入
+  for 每个 MCP 服务: call start(instance_id, config_path)    ← config.json 路径作为工具参数传入
   部分失败 → 不回滚已成功的，只报告哪些失败
 ```
 
@@ -691,7 +691,7 @@ step-decomposer 输出 AccessPlanSteps：
 }
 ```
 
-> `shm_id` 全部为 0——将在 Stop-Start 协议中由 `c4_shm_manager.adjust_shm()` 统一分配并回填。
+> `shm_id` 全部为 0——将在 Stop-Start 协议中由 `c4_shm_manager.adjust_shm(instance_id, config_path)` 统一分配并回填。
 
 **示例 2：modify（已有转发目标，增加新的转发目标）**
 
@@ -806,7 +806,7 @@ config.json（磁盘文件）              ← 持久化产物，跨重启生存
 | **设备信息** | 内存对象 | LangGraph state / 子代理返回值 | 解析后即用，不持久化 | 结构化 JSON（`{name, protocol, points[]}`） | doc-parser | plan-generator |
 | **AccessPlan** | 内存对象 | AgentState.accessPlan | 生成 → 展示 → 确认后传递给 step-decomposer | 结构化 JSON（协议、设备、数据点映射、转发目标） | plan-generator | SuperWorker（展示）、step-decomposer（分解） |
 | **AccessPlanSteps** | 内存对象 | SuperWorker → 执行模块传参 | 生成 → 校验 → 传入 mergeConfigFromSteps 后销毁 | 结构化 JSON（`ServiceStep[]`，含 action） | step-decomposer | 执行模块 |
-| **config.json** | 磁盘文件 | `/etc/c4/config.json` | 首次接入创建，之后每次接入更新，跨重启永久存续 | MCP 服务全量配置（见 c4_architecture.md §3.2） | 执行模块 | MCP 服务（启动读取）、Agent（下次接入参考） |
+| **config.json** | 磁盘文件 | `~/.local/c4/config.json` | 首次接入创建，之后每次接入更新，跨重启永久存续 | MCP 服务全量配置（见 c4_architecture.md §3.2） | 执行模块 | MCP 服务（启动读取）、Agent（下次接入参考） |
 
 **用户可见性**：
 
@@ -874,7 +874,7 @@ Agent 启动
   ├─ 1. 启动 / 重连 c4_shm_manager
   │     └─ MCP 连接（c4_shm_manager 自身处理 shm 新建或附加，见其 §1.3 崩溃恢复）
   │
-  ├─ 2. 读取 /etc/c4/config.json
+  ├─ 2. 读取 ~/.local/c4/config.json
   │     不存在 → 启动完成（无数据路径服务，等待用户首次接入）
   │     存在但损坏（JSON 解析失败）：
   │       ┌ config.json.bak 存在且有效 → 恢复之，覆盖 config.json，继续
@@ -885,7 +885,7 @@ Agent 启动
   │     └─ 进程不存在 → spawn 进程 + 建立 MCP stdio 连接（不启动数据路径）
   │        进程已存在 → MCP stdio 重连（不重启进程，数据路径不受影响）
   │
-  ├─ 4. 无条件执行 stop → c4_shm_manager.adjust_shm(config_path) → start(config_path)
+  ├─ 4. 无条件执行 stop → c4_shm_manager.adjust_shm(instance_id, config_path) → start(instance_id, config_path)
   │     · config_path 为 config.json 的绝对路径，作为工具参数直接传入
   │     · 首次启动：shm 通过 adjust_shm 间接创建（create_shm），服务初始化
   │     · 正常重启：config 与 shm 一致，adjust_shm 为 no-op；stop/start 重新加载
@@ -914,7 +914,7 @@ Agent 启动
 ### 3.3 MCP Service Registry（C4_FUN_00017）
 
 全局单例，所有子代理通过 `queryRegistryTool` 查询。Agent 启动时扫描 `agent.json` 中
-`mcp_registry.path` 配置的目录（默认 `/etc/c4/mcp-registry/`）。
+`mcp_registry.path` 配置的目录（默认 `~/.local/c4/mcp-registry/`）。
 
 #### 3.3.0 双层注入设计
 
@@ -975,7 +975,7 @@ Registry JSON 是服务包的一部分，与服务代码同仓库。Agent 不生
 | 交付物 | 生成者 | 部署位置 | 用途 |
 |--------|--------|---------|------|
 | MCP 服务二进制 | MCP 服务开发者编译 | `/usr/local/bin/` | Agent spawn 子进程 |
-| Registry JSON | MCP 服务开发者编写 | `/etc/c4/mcp-registry/` | 注册表加载元数据 |
+| Registry JSON | MCP 服务开发者编写 | `~/.local/c4/mcp-registry/` | 注册表加载元数据 |
 
 JSON 中的 `binary_path` 字段指向二进制部署位置，是两者之间的关联键。
 
@@ -988,7 +988,7 @@ JSON 中的 `binary_path` 字段指向二进制部署位置，是两者之间的
          ▼
 2. 打包交付
    c4_modbus_client  → /usr/local/bin/c4_modbus_client        (二进制)
-   registry JSON      → /etc/c4/mcp-registry/c4_modbus_client.json
+   registry JSON      → ~/.local/c4/mcp-registry/c4_modbus_client.json
          │
          ▼
 3. 重启 Agent
@@ -1013,11 +1013,11 @@ flowchart LR
 
     subgraph Deploy["部署"]
         Bin["→ /usr/local/bin/"]
-        Json["→ /etc/c4/mcp-registry/"]
+        Json["→ ~/.local/c4/mcp-registry/"]
     end
 
     subgraph Agent["Agent 系统"]
-        Scan["loadFromDirectory()<br/>扫描 /etc/c4/mcp-registry/<br/>构建注册表 + 合并 error_mappings"]
+        Scan["loadFromDirectory()<br/>扫描 ~/.local/c4/mcp-registry/<br/>构建注册表 + 合并 error_mappings"]
         Prompt["注入子代理<br/>系统提示"]
         Scan --> Prompt
     end
@@ -1234,10 +1234,13 @@ c4/agent/                              # Agent 系统
 
 ### 5.1 agent.json 配置
 
-Agent 启动时读取 `/etc/c4/agent.json`（固定路径，不可配置），作为整个系统的运行时配置入口：
+Agent 启动时读取 `~/.local/c4/agent.json`（固定位置，`~` 为运行 C4 的专用账户主目录，不可配置），作为整个系统的运行时配置入口：
 
 ```json
 {
+  // ========== 实例标识 ==========
+  "instance_id": "c4_hnalsfarm01",
+
   // ========== LLM 配置 ==========
   "model": {
     "provider": "deepseek",
@@ -1256,32 +1259,32 @@ Agent 启动时读取 `/etc/c4/agent.json`（固定路径，不可配置），�
 
   // ========== MCP Service Registry ==========
   "mcp_registry": {
-    "path": "/etc/c4/mcp-registry"
+    "path": "~/.local/c4/mcp-registry"
   },
 
   // ========== 常驻基础设施 ==========
   "shm_manager": {
     "binary": "/usr/local/bin/c4_shm_manager",
-    "instance_id": "c4_default",
-    "config_path": "/etc/c4/config.json"
+    "config_path": "~/.local/c4/config.json"
   },
 
   // ========== 对话状态持久化 ==========
   "state": {
     "backend": "filesystem",
-    "path": "/var/lib/c4/state"
+    "path": "~/.local/c4/state"
   },
 
   // ========== 日志 ==========
   "logging": {
     "level": "info",
-    "dir": "/var/log/c4"
+    "dir": "~/.local/c4/log"
   }
 }
 ```
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
+| `instance_id` | string | C4 实例标识，作为后续所有 shm 操作的参数（instance_id 即共享内存名 `/dev/shm/{instance_id}`），须匹配 `c4_[a-zA-Z0-9]+` |
 | `model.provider` | string | LLM 提供商（对应 `@langchain/*` 包） |
 | `model.name` | string | 模型名称 |
 | `model.temperature` | number | 推理温度，0 表示确定性输出 |
@@ -1291,34 +1294,42 @@ Agent 启动时读取 `/etc/c4/agent.json`（固定路径，不可配置），�
 | `server.cors_origin` | string | 跨域允许来源 |
 | `mcp_registry.path` | string | MCP 注册文件目录（相对于项目根或绝对路径） |
 | `shm_manager.binary` | string | c4_shm_manager 的二进制路径 |
-| `shm_manager.instance_id` | string | 共享内存实例标识（对应 `/c4_{instance_id}`） |
 | `shm_manager.config_path` | string | 数据路径 MCP 服务配置文件路径 |
 | `state.backend` | string | 状态存储后端（`"filesystem"` / `"memory"`）。生产环境用 filesystem 保活，开发可用 memory |
 | `state.path` | string | filesystem 后端的存储目录 |
 | `logging.level` | string | 日志级别：`"debug"` / `"info"` / `"warn"` / `"error"` |
-| `logging.dir` | string | 日志文件输出目录（默认 `/var/log/c4`） |
+| `logging.dir` | string | 日志文件输出目录（默认 `~/.local/c4/log`） |
 
 ### 5.2 运行时目录结构
 
-Agent 部署后的运行时目录布局。`/etc/c4/agent.json` 为固定路径，其余路径可由
-`agent.json` 中各配置域覆盖。MCP 服务二进制路径不由 agent.json 统一指定——各
-MCP 服务通过其 Registry JSON 中的 `binary_path` 字段声明自身二进制位置
-（如 `/usr/local/bin/c4_modbus_client` 或 `/usr/bin/c4_asfp2_server`）。
+Agent 部署后的运行时目录布局。`~/.local/c4/agent.json` 为固定位置（`~` 为运行 C4 的
+专用账户主目录），其余路径可由 `agent.json` 中各配置域覆盖。所有配置、状态与日志
+均位于 `~/.local/c4/` 下，Agent 与 MCP 服务以非 root 账户运行，无需 root 权限。
+MCP 服务二进制路径不由 agent.json 统一指定——各 MCP 服务通过其 Registry JSON 中的
+`binary_path` 字段声明自身二进制位置（如 `/usr/local/bin/c4_modbus_client`）。
+二进制由安装脚本在部署阶段以 root 一次性安装，运行时以非 root 账户执行。
+`~/.local/c4/` 目录及目录下的配置文件由 Agent 首次启动时创建，具体创建方法后续补充。
+
+> **⚠️ 待解决冲突**：`agent.json` 含 `instance_id`、`model.api_key_env` 等 Agent 无法自行生成的配置项，`mcp-registry/` 由 MCP 服务开发者提供——这两类配置与「由 Agent 首次启动时创建」的表述存在冲突。须在后续补充「具体创建方法」时一并解决，明确 `agent.json` 与 `mcp-registry/` 由谁、以何权限、在何时生成或预置。
 
 ```
-/etc/c4/                          # 配置文件目录
+~/.local/c4/                          # C4 专用账户数据目录（配置 + 状态 + 日志）
 ├── agent.json                    # Agent 自身配置
 ├── config.json                   # 数据路径 MCP 服务配置（Agent 生成/修改）
 ├── config.json.bak               # config.json 备份（每次修改前自动生成，崩溃恢复用）
-└── mcp-registry/                 # MCP 服务注册文件
-    ├── c4_modbus_client.json       ← MCP 服务开发者提供
-    ├── c4_iec104_client.json
-    ├── c4_iec101_client.json
-    ├── c4_asfp2_server.json
-    ├── c4_asfp2_client.json
-    └── c4_influxdb_client.json
+├── mcp-registry/                 # MCP 服务注册文件
+│   ├── c4_modbus_client.json       ← MCP 服务开发者提供
+│   ├── c4_iec104_client.json
+│   ├── c4_iec101_client.json
+│   ├── c4_asfp2_server.json
+│   ├── c4_asfp2_client.json
+│   └── c4_influxdb_client.json
+├── state/                        # 对话状态持久化
+│   └── (LangGraph checkpoint 文件)
+└── log/                          # Agent 日志
+    └── c4-agent.log
 
-/usr/local/bin/                   # Go MCP 服务二进制
+/usr/local/bin/                   # Go MCP 服务二进制（安装脚本以 root 安装，一次性）
 ├── c4_shm_manager                  ← C4 项目编译
 ├── c4_modbus_client
 ├── c4_iec104_client
@@ -1326,24 +1337,17 @@ MCP 服务通过其 Registry JSON 中的 `binary_path` 字段声明自身二进�
 ├── c4_asfp2_server
 ├── c4_asfp2_client
 └── c4_influxdb_client
-
-/var/lib/c4/                      # Agent 运行时数据
-└── state/                        # 对话状态持久化
-    └── (LangGraph checkpoint 文件)
-
-/var/log/c4/                      # Agent 日志
-└── c4-agent.log
 ```
 
 | 目录 | 配置来源 | 内容 | 读写者 |
 |------|---------|------|--------|
-| `/etc/c4/` | — | 所有配置文件 | 管理员（写入），Agent（读取） |
-| `/etc/c4/agent.json` | 固定路径 | Agent 自身运行时配置 | 管理员（写入），Agent 启动时读取 |
-| `/etc/c4/config.json` | `agent.json → shm_manager.config_path` | 数据路径 MCP 服务配置 | Agent（写入），MCP 服务（读取） |
-| `/etc/c4/mcp-registry/` | `agent.json → mcp_registry.path` | MCP 服务注册 JSON | MCP 服务开发者（放入），Agent 启动时扫描 |
-| `/usr/local/bin/`（等） | Registry JSON `→ binary_path` | MCP 服务 Go 二进制 | MCP 服务开发者（放入），Agent spawn 子进程 |
-| `/var/lib/c4/state/` | `agent.json → state.path` | LangGraph 对话状态 | Agent（读写），用于跨重启保活 |
-| `/var/log/c4/` | `agent.json → logging.dir` | 结构化运行日志 | Agent（写入），运维人员（查看） |
+| `~/.local/c4/` | — | 所有配置文件 | 运行账户（写入），Agent（读取） |
+| `~/.local/c4/agent.json` | 固定位置 | Agent 自身运行时配置 | 运行账户（写入），Agent 启动时读取 |
+| `~/.local/c4/config.json` | `agent.json → shm_manager.config_path` | 数据路径 MCP 服务配置 | Agent（写入），MCP 服务（读取） |
+| `~/.local/c4/mcp-registry/` | `agent.json → mcp_registry.path` | MCP 服务注册 JSON | MCP 服务开发者（放入），Agent 启动时扫描 |
+| `/usr/local/bin/`（等） | Registry JSON `→ binary_path` | MCP 服务 Go 二进制 | 安装脚本（root 安装，一次性），Agent spawn 子进程 |
+| `~/.local/c4/state/` | `agent.json → state.path` | LangGraph 对话状态 | Agent（读写），用于跨重启保活 |
+| `~/.local/c4/log/` | `agent.json → logging.dir` | 结构化运行日志 | Agent（写入），运维人员（查看） |
 
 **配置文件关系**：
 

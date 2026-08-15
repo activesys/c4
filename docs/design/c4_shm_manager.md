@@ -20,14 +20,14 @@
 ### 1.1 创建流程
 
 ```
-Agent 生成 instance_id
+Agent 从 agent.json 读取 instance_id
         │
         │ MCP 工具调用 c4_shm_manager.create_shm
         ▼
 ┌───────────────────────────────────────────────┐
 │            c4_shm_manager（Go）                 │
 │                                               │
-│  shm_open("/c4_{id}", O_CREAT|O_EXCL|O_RDWR)  │
+│  shm_open("/{id}", O_CREAT|O_EXCL|O_RDWR)     │
 │  ftruncate(shm_size)                           │
 │  mmap                                         │
 │  初始化 Header（magic, version, max_points）    │
@@ -40,7 +40,7 @@ Agent 生成 instance_id
         ▼
 ┌───────────────────────────────────────────────┐
 │          其他 MCP 服务启动（Go）                 │
-│  shm_open("/c4_{id}", O_RDWR)   // 不传 O_CREAT│
+│  shm_open("/{id}", O_RDWR)      // 不传 O_CREAT│
 │  mmap                                         │
 │  校验 magic == 0xC4DA7A00                      │
 │  开始读写共享内存                               │
@@ -49,8 +49,8 @@ Agent 生成 instance_id
 
 ```mermaid
 flowchart TD
-    A["Agent 生成 instance_id"] --> B["MCP 调用<br/>c4_shm_manager.create_shm"]
-    B --> C["shm_open(/c4_{id},<br/>O_CREAT|O_EXCL|O_RDWR)<br/>ftruncate + mmap<br/>初始化 Header +<br/>Data Block Array"]
+    A["Agent 从 agent.json 读取<br/>instance_id"] --> B["MCP 调用<br/>c4_shm_manager.create_shm"]
+    B --> C["shm_open(/{id},<br/>O_CREAT|O_EXCL|O_RDWR)<br/>ftruncate + mmap<br/>初始化 Header +<br/>Data Block Array"]
     C --> D["Agent 启动其他<br/>MCP 服务"]
     D --> E["后续 MCP 服务<br/>shm_open(O_RDWR)<br/>mmap · 校验 magic"]
     E --> F["所有 MCP 服务运行<br/>读写共享内存"]
@@ -61,7 +61,7 @@ flowchart TD
 
 | 操作 | 说明 |
 |------|------|
-| 创建 | Agent 通过 MCP 工具调用 `c4_shm_manager`，命名规则 `/c4_{instance_id}` |
+| 创建 | Agent 通过 MCP 工具调用 `c4_shm_manager`，命名规则 instance_id 即共享内存名（须匹配 `c4_[a-zA-Z0-9]+`） |
 | 附加 | 后续 MCP 服务以普通 `O_RDWR` 或 `O_RDONLY` 打开，校验 `magic` 后附加 |
 | 大小 | 无配置文件时默认 100k 点（≈3 MB）；配置文件存在时按 §2.2 算法计算，Agent 可通过 MCP 工具调整 |
 | 销毁 | `c4_shm_manager` 最后退出时 `shm_unlink`；进程异常退出由操作系统回收 |
@@ -87,7 +87,7 @@ Phase 1 - Stop：
      - 向 Agent ack "success"
 
 Phase 2 - adjust_shm：
-   a. Agent 确认所有 MCP 进程已停止 → 调用 c4_shm_manager.adjust_shm()
+   a. Agent 确认所有 MCP 进程已停止 → 调用 c4_shm_manager.adjust_shm(instance_id, config_path)
    b. c4_shm_manager 内部：
        - 读取 adjust_shm 的 config_path 参数指定的配置文件
       - 读取配置文件，按 §2.2 算法计算所需点数 (required_points)
@@ -143,7 +143,7 @@ sequenceDiagram
 
     Note over A: 所有进程已暂停<br/>shm 无访问
 
-    A->>S: adjust_shm(config_path)
+    A->>S: adjust_shm(instance_id, config_path)
     S->>S: 读取 config_path 指定的配置<br/>读配置，算点数<br/>容量判断
     Note over S: 先回收孤儿块<br/>（按 key 匹配，不按计数）
     alt 不超容量
@@ -215,7 +215,7 @@ Agent 新增 writer5(15个)，生成新配置文件：
 
 1. Agent → 所有 MCP: stop
 
-2. Agent → c4_shm_manager: adjust_shm()
+2. Agent → c4_shm_manager: adjust_shm(instance_id, config_path)
    required_points = 10 + 15 = 25
    current_max_points = 20
    required_points(25) > current_max_points(20) → 扩容
@@ -257,7 +257,7 @@ Agent 停止 writer3(3个点)，从配置文件删除 writer3 的 points：
 
 1. Agent → 所有 MCP: stop
 
-2. Agent → c4_shm_manager: adjust_shm()
+2. Agent → c4_shm_manager: adjust_shm(instance_id, config_path)
    required_points = 2 + 2 + 3 = 7  (writer1+2+4)
    current_max_points = 20
    required_points(7) < point_count(10) → 触发回收
@@ -320,7 +320,7 @@ Agent 停止 writer3(3个点)，从配置文件删除 writer3 的 points：
   空闲:    [11..20]  (10个, state=0)
   point_count=10
 
-Agent 删除 writer3 并新增 writer5(3点)，生成新配置文件，调用 adjust_shm()：
+Agent 删除 writer3 并新增 writer5(3点)，生成新配置文件，调用 adjust_shm(instance_id, config_path)：
 
   required_points = 2 + 2 + 3 + 3 = 10  (writer1+2+4+5)
   current_max_points = 20
@@ -359,7 +359,7 @@ Agent 删除 writer3 并新增 writer5(3点)，生成新配置文件，调用 ad
   空闲:    [11..20]  (10个, state=0)
   point_count=10
 
-Agent 删除 writer3 并新增 writer5(5点)，调用 adjust_shm()：
+Agent 删除 writer3 并新增 writer5(5点)，调用 adjust_shm(instance_id, config_path)：
 
   required_points = 2 + 2 + 3 + 5 = 12
 
@@ -391,7 +391,7 @@ Agent 删除 writer3 并新增 writer5(5点)，调用 adjust_shm()：
 
 ### 1.3 `c4_shm_manager` 崩溃恢复
 
-`c4_shm_manager` 崩溃后，POSIX 共享内存对象 `/c4_{id}` 仍然存在于 `/dev/shm`
+`c4_shm_manager` 崩溃后，POSIX 共享内存对象 `/{id}` 仍然存在于 `/dev/shm`
 （崩溃进程未调用 `shm_unlink`），其他 MCP 进程的 mmap 映射不受影响。
 
 重启时不能走 `O_CREAT|O_EXCL` 路径——名字已被占用。流程如下：
@@ -399,7 +399,7 @@ Agent 删除 writer3 并新增 writer5(5点)，调用 adjust_shm()：
 ```
 c4_shm_manager 重启
         │
-        │ shm_open("/c4_{id}", O_RDWR)  // 不传 O_CREAT
+        │ shm_open("/{id}", O_RDWR)  // 不传 O_CREAT
         │ 若失败（文件不存在或权限错误）→ shm_unlink + O_CREAT|O_EXCL 新建
         ▼
 ┌───────────────────────────────────────────────┐
@@ -443,7 +443,7 @@ Agent 与 `c4_shm_manager` 的交互遵循 MCP 标准协议。启动 `c4_shm_man
 3. Agent 调用 c4_shm_manager 的 create_shm 工具（传入 instance_id 和可选的 config_path）
 4. c4_shm_manager 直接按 config_path 参数读取配置文件。
    路径由 Agent 通过 create_shm 的 config_path 参数显式传入，例如
-   `/etc/c4/shm.json` 或 `~/.local/c4/shared_memory.json`
+   `~/.local/c4/config.json`
 5. c4_shm_manager 根据配置文件是否存在决定共享内存大小：
     - **配置文件不存在或为 null**（config_path 为空（未传）、文件路径不存在、或文件内容为空 JSON）：
      创建默认 10 万点共享内存空间（max_points = 100000，point_count = 0），
@@ -601,7 +601,7 @@ sequenceDiagram
         "properties": {
             "instance_id": {
                 "type": "string",
-                "description": "C4 实例标识符。共享内存命名为 /c4_{instance_id}"
+                "description": "C4 实例标识符。instance_id 即共享内存名（须匹配 c4_[a-zA-Z0-9]+）"
             },
             "config_path": {
                 "type": "string",
@@ -617,7 +617,7 @@ sequenceDiagram
 
 1. 读取 `config_path` 参数
 2. 若 `config_path` 为空或文件不存在：
-   a. `shm_open("/c4_{instance_id}", O_CREAT|O_EXCL|O_RDWR)` → `ftruncate` → `mmap`
+   a. `shm_open("/{instance_id}", O_CREAT|O_EXCL|O_RDWR)` → `ftruncate` → `mmap`
    b. Header 字段：`magic = 0xC4DA7A00`、`version = 1`、`max_points = 100000`、`point_count = 0`；
       `global_write_seq` 及两个 `reserved` 字段保持 `ftruncate` 零填充后的默认值 `0`（参见 [c4_architecture.md §2.2.1](c4_architecture.md) 初始化规则）
    c. 初始化所有 Data Block 的 `magic = 0xC4DA7A00`（state 自然为 0）
@@ -628,7 +628,7 @@ sequenceDiagram
        ┌ 若 writer 和 reader 均为空 → 视为无配置，创建默认 10 万点共享内存
        ├ 若仅一方为空（writer 空但 reader 非空，或反之）→ 返回 `CONFIG_MISSING_SECTION` 错误
        └ 若双方均非空 → 按 §2.2 算法分配 shm_id 并回填到各 MCP Server 的 `points` 数组
-   b. `shm_open("/c4_{instance_id}", O_CREAT|O_EXCL|O_RDWR)` → `ftruncate` → `mmap`
+   b. `shm_open("/{instance_id}", O_CREAT|O_EXCL|O_RDWR)` → `ftruncate` → `mmap`
    c. 初始化所有 Data Block 的 `magic = 0xC4DA7A00`（state 自然为 0）
    d. 写入 Header `magic = 0xC4DA7A00`
    e. 将回填 shm_id 后的配置文件写回磁盘
@@ -642,19 +642,19 @@ sequenceDiagram
 ```json
 // ========== 成功：配置文件存在，按算法创建 ==========
 // --> 请求
-{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "create_shm", "arguments": {"instance_id": "hnals_farm_01", "config_path": "/etc/c4/config.json"}}}
+{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "create_shm", "arguments": {"instance_id": "c4_hnalsfarm01", "config_path": "~/.local/c4/config.json"}}}
 // <-- 应答
 {"jsonrpc": "2.0", "id": 1, "result": {"content": [{"type": "text", "text": "success"}], "isError": false}}
 
 // ========== 成功：config_path 为空，默认 10 万点 ==========
 // --> 请求
-{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "create_shm", "arguments": {"instance_id": "hnals_farm_01", "config_path": ""}}}
+{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "create_shm", "arguments": {"instance_id": "c4_hnalsfarm01", "config_path": ""}}}
 // <-- 应答
 {"jsonrpc": "2.0", "id": 1, "result": {"content": [{"type": "text", "text": "success"}], "isError": false}}
 
 // ========== 业务错误：共享内存已存在 ==========
 // <-- 应答
-{"jsonrpc": "2.0", "id": 1, "result": {"content": [{"type": "text", "text": "SHM_ALREADY_EXISTS: /c4_hnals_farm_01 is already created"}], "isError": true}}
+{"jsonrpc": "2.0", "id": 1, "result": {"content": [{"type": "text", "text": "SHM_ALREADY_EXISTS: c4_hnalsfarm01 is already created"}], "isError": true}}
 
 // ========== 业务错误：writer 和 reader 仅一方为空 ==========
 // <-- 应答
@@ -703,19 +703,23 @@ sequenceDiagram
     "inputSchema": {
         "type": "object",
         "properties": {
+            "instance_id": {
+                "type": "string",
+                "description": "C4 实例标识符。instance_id 即共享内存名（须匹配 c4_[a-zA-Z0-9]+）"
+            },
             "config_path": {
                 "type": "string",
                 "description": "配置文件路径（必填）"
             }
         },
-        "required": ["config_path"]
+        "required": ["instance_id", "config_path"]
     }
 }
 ```
 
 **内部流程**：
 
-1. 读取 `config_path` 参数
+1. 读取 `instance_id` 和 `config_path` 参数
    ┌ 若 config_path 为空或文件不存在 → 返回 `CONFIG_PATH_MISSING` 错误
    └ 正常 → 继续
  2. 读取配置文件，按 §2.2 算法计算所需点数 (`required_points`)
@@ -763,7 +767,7 @@ sequenceDiagram
 ```json
 // ========== 成功 ==========
 // --> 请求
-{"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "adjust_shm", "arguments": {"config_path": "/etc/c4/config.json"}}}
+{"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "adjust_shm", "arguments": {"instance_id": "c4_hnalsfarm01", "config_path": "~/.local/c4/config.json"}}}
 // <-- 应答
 {"jsonrpc": "2.0", "id": 2, "result": {"content": [{"type": "text", "text": "success"}], "isError": false}}
 
@@ -809,14 +813,14 @@ sequenceDiagram
     S-->>A: 工具列表
 
     Note over A: 创建共享内存
-    A->>S: tools/call create_shm({instance_id: "my_instance", config_path: "/etc/c4/config.json"})
+    A->>S: tools/call create_shm({instance_id: "c4_hnalsfarm01", config_path: "~/.local/c4/config.json"})
 
     alt config_path 非空且文件存在
         S->>FS: 读取 config → 按 §2.2 算法分配 shm_id
     else config_path 为空或文件不存在
         Note over S: max_points = 100000 (默认)
     end
-    S->>FS: shm_open /c4_my_instance (O_CREAT|O_EXCL)
+    S->>FS: shm_open /c4_hnalsfarm01 (O_CREAT|O_EXCL)
     S->>FS: ftruncate + mmap + 初始化
     alt config_path 非空且文件存在
         S->>FS: 写回 config（回填 shm_id）
@@ -845,7 +849,7 @@ sequenceDiagram
     Note over A: 所有进程已暂停
 
     Note over A,S: Phase 2 — adjust_shm
-    A->>S: tools/call adjust_shm({config_path: "/etc/c4/config.json"})
+    A->>S: tools/call adjust_shm({instance_id: "c4_hnalsfarm01", config_path: "~/.local/c4/config.json"})
     S->>CFG: 读取配置，计算 required_points=25
     Note over S: required_points(25) > max_points(20)<br/>new_max = 25×2 = 50
     S->>S: ftruncate + mmap<br/>已有点保持原 shm_id，新点分配<br/>回填配置
@@ -853,8 +857,8 @@ sequenceDiagram
     S-->>A: "success"
 
     Note over A,M2: Phase 3 — Start
-    A->>M1: tools/call start()
-    A->>M2: tools/call start()
+    A->>M1: tools/call start(instance_id, config_path)
+    A->>M2: tools/call start(instance_id, config_path)
     M1->>M1: shm_open + mmap → 重读配置<br/>新 shm_id 加入写入列表
     M2->>M2: shm_open + mmap → 重读配置<br/>新 shm_id 加入读取列表
     M1-->>A: "success"
@@ -881,7 +885,7 @@ sequenceDiagram
     M2-->>A: "success"
 
     Note over A,S: Phase 2 — adjust_shm
-    A->>S: tools/call adjust_shm({config_path: "/etc/c4/config.json"})
+    A->>S: tools/call adjust_shm({instance_id: "c4_hnalsfarm01", config_path: "~/.local/c4/config.json"})
     S->>CFG: 读取配置，计算 required_points=15
     Note over S: required_points(15) ≤ max_points(20)<br/>空闲块足够，不扩容
     S->>S: 扫描空闲块<br/>为新点分配 shm_id<br/>已有点不变
@@ -889,8 +893,8 @@ sequenceDiagram
     S-->>A: "success"
 
     Note over A,M2: Phase 3 — Start
-    A->>M1: tools/call start()
-    A->>M2: tools/call start()
+    A->>M1: tools/call start(instance_id, config_path)
+    A->>M2: tools/call start(instance_id, config_path)
     M1-->>A: "success"
     M2-->>A: "success"
 ```
@@ -918,7 +922,7 @@ sequenceDiagram
     M2-->>A: "success"
 
     Note over A,S: Phase 2 — adjust_shm（回收 + 分配）
-    A->>S: tools/call adjust_shm({config_path: "/etc/c4/config.json"})
+    A->>S: tools/call adjust_shm({instance_id: "c4_hnalsfarm01", config_path: "~/.local/c4/config.json"})
     S->>CFG: 读取配置，计算 required_points=7
     Note over S: 回收阶段（key 匹配）：<br/>writer3 的 3 个 key 不在配置中<br/>→ block[5..7] state 置 0<br/>point_count: 10→7
     Note over S: 无新增点，分配阶段跳过<br/>required_points(7) ≤ max_points(20)
@@ -927,8 +931,8 @@ sequenceDiagram
     S-->>A: "success"
 
     Note over A,M2: Phase 3 — Start
-    A->>M1: tools/call start()
-    A->>M2: tools/call start()
+    A->>M1: tools/call start(instance_id, config_path)
+    A->>M2: tools/call start(instance_id, config_path)
     M1-->>A: "success"
     M2-->>A: "success"
 ```
@@ -958,7 +962,7 @@ sequenceDiagram
     M2-->>A: "success"
 
     Note over A,S: Phase 2 — adjust_shm（先回收，再分配）
-    A->>S: tools/call adjust_shm({config_path: "/etc/c4/config.json"})
+    A->>S: tools/call adjust_shm({instance_id: "c4_hnalsfarm01", config_path: "~/.local/c4/config.json"})
     S->>CFG: 读取配置，计算 required_points=10
     Note over S: 回收阶段：<br/>writer3 的 3 个 block → state=0<br/>point_count: 10→7
     Note over S: required_points(10) ≤ max_points(20)<br/>不扩容
@@ -967,8 +971,8 @@ sequenceDiagram
     S-->>A: "success"
 
     Note over A,M2: Phase 3 — Start
-    A->>M1: tools/call start()
-    A->>M2: tools/call start()
+    A->>M1: tools/call start(instance_id, config_path)
+    A->>M2: tools/call start(instance_id, config_path)
     M1->>M1: writer3 停止写入<br/>writer5 开始写入 [5..7]
     M2->>M2: writer3 停止读取<br/>writer5 开始读取 [5..7]
     M1-->>A: "success"

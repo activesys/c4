@@ -86,7 +86,7 @@ flowchart TD
 
 ### 2.1 配置结构
 
-`c4_asfp2_client` 的配置位于全局配置文件（如 `/etc/c4/config.json`）的
+`c4_asfp2_client` 的配置位于全局配置文件（如 `~/.local/c4/config.json`）的
 `c4_asfp2_client` 顶层 key 下，值为实例配置数组。每个元素代表一个独立的
 ASFP2 发送实例。
 
@@ -190,10 +190,10 @@ ASFP2 发送实例。
   1. Agent 生成配置文件，写入 c4_asfp2_client 实例列表
      （所有 point 的 shm_id 初始为 0）
   2. Agent 启动 c4_shm_manager（首个服务）
-  3. Agent 调用 c4_shm_manager.adjust_shm()
+  3. Agent 调用 c4_shm_manager.adjust_shm(instance_id, config_path)
      → 计算所需点数 → 分配 shm_id → 回填配置文件中 c4_asfp2_client 的 shm_id 字段
   4. Agent 启动 c4_asfp2_client 进程（仅注册 MCP 工具，无其他初始化）
-   5. Agent 调用 c4_asfp2_client 的 `start` 工具，传入 `config_path` 参数
+   5. Agent 调用 c4_asfp2_client 的 `start` 工具，传入 `instance_id` 和 `config_path` 参数
       → client 在工具 handler 中完成：
       a. 从 config_path 参数获取配置文件绝对路径
       b. 通过 loadConfig(configPath) 读取 c4_asfp2_client 配置段
@@ -213,7 +213,7 @@ ASFP2 发送实例。
 扩容/调整阶段：
    9. Agent 执行 Stop-Start 协议：
       a. Agent 向 c4_asfp2_client 发送 `stop` → 销毁所有实例，释放连接
-      b. Agent 调用 c4_shm_manager.adjust_shm()
+      b. Agent 调用 c4_shm_manager.adjust_shm(instance_id, config_path)
       c. Agent 向 c4_asfp2_client 发送 `start`
          → client 重新加载配置 → 启动所有实例 → 返回
 ```
@@ -227,14 +227,14 @@ sequenceDiagram
     A->>A: 生成配置文件<br/>（shm_id 初始为 0）
     A->>SM: 启动 c4_shm_manager
     SM-->>A: 就绪
-    A->>SM: adjust_shm()
+    A->>SM: adjust_shm(instance_id, config_path)
     SM->>SM: 分配 shm_id → 回填配置
     SM-->>A: 完成
 
     A->>C: 启动进程 → MCP initialize
     C-->>A: 工具列表（stop / start）
 
-    A->>C: start(config_path="/etc/c4/config.json")
+    A->>C: start(instance_id="c4_hnalsfarm01", config_path="~/.local/c4/config.json")
     C->>C: loadConfig(configPath) 读取配置，校验有效性
     C->>C: shm_open(O_RDONLY) + mmap
     C->>C: 校验 magic
@@ -249,9 +249,9 @@ sequenceDiagram
     C->>C: 关闭所有连接，销毁实例
     C->>C: munmap + close shm
     C-->>A: "success"
-    A->>SM: adjust_shm()
+    A->>SM: adjust_shm(instance_id, config_path)
     SM-->>A: 完成
-    A->>C: start(config_path="/etc/c4/config.json")
+    A->>C: start(instance_id="c4_hnalsfarm01", config_path="~/.local/c4/config.json")
     C->>C: shm_open + mmap
     C->>C: loadConfig(configPath) → 启动所有实例
     C-->>A: "success"
@@ -262,12 +262,12 @@ sequenceDiagram
 Agent 在需要调整共享内存容量或变更发送配置时，执行 Stop-Start 协议：
 
 1. Agent 调用 `stop` → 关闭所有 TCP 连接，销毁全部实例，munmap 并关闭共享内存
-2. Agent 调用 `c4_shm_manager.adjust_shm()` 完成共享内存调整
-3. Agent 调用 `start`（传入 `config_path` 参数）→ 重新 `shm_open` + `mmap` 共享内存，通过 `loadConfig(configPath)` 加载配置文件，启动所有实例
+2. Agent 调用 `c4_shm_manager.adjust_shm(instance_id, config_path)` 完成共享内存调整
+3. Agent 调用 `start`（传入 `instance_id` 和 `config_path` 参数）→ 重新 `shm_open` + `mmap` 共享内存，通过 `loadConfig(configPath)` 加载配置文件，启动所有实例
 
 `stop` 销毁所有实例并释放共享内存映射后，服务回到进程刚启动的状态。`start` 的执行流程与首次启动完全一致——无需区分"首次"和"重启"。
 
-> **接口一致性**：`stop` 无参数；`start` 接受 `config_path` 参数。`stop` → `adjust_shm` → `start` 三步操作，Agent 无需在服务间传递 shm_id 列表或容量参数。`start` 在 `stop` 之后可再次调用——与首次启动复用同一逻辑。
+> **接口一致性**：`stop` 无参数；`start` 接受 `instance_id` 和 `config_path` 参数。`stop` → `adjust_shm` → `start` 三步操作，Agent 无需在服务间传递 shm_id 列表或容量参数。`start` 在 `stop` 之后可再次调用——与首次启动复用同一逻辑。
 >
 > **数据语义**：Stop-Start 后 `last_seen` 归零（随进程状态重置），导致重启时可能重复发送 stop 前最近一次已成功发送的数据项。客户端提供 **at-least-once** 发送语义，接收端应具备幂等处理能力。
 
@@ -598,7 +598,7 @@ tear down 已建立的 goroutine（关闭连接、清理资源），恢复到调
 `start` 重新 `shm_open` + `mmap` 后加载最新配置并启动实例。与首次启动执行完全相同的流程。
 **若服务当前处于运行状态（已 start 且未 stop），返回 `ALREADY_RUNNING`。**
 
-**参数**：`config_path`（string，必填）—— 配置文件 config.json 的绝对路径
+**参数**：`instance_id`（string，必填）—— C4 实例标识符（即共享内存名，须匹配 `c4_[a-zA-Z0-9]+`）；`config_path`（string，必填）—— 配置文件 config.json 的绝对路径
 
 **返回值**：成功返回 `"success"`，失败返回 `isError: true`。
 
@@ -619,7 +619,7 @@ tear down 已建立的 goroutine（关闭连接、清理资源），恢复到调
 ```json
 // ========== 成功 ==========
 // --> 请求
-{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "start", "arguments": {"config_path": "/etc/c4/config.json"}}}
+{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "start", "arguments": {"instance_id": "c4_hnalsfarm01", "config_path": "~/.local/c4/config.json"}}}
 // <-- 应答
 {"jsonrpc": "2.0", "id": 1, "result": {"content": [{"type": "text", "text": "success"}], "isError": false}}
 
