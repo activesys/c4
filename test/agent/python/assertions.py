@@ -167,9 +167,9 @@ def assert_writer_reader_from_registry(config: dict, registry_dir: Path) -> None
     动态读取 mcp-registry/ 中的 role 声明，不硬编码 service_type 列表。
     规则:
       - c4_shm_manager 自身不参与 writer/reader 分类
-      - 所有 Role 为 "writer" 的 registry 项 → 必须在 config.c4_shm_manager.writer[] 中
-      - 所有 Role 为 "reader" 的 registry 项 → 必须在 config.c4_shm_manager.reader[] 中
-      - writer[] / reader[] 中不应出现未在 registry 中声明的 service_type
+      - writer[] 中的每个 service_type → 必须在 registry 中声明且 role="writer"
+      - reader[] 中的每个 service_type → 必须在 registry 中声明且 role="reader"
+      - writer[]/reader[] 只列实际使用（实例化）的服务类型，未使用的类型不出现
     """
     # Step 1: 从 Registry 中读取 role 映射
     registry_roles: dict[str, str] = {}
@@ -196,29 +196,18 @@ def assert_writer_reader_from_registry(config: dict, registry_dir: Path) -> None
     assert isinstance(writers, list), "c4_shm_manager.writer must be a list"
     assert isinstance(readers, list), "c4_shm_manager.reader must be a list"
 
-    # Step 3: 验证 Registry 声明的 writer/reader 均出现在正确的列表中
-    for st, role in registry_roles.items():
-        if role == "writer":
-            assert st in writers, (
-                f"Registry declares '{st}' as writer, "
-                f"but it is missing from c4_shm_manager.writer[]"
-            )
-        elif role == "reader":
-            assert st in readers, (
-                f"Registry declares '{st}' as reader, "
-                f"but it is missing from c4_shm_manager.reader[]"
-            )
-
-    # Step 4: 验证 writer[]/reader[] 中的 service_type 均在 registry 中有声明
+    # Step 3: 验证 writer[]/reader[] 中的每个 service_type 均在 registry 声明且角色一致
     for w in writers:
-        assert w in registry_roles, (
+        role = registry_roles.get(w)
+        assert role == "writer", (
             f"c4_shm_manager.writer[] contains '{w}', "
-            f"which is not declared in mcp-registry/"
+            f"but registry declares role='{role}' (expected 'writer')"
         )
     for r in readers:
-        assert r in registry_roles, (
+        role = registry_roles.get(r)
+        assert role == "reader", (
             f"c4_shm_manager.reader[] contains '{r}', "
-            f"which is not declared in mcp-registry/"
+            f"but registry declares role='{role}' (expected 'reader')"
         )
 
 

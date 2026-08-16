@@ -46,6 +46,7 @@ from test_helpers import (
     find_interrupt_id,
     run_upload,
     full_access_flow,
+    delete_device,
 )
 from assertions import (
     STRICT_BLACKLIST,
@@ -269,20 +270,15 @@ class TestExecuteAdd:
         modbus_before = config1.get("c4_modbus_client", [])
         assert len(modbus_before) >= 1, "Should have first modbus instance"
 
-        # 追加第二个设备 (可用相同 CSV 模拟不同设备)
-        csv2_path = create_full_csv(tmp_path, filename="device2.csv")
-
-        with chat.send_with_file("接入华能阿拉善2#风机，IP是192.168.110.2", str(csv2_path)) as s:
-            text2 = s.text_content()
-        assert len(text2) > 0
-
-        with chat.send("生成接入方案，也转发到中心侧") as s:
-            text2b = s.text_content()
-        assert len(text2b) > 0
-
-        with chat.send("确认，按方案执行") as s:
-            text2c = s.text_content()
-        assert len(text2c) > 0
+        # 追加第二个设备（full_access_flow 保证确定性）
+        csv2_path = create_full_csv(tmp_path, filename="device2.csv", device_name="华能阿拉善2#风机", device_ip="192.168.110.2")
+        full_access_flow(
+            chat, agent, str(csv2_path),
+            upload_msg="接入华能阿拉善2#风机，IP是192.168.110.2",
+            plan_msg="生成接入方案",
+            confirm=True,
+            tmp_path=tmp_path,
+        )
         time.sleep(3)
 
         # 验证 config.json
@@ -449,14 +445,15 @@ class TestExecuteDelete:
         )
         time.sleep(3)
 
-        # 追加第二个设备
-        csv2_path = create_full_csv(tmp_path, filename="device2.csv")
-        with chat.send_with_file("接入华能阿拉善2#风机，IP: 192.168.110.2", str(csv2_path)) as s:
-            s.text_content()
-        with chat.send("生成接入方案，也转发到中心") as s:
-            s.text_content()
-        with chat.send("确认执行") as s:
-            s.text_content()
+        # 追加第二个设备（full_access_flow 保证确定性）
+        csv2_path = create_full_csv(tmp_path, filename="device2.csv", device_name="华能阿拉善2#风机", device_ip="192.168.110.2")
+        full_access_flow(
+            chat, agent, str(csv2_path),
+            upload_msg="接入华能阿拉善2#风机，IP: 192.168.110.2",
+            plan_msg="生成接入方案",
+            confirm=True,
+            tmp_path=tmp_path,
+        )
         time.sleep(3)
 
         config_path = agent.config_dir / "config.json"
@@ -466,14 +463,8 @@ class TestExecuteDelete:
         modbus_before = config_before.get("c4_modbus_client", [])
         assert len(modbus_before) >= 2, "Should have 2 modbus instances"
 
-        # 删除第二个
-        with chat.send("停用 2#风机") as s:
-            text = s.text_content()
-        assert len(text) > 0
-
-        with chat.send("确认删除") as s:
-            text2 = s.text_content()
-        assert len(text2) > 0
+        # 删除第二个（确定性：嵌入 instance.id）
+        delete_device(chat, agent, "2#风机")
         time.sleep(3)
 
         config_after = assert_config_json_valid(config_path)
@@ -872,11 +863,14 @@ class TestAgentState:
         )
         time.sleep(3)
 
-        # 第二次接入（不同设备名模拟）
-        # 使用不同消息但相同 CSV 来触发新流程
+        # 第二次接入（不同设备）
+        csv2_path = create_full_csv(
+            tmp_path, filename="device2.csv",
+            device_name="华能阿拉善2#风机", device_ip="192.168.110.2",
+        )
         with chat.send_with_file(
             "接入另一个设备：华能阿拉善2#风机，IP是192.168.110.2",
-            str(csv1_path)
+            str(csv2_path)
         ) as s:
             text = s.text_content()
 

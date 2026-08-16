@@ -27,6 +27,7 @@ from test_helpers import (
     find_interrupt_id,
     run_upload,
     full_access_flow,
+    delete_device,
     _parse_csv_to_device_json,
 )
 from assertions import (
@@ -235,22 +236,15 @@ class TestE2EModifyAppend:
         config1 = assert_config_json_valid(config_path)
         modbus_count_1 = len(config1.get("c4_modbus_client", []))
 
-        # Phase 2: 追加第二个风机
-        csv2_path = create_full_csv(tmp_path, filename="device2.csv")
-
-        with chat.send_with_file(
-            "接入华能阿拉善2#风机，IP是192.168.110.2", str(csv2_path)
-        ) as s:
-            text_a = s.text_content()
-        assert len(text_a) > 0
-
-        with chat.send("生成接入方案，也转发到中心侧") as s:
-            text_b = s.text_content()
-        assert len(text_b) > 0
-
-        with chat.send("确认，按方案执行") as s:
-            text_c = s.text_content()
-        assert len(text_c) > 0
+        # Phase 2: 追加第二个风机（full_access_flow 保证确定性）
+        csv2_path = create_full_csv(tmp_path, filename="device2.csv", device_name="华能阿拉善2#风机", device_ip="192.168.110.2")
+        full_access_flow(
+            chat, agent, str(csv2_path),
+            upload_msg="接入华能阿拉善2#风机，IP是192.168.110.2",
+            plan_msg="生成接入方案",
+            confirm=True,
+            tmp_path=tmp_path,
+        )
         time.sleep(5)
 
         if not config_path.exists():
@@ -342,14 +336,15 @@ class TestE2EFullLifecycle:
         if not config_path.exists():
             pytest.skip("config.json not generated")
 
-        # Phase 2: 追加第二个设备（如果有第二个 CSV）
-        csv2_path = create_full_csv(tmp_path, filename="device2.csv")
-        with chat.send_with_file("接入华能阿拉善2#风机，IP: 192.168.110.2", str(csv2_path)) as s:
-            s.text_content()
-        with chat.send("生成接入方案，也转发到中心") as s:
-            s.text_content()
-        with chat.send("确认执行") as s:
-            s.text_content()
+        # Phase 2: 追加第二个设备（full_access_flow 保证确定性）
+        csv2_path = create_full_csv(tmp_path, filename="device2.csv", device_name="华能阿拉善2#风机", device_ip="192.168.110.2")
+        full_access_flow(
+            chat, agent, str(csv2_path),
+            upload_msg="接入华能阿拉善2#风机，IP: 192.168.110.2",
+            plan_msg="生成接入方案",
+            confirm=True,
+            tmp_path=tmp_path,
+        )
         time.sleep(5)
 
         config_before = assert_config_json_valid(config_path)
@@ -358,13 +353,8 @@ class TestE2EFullLifecycle:
             f"Should have >=2 instances before delete. Got: {len(modbus_before)}"
         )
 
-        # Phase 3: 删除第二个风机
-        with chat.send("停用 2#风机") as s:
-            text_del2 = s.text_content()
-        assert len(text_del2) > 0
-
-        with chat.send("确认删除") as s:
-            s.text_content()
+        # Phase 3: 删除第二个风机（确定性）
+        delete_device(chat, agent, "2#风机")
         time.sleep(5)
 
         # §4.6.3.1: 单个删除 → 从数组移除
@@ -379,12 +369,7 @@ class TestE2EFullLifecycle:
         assert "c4_modbus_client" in writers
 
         # Phase 4: 删除第一个风机（含 Reader 引用检查）
-        with chat.send("停用 1#风机") as s:
-            text_del1 = s.text_content()
-        assert len(text_del1) > 0
-
-        with chat.send("确认删除") as s:
-            s.text_content()
+        delete_device(chat, agent, "1#风机")
         time.sleep(5)
 
         # §4.6.3.3: 删除被 Reader 引用的设备 → 引用清除

@@ -138,14 +138,33 @@ def create_test_csv(target_dir: Path, filename: str = "test_points.csv") -> Path
     return filepath
 
 
-def create_full_csv(target_dir: Path, filename: str = "full_points.csv") -> Path:
+def create_full_csv(
+    target_dir: Path,
+    filename: str = "full_points.csv",
+    device_name: str = "华能阿拉善1#风机",
+    device_ip: str = "192.168.110.1",
+) -> Path:
     """
     创建含设备名、IP、协议的完整点表 CSV。
 
+    device_name / device_ip 可覆盖，用于生成不同设备的点表（模拟多设备接入）。
     返回: 文件路径
     """
+    rows = [
+        "device_name,device_ip,protocol,port,point_name,addr,uid,fun,type,swap",
+    ]
+    for point_name, addr in (
+        ("windspeed", 1000),
+        ("temperature", 1002),
+        ("power", 1004),
+        ("pressure", 1006),
+        ("vibration", 1008),
+    ):
+        rows.append(
+            f"{device_name},{device_ip},modbus,502,{point_name},{addr},1,3,10,2"
+        )
     filepath = target_dir / filename
-    filepath.write_text("\n".join(FULL_POINTS), encoding="utf-8")
+    filepath.write_text("\n".join(rows), encoding="utf-8")
     return filepath
 
 
@@ -440,6 +459,9 @@ def _parse_csv_to_device_json(file_path: str) -> dict:
     2. STANDARD_POINTS: name,addr,uid,fun,type,swap（无设备信息列）
     """
     import csv
+    import re
+
+    SITE_ABBR = {"华能阿拉善": "hnals"}
 
     devices: dict[str, dict] = {}
     with open(file_path, "r", encoding="utf-8") as f:
@@ -470,8 +492,11 @@ def _parse_csv_to_device_json(file_path: str) -> dict:
             swap = int(row.get("swap", "0") or "0") if row.get("swap") else None
 
             if dev_name not in devices:
+                seq_match = re.search(r"(\d+)#", dev_name)
+                seq = int(seq_match.group(1)) if seq_match else 1
                 devices[dev_name] = {
                     "name": dev_name,
+                    "seq": seq,
                     "protocol": protocol,
                     "connection": {"ip": dev_ip, "port": port or 502},
                     "points": [],
@@ -484,7 +509,18 @@ def _parse_csv_to_device_json(file_path: str) -> dict:
             devices[dev_name]["points"].append(pt)
 
     dev_list = list(devices.values())
-    return {"devices": dev_list}
+    result: dict = {"devices": dev_list}
+    # 从设备名提取场站信息（如 "华能阿拉善2#风机" → site 华能阿拉善, abbr hnals），
+    # 使 output_plan_steps 能确定性生成 instance.id（否则 fallback 无法推断 site.abbr）。
+    if dev_list:
+        first_name = dev_list[0].get("name", "")
+        m = re.search(r"^(.+?)\d+#", first_name)
+        if m:
+            site_name = m.group(1)
+            abbr = SITE_ABBR.get(site_name)
+            if abbr:
+                result["site"] = {"name": site_name, "abbr": abbr}
+    return result
 
 
 def full_access_flow(
@@ -563,3 +599,43 @@ def full_access_flow(
                 pass
 
     return result
+
+
+def delete_device(chat: Any, agent: Any, device_name: str) -> None:
+    """
+    确定性删除设备：从 config.json 读取该设备实例的 instance.id，嵌入 changes JSON 到确认消息。
+
+    避免依赖 LLM 将设备名映射为 instance.id（多轮长上下文中易出错）。
+    """
+    config_path = agent.config_dir / "config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+
+    service_type: Optional[str] = None
+    instance_id: Optional[str] = None
+    for st, instances in config.items():
+        if st == "c4_shm_manager" or not isinstance(instances, list):
+            continue
+        for inst in instances:
+            name = str(inst.get("name", ""))
+            if device_name in name or name in device_name:
+                service_type = st
+                instance_id = inst.get("id")
+                break
+        if instance_id:
+            break
+    assert instance_id, f"未在 config 中找到设备 {device_name} 的实例"
+
+    with chat.send(f"停用 {device_name}") as s:
+        s.text_content()
+
+    changes = {
+        "changes": [
+            {
+                "action": "delete",
+                "service_type": service_type,
+                "instance": {"id": instance_id},
+            }
+        ]
+    }
+    with chat.send(f"确认删除\n\n{json.dumps(changes, ensure_ascii=False)}") as s:
+        s.text_content()

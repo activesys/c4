@@ -517,7 +517,7 @@ def _make_3points_config():
 # ──────────────────────────────────────────────
 
 
-def start_asfp2_server(config_path):
+def start_asfp2_server(instance_id, config_path):
     """启动 c4_asfp2_server MCP 进程，调用 start 工具，返回 McpClient。"""
     binary = _find_c4_asfp2_server_binary()
     client = McpClient(binary)
@@ -538,7 +538,7 @@ def start_asfp2_client(config_path):
     return McpClient(binary)
 
 
-def start_sut(client, config_path):
+def start_sut(client, instance_id, config_path):
     """在 SUT client 上调用 start 工具。"""
     resp = client.call_tool(
         "start", {"instance_id": instance_id, "config_path": config_path},

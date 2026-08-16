@@ -374,7 +374,7 @@ pytest                # 全跑（L2 在无 API key 时自动 skip）
 | 4.6.1.1 | 首次接入（Modbus + ASFP2 转发） | config.json 含 `c4_shm_manager` + `c4_modbus_client[]` + `c4_asfp2_client[]`；所有 `shm_id != 0`；default 字段已填充 | c4_modbus_client 和 c4_asfp2_client 进程运行中 (ps) |
 | 4.6.1.2 | 首次接入（仅采集，无转发） | config.json 含 `c4_modbus_client[]`，**不**含 `c4_asfp2_client[]`；reader 为空或不存在 | — |
 | 4.6.1.3 | 原子写入 | 无残留 .tmp 文件；config.json.bak 存在（首次接入时为 config.json 的副本；非首次时为写入前版本） | — |
-| 4.6.1.4 | writer/reader 分类 | `c4_shm_manager.writer[]` 含所有 Registry 中 role=writer 的 service_type（动态读取 Registry 验证），`reader[]` 同理 | — |
+| 4.6.1.4 | writer/reader 分类 | `c4_shm_manager.writer[]`/`reader[]` 只列实际使用（实例化）的服务类型，且每个条目在 Registry 中声明为对应角色（动态读取 Registry 验证） | — |
 | 4.6.1.5 | 追加设备（第二次接入） | 新实例追加到 `c4_modbus_client[]`，旧实例完整保留；`c4_shm_manager.writer[]` 不重复添加相同 service_type | 新服务启动，旧服务不受影响 |
 
 #### 4.6.2 modify 操作（修改已有实例）
