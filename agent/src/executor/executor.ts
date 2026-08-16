@@ -25,8 +25,10 @@ export interface McpServiceClient {
     start(): Promise<string>;
 }
 
-/** c4_shm_manager 专用客户端——额外提供 adjust_shm 工具 */
+/** c4_shm_manager 专用客户端——额外提供 create_shm / adjust_shm 工具 */
 export interface ShmManagerClient extends McpServiceClient {
+    /** 首次启动时创建共享内存（shm 已存在时 shm_manager 返回 SHM_ALREADY_EXISTS） */
+    create_shm(): Promise<string>;
     /** 根据配置文件调整共享内存容量和点分配。前置条件：所有数据路径 MCP 已 stop */
     adjust_shm(): Promise<string>;
 }
@@ -235,12 +237,28 @@ async function handle_add(
         );
     }
 
-    // 检查 instance.id 不与现有冲突
+    // 检查 instance.id 是否与现有冲突：若已存在同名实例（如追加设备时转发目标已存在），
+    // 合并 points（追加新 point、更新已有 point），而非报错。
     for (const existing of instances) {
         if (existing.id === instance_id) {
-            throw new Error(
-                `instance.id "${instance_id}" 在 ${step.service_type} 中已存在`,
+            for (const pt of step.points) {
+                const existing_idx = existing.points.findIndex(
+                    (p) => p.id === pt.id || (pt.key !== undefined && p.key === pt.key),
+                );
+                if (existing_idx >= 0) {
+                    existing.points[existing_idx] = {
+                        ...existing.points[existing_idx],
+                        ...pt,
+                        shm_id: existing.points[existing_idx].shm_id,
+                    };
+                } else {
+                    existing.points.push({ ...pt, shm_id: pt.shm_id ?? 0 });
+                }
+            }
+            warnings.push(
+                `add: ${step.service_type}.${instance_id} 已存在，合并 points`,
             );
+            return;
         }
     }
 
@@ -389,6 +407,7 @@ function handle_delete(
         );
     }
 
+    const key_prefix = `${instance_id}.`;
     instances.splice(idx, 1);
 
     // 若删除后该 service_type 数组为空，从 shm_manager 分类中移除
@@ -400,6 +419,41 @@ function handle_delete(
             registry,
             warnings,
         );
+    }
+
+    // 相关性检查：移除所有 Reader 中引用该实例 key 的 points；Reader 变空则删除实例
+    for (const [st, svc_instances] of Object.entries(config)) {
+        if (st === "c4_shm_manager" || !Array.isArray(svc_instances)) {
+            continue;
+        }
+        const entry = registry?.get_entry(st);
+        if (entry?.role !== "reader") {
+            continue;
+        }
+        const reader_instances = svc_instances as MCPInstanceConfig[];
+        for (const inst of reader_instances) {
+            if (!Array.isArray(inst.points)) {
+                continue;
+            }
+            const before = inst.points.length;
+            inst.points = inst.points.filter(
+                (p) => typeof p.key !== "string" || !p.key.startsWith(key_prefix),
+            );
+            if (inst.points.length < before) {
+                warnings.push(
+                    `delete: 从 ${st}.${inst.id} 移除引用 ${instance_id} 的 points`,
+                );
+            }
+        }
+        const non_empty = reader_instances.filter(
+            (inst) => Array.isArray(inst.points) && inst.points.length > 0,
+        );
+        if (non_empty.length !== reader_instances.length) {
+            (config as Record<string, unknown>)[st] = non_empty;
+            if (non_empty.length === 0) {
+                update_shm_classification(st, "delete", config, registry, warnings);
+            }
+        }
     }
 }
 
@@ -658,15 +712,18 @@ async function callToolViaMultiClient(
 
 export class McpServiceClientAdapter implements McpServiceClient {
     readonly service_type: string;
+    private _instanceId: string;
     private _configPath: string;
 
     constructor(
         private _mcp: MCPClientHandle,
         serviceType: string,
+        instanceId: string,
         configPath: string,
         private _multiClient: MultiServerMCPClient,
     ) {
         this.service_type = serviceType;
+        this._instanceId = instanceId;
         this._configPath = configPath;
     }
 
@@ -676,6 +733,7 @@ export class McpServiceClientAdapter implements McpServiceClient {
 
     async start(): Promise<string> {
         return callToolViaMultiClient(this._multiClient, this.service_type, "start", {
+            instance_id: this._instanceId,
             config_path: this._configPath,
         });
     }
@@ -687,14 +745,17 @@ export class McpServiceClientAdapter implements McpServiceClient {
 
 export class ShmManagerClientAdapter implements ShmManagerClient {
     readonly service_type: string;
+    private _instanceId: string;
     private _configPath: string;
 
     constructor(
         private _multiClient: MultiServerMCPClient,
         serverName: string,
+        instanceId: string,
         configPath: string,
     ) {
         this.service_type = serverName;
+        this._instanceId = instanceId;
         this._configPath = configPath;
     }
 
@@ -706,8 +767,16 @@ export class ShmManagerClientAdapter implements ShmManagerClient {
         return "success"; // shm_manager has no start tool — never called
     }
 
+    async create_shm(): Promise<string> {
+        return callToolViaMultiClient(this._multiClient, this.service_type, "create_shm", {
+            instance_id: this._instanceId,
+            config_path: this._configPath,
+        });
+    }
+
     async adjust_shm(): Promise<string> {
         return callToolViaMultiClient(this._multiClient, this.service_type, "adjust_shm", {
+            instance_id: this._instanceId,
             config_path: this._configPath,
         });
     }
@@ -716,6 +785,7 @@ export class ShmManagerClientAdapter implements ShmManagerClient {
 export async function runRuntimeStopStart(
     shmMultiClient: MultiServerMCPClient,
     shmServerName: string,
+    instanceId: string,
     configPath: string,
     registry: RegistryLookup,
 ): Promise<StopStartResult> {
@@ -744,6 +814,7 @@ export async function runRuntimeStopStart(
     const shmClient = new ShmManagerClientAdapter(
         shmMultiClient,
         shmServerName,
+        instanceId,
         configPath,
     );
 
@@ -771,6 +842,7 @@ export async function runRuntimeStopStart(
                 new McpServiceClientAdapter(
                     mcpClient as MCPClientHandle,
                     svcType,
+                    instanceId,
                     configPath,
                     multiClient,
                 ),

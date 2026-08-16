@@ -29,6 +29,7 @@ export interface SuperWorkerConfig {
     registry: McpServiceRegistry;
     mcpManager: C4McpManager;
     configPath: string;
+    instanceId: string;
 }
 
 // ── 系统提示 ──────────────────────────────────────────────
@@ -89,11 +90,14 @@ export async function createC4Agent(
 ): Promise<C4Agent> {
     const agent = await createSuperWorker(config);
 
+    // 跨轮持久化的设备信息与接入方案——"生成方案"轮产出，"确认"轮注入，
+    // 避免依赖 LLM 从历史重新推导（追加设备/修改/删除场景易出错）。
+    let deviceInfo: Record<string, unknown> | null = null;
+    let accessPlan: Record<string, unknown> | null = null;
+
     return {
         invoke: async function* (input) {
             let planSteps: ServiceStep[] | null = null;
-            let deviceInfo: Record<string, unknown> | null = null;
-            let accessPlan: Record<string, unknown> | null = null;
             let planDeviceInfo: Record<string, unknown> | null = null;
             let planAccessPlan: Record<string, unknown> | null = null;
             let confirmOriginalContent: string | null = null;
@@ -101,8 +105,11 @@ export async function createC4Agent(
             try {
                 if (input.messages.length > 0) {
                     const last = input.messages[input.messages.length - 1];
-                    if (last.role === "user" && /确认|好的|执行|按方案|开始/.test(last.content as string)) {
-                        confirmOriginalContent = last.content as string;
+                    const lastContent = last.content as string;
+                    // 否定/拒绝词优先判断，避免 "取消，不执行..." 中的 "执行" 被误判为确认
+                    const isReject = /取消|拒绝|放弃|停止|算了|不执行|不要执行|不确认/.test(lastContent);
+                    if (last.role === "user" && !isReject && /确认|好的|执行|按方案|开始/.test(lastContent)) {
+                        confirmOriginalContent = lastContent;
                         isConfirm = true;
                         // 将 deviceInfo + accessPlan 注入消息，供 LLM 传入 output_plan_steps
                         const extra = [];
@@ -112,7 +119,7 @@ export async function createC4Agent(
                         input = {
                             messages: [...input.messages.slice(0, -1), {
                                 role: "user" as const,
-                                content: `${last.content}${prefix}立即调用 output_plan_steps({ devices, site, forward_targets })，不要用文字回答。`,
+                                content: `${lastContent}${prefix}立即调用 output_plan_steps 工具执行确认的变更（新增接入传 devices/site/forward_targets，修改/删除传 changes），不要用文字回答。`,
                             }],
                         };
                         planDeviceInfo = deviceInfo;
@@ -169,13 +176,26 @@ export async function createC4Agent(
                         yield { type: "tool_result" as const, name: tr.name, result: tr.result };
                     }
 
-                    if (hasToolCall || misses >= MAX_MISSES) break;
+                    if (hasToolCall || misses >= MAX_MISSES || !isConfirm) break;
 
                     misses++;
                     input.messages = [...input.messages, {
                         role: "user" as const,
                         content: "你必须立即调用 output_plan_steps 工具。不要用文字回答。",
                     }];
+                }
+
+                // 确定性优先：若确认消息嵌入了 changes JSON，直接采用（覆盖 LLM 的非确定性 id 映射）
+                if (isConfirm && confirmOriginalContent) {
+                    const changesMatch = confirmOriginalContent.match(/\{[\s\S]*"changes"[\s\S]*\}/);
+                    if (changesMatch) {
+                        try {
+                            const cd = JSON.parse(changesMatch[0]);
+                            if (Array.isArray(cd.changes)) {
+                                planSteps = cd.changes as ServiceStep[];
+                            }
+                        } catch { /* ignore */ }
+                    }
                 }
 
                 if (isConfirm && (!planSteps || (planSteps as ServiceStep[]).length === 0)) {
@@ -207,6 +227,7 @@ export async function createC4Agent(
                             const ssr = await runRuntimeStopStart(
                                 config.mcpManager.getMultiClient(),
                                 "shm",
+                                config.instanceId,
                                 config.configPath,
                                 config.registry as any,
                             );

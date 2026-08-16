@@ -38,13 +38,35 @@ const forwardTargetInputSchema = z.object({
     }),
 });
 
+// ── 修改/删除步骤（LLM 直接提供，非确定性生成）──────────
+
+const changePointSchema = z.object({
+    id: z.string().optional().describe("采集点标识，modify 时按 id 匹配已有 point"),
+    addr: z.number().optional(),
+    uid: z.number().optional(),
+    fun: z.number().optional(),
+    type: z.number().optional(),
+    swap: z.number().optional(),
+    key: z.string().optional(),
+}).passthrough();
+
+const changeStepSchema = z.object({
+    action: z.enum(["modify", "delete"]).describe("操作类型"),
+    service_type: z.string().describe("MCP 服务类型，如 c4_modbus_client"),
+    instance: z.object({
+        id: z.string().describe("实例唯一标识，modify/delete 按此匹配"),
+    }).passthrough(),
+    points: z.array(changePointSchema).optional(),
+});
+
 const planStepsInputSchema = z.object({
     site: z.object({
         name: z.string().describe("场站名称"),
         abbr: z.string().describe("场站缩写，如 hnals"),
     }).optional(),
-    devices: z.array(deviceInputSchema).describe("设备列表（从 doc-parser 获得）"),
-    forward_targets: z.array(forwardTargetInputSchema).optional().describe("转发目标列表"),
+    devices: z.array(deviceInputSchema).optional().describe("设备列表（新增接入时提供，从 doc-parser 获得）"),
+    forward_targets: z.array(forwardTargetInputSchema).optional().describe("转发目标列表（新增接入时提供）"),
+    changes: z.array(changeStepSchema).optional().describe("修改/删除已有实例的步骤列表"),
 });
 
 // ── 角色缩写映射 ───────────────────────────────────────────
@@ -94,7 +116,7 @@ function generate_steps(
     const warnings: string[] = [];
     const site_abbr = input.site?.abbr || "";
 
-    for (const dev of input.devices) {
+    for (const dev of input.devices ?? []) {
         const protocol = dev.protocol.replace(/_tcp$/, "").replace(/^tcp_/, "");
         const svc_type = find_service_type(registry, protocol, "writer");
 
@@ -205,6 +227,20 @@ function generate_steps(
 export function createOutputPlanStepsTool(registry: McpServiceRegistry) {
     return tool(
         async (input: z.infer<typeof planStepsInputSchema>) => {
+            if (input.changes && input.changes.length > 0) {
+                const steps: ServiceStep[] = input.changes.map((c) => ({
+                    action: c.action,
+                    service_type: c.service_type,
+                    instance: c.instance as Record<string, unknown>,
+                    points: (c.points ?? []).map((p) => ({ ...p, shm_id: 0 } as ServicePoint)),
+                }));
+                return JSON.stringify({
+                    success: true,
+                    steps_count: steps.length,
+                    steps,
+                });
+            }
+
             if (!input.devices || input.devices.length === 0) {
                 return JSON.stringify({
                     success: false,
@@ -232,8 +268,9 @@ export function createOutputPlanStepsTool(registry: McpServiceRegistry) {
         {
             name: "output_plan_steps",
             description:
-                "将设备信息转化为增量 MCP 服务配置步骤。" +
-                "输入 devices（从 doc-parser 获得）、可选的 site 和 forward_targets。" +
+                "将接入方案/变更请求转化为增量 MCP 服务配置步骤。" +
+                "新增接入：输入 devices（从 doc-parser 获得）、可选的 site 和 forward_targets。" +
+                "修改/删除：输入 changes（action=modify/delete + 目标实例 id + 变更字段）。" +
                 "内部自动完成：协议→服务类型映射、instance.id 生成、默认字段填充、转发目标映射。" +
                 "调用时机：用户确认方案后。",
             schema: planStepsInputSchema,

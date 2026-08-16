@@ -1,15 +1,17 @@
 // c4/agent/src/index.ts — Agent 入口点
 // 根据 agent.md §3.2.3 + §5.1 实现启动流程：
-//   1. 读取 /etc/c4/agent.json → Zod 校验
+//   1. 读取 ~/.local/c4/agent.json → Zod 校验
 //   2. McpServiceRegistry.loadFromDirectory()
 //   3. 构建 service_catalog → 注入 SuperWorker 系统提示
 //   4. 连接 c4_shm_manager，获取 MCP 工具
 //   5. createC4Agent（SuperWorker 工厂）
 //   6. 启动 Express 服务器
-//   7. 启动恢复：若 /etc/c4/config.json 存在，无条件 Stop-Start
+//   7. 启动恢复：create_shm；若 ~/.local/c4/config.json 存在，无条件 Stop-Start
 
 import { readFile, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
+import { homedir } from "node:os";
+import * as path from "node:path";
 import { createApp } from "./server/app.js";
 import { C4McpManager } from "./mcp/client.js";
 import {
@@ -38,6 +40,7 @@ import type { StructuredTool } from "@langchain/core/tools";
 
 // ── Agent Config Zod Schema ───────────────────────────────
 const AgentConfigSchema: z.ZodType<AgentConfig> = z.object({
+    instance_id: z.string(),
     model: z.object({
         provider: z.string(),
         name: z.string(),
@@ -55,7 +58,6 @@ const AgentConfigSchema: z.ZodType<AgentConfig> = z.object({
     }),
     shm_manager: z.object({
         binary: z.string(),
-        instance_id: z.string(),
         config_path: z.string(),
     }),
     state: z.object({
@@ -103,6 +105,17 @@ class AgentStateTracker implements AgentStateProvider {
 }
 
 // ── Helpers ───────────────────────────────────────────────
+
+/** 展开路径开头的 ~ 为当前用户主目录（agent.md §5.2 运行时目录位于 ~/.local/c4/） */
+function expandHome(p: string): string {
+    if (p === "~") {
+        return homedir();
+    }
+    if (p.startsWith("~/")) {
+        return path.join(homedir(), p.slice(2));
+    }
+    return p;
+}
 
 /** Logger: simple console-based logger with level filtering. */
 class Logger {
@@ -155,8 +168,8 @@ class RegistryLookupAdapter implements RegistryLookup {
 /**
  * Execute unconditional Stop-Start at startup (§3.2.3).
  *
- * If /etc/c4/config.json exists: spawn + connect all configured MCP services,
- * then execute stop → adjust_shm → start.
+ * Flow: start c4_shm_manager → create_shm → (if ~/.local/c4/config.json exists)
+ * spawn + connect all configured MCP services, then execute stop → adjust_shm → start.
  *
  * If config.json is missing: skip (no data path services to recover).
  *
@@ -171,6 +184,25 @@ async function runStartupRecovery(
     logger: Logger,
 ): Promise<void> {
     const configPath = config.shm_manager.config_path;
+
+    const shmClient = new ShmManagerClientAdapter(
+        mcpManager.getMultiClient(),
+        "shm",
+        config.instance_id,
+        configPath,
+    );
+
+    try {
+        const createResult = await shmClient.create_shm();
+        if (createResult === "success") {
+            logger.info("启动恢复: create_shm 成功，共享内存已创建");
+        } else {
+            logger.info(`启动恢复: create_shm 结果: ${createResult}（共享内存已存在时属正常）`);
+        }
+    } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.warn(`启动恢复: create_shm 调用异常: ${msg}`);
+    }
 
     if (!existsSync(configPath)) {
         logger.info("启动恢复: config.json 不存在，跳过（等待首次接入）");
@@ -202,12 +234,6 @@ async function runStartupRecovery(
             return;
         }
     }
-
-    const shmClient = new ShmManagerClientAdapter(
-        mcpManager.getMultiClient(),
-        "shm",
-        configPath,
-    );
 
     const dataServiceTypes: string[] = [];
     for (const key of Object.keys(systemConfig)) {
@@ -256,6 +282,7 @@ async function runStartupRecovery(
             const client = new McpServiceClientAdapter(
                 null as unknown as MCPClientHandle,
                 svcType,
+                config.instance_id,
                 configPath,
                 multiClient,
             );
@@ -337,10 +364,11 @@ async function createModel(config: AgentConfig, logger: Logger) {
 // ── main ──────────────────────────────────────────────────
 async function main(): Promise<void> {
     const configDirArg = process.argv.indexOf("--config-dir");
-    const baseDir =
+    const baseDir = expandHome(
         configDirArg >= 0 && configDirArg + 1 < process.argv.length
             ? process.argv[configDirArg + 1]
-            : "/etc/c4";
+            : "~/.local/c4",
+    );
     const configPath = `${baseDir}/agent.json`;
     let logger = new Logger("info");
 
@@ -365,6 +393,12 @@ async function main(): Promise<void> {
         console.error(`FATAL: 配置文件 ${configPath} 无效: ${msg}`);
         process.exit(1);
     }
+
+    // 展开配置中各路径的 ~ 前缀（agent.md §5.2）
+    config.mcp_registry.path = expandHome(config.mcp_registry.path);
+    config.shm_manager.config_path = expandHome(config.shm_manager.config_path);
+    config.state.path = expandHome(config.state.path);
+    config.logging.dir = expandHome(config.logging.dir);
 
     // Apply logging level from config
     logger = new Logger(config.logging.level);
@@ -469,6 +503,7 @@ async function main(): Promise<void> {
             registry,
             mcpManager,
             configPath: config.shm_manager.config_path,
+            instanceId: config.instance_id,
         });
         logger.info("SuperWorker Agent 已创建");
     } catch (err: unknown) {

@@ -107,6 +107,7 @@ export interface RegistryL1Summary {
 
 // ── Agent Config ─────────────────────────────────────────
 export interface AgentConfig {
+  instance_id: string;
   model: {
     provider: string;
     name: string;
@@ -122,7 +123,6 @@ export interface AgentConfig {
   mcp_registry: { path: string };
   shm_manager: {
     binary: string;
-    instance_id: string;
     config_path: string;
   };
   state: { backend: string; path: string };
