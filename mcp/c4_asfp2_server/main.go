@@ -8,7 +8,7 @@ import (
 	"log"
 	"net"
 	"os"
-	"strings"
+	"regexp"
 	"sync"
 	"sync/atomic"
 
@@ -134,22 +134,8 @@ func validateConfig(instances []serverInstance) error {
 //  Shared memory
 // ──────────────────────────────────────────────
 
-func attachShm() ([]byte, int, error) {
-	entries, err := os.ReadDir("/dev/shm")
-	if err != nil {
-		return nil, 0, fmt.Errorf("SHM_OPEN_FAILED: cannot read /dev/shm: %v", err)
-	}
-
-	var shmPath string
-	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), "c4_") {
-			shmPath = "/dev/shm/" + e.Name()
-			break
-		}
-	}
-	if shmPath == "" {
-		return nil, 0, fmt.Errorf("SHM_OPEN_FAILED: no c4_* shared memory found in /dev/shm")
-	}
+func attachShm(instanceID string) ([]byte, int, error) {
+	shmPath := shm.ShmPath(instanceID)
 
 	fd, err := unix.Open(shmPath, unix.O_RDWR, 0)
 	if err != nil {
@@ -188,6 +174,11 @@ func attachShm() ([]byte, int, error) {
 var bufPool = sync.Pool{New: func() any { return make([]byte, 65536) }}
 
 func parseASFP2Data(conn net.Conn, inst *instanceState, shmData []byte) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("c4_asfp2_server: connection goroutine panic (id=%s): %v", inst.cfg.ID, r)
+		}
+	}()
 	defer conn.Close()
 
 	tmp := bufPool.Get().([]byte)
@@ -531,7 +522,14 @@ func writeValue(shmData []byte, off int, value uint64, valueSize int) {
 // ──────────────────────────────────────────────
 
 type ServerStartInput struct {
+	InstanceID string `json:"instance_id" jsonschema:"required,instance identifier matching ^c4_[a-zA-Z0-9]+$ (POSIX shm name)"`
 	ConfigPath string `json:"config_path" jsonschema:"required,absolute path to config.json"`
+}
+
+// validateInstanceID reports whether id is a valid C4 instance identifier,
+// i.e. the POSIX shared memory name it must directly attach to.
+func validateInstanceID(id string) bool {
+	return regexp.MustCompile(`^c4_[a-zA-Z0-9]+$`).MatchString(id)
 }
 
 func startHandler(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -546,6 +544,10 @@ func startHandler(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolR
 	configPath, _ := args["config_path"].(string)
 	if configPath == "" {
 		return newError("CONFIG_PATH_MISSING: config_path is required"), nil
+	}
+	instanceID, _ := args["instance_id"].(string)
+	if !validateInstanceID(instanceID) {
+		return newError("INVALID_INSTANCE_ID: instance_id must match ^c4_[a-zA-Z0-9]+$"), nil
 	}
 	instances, err := loadConfig(configPath)
 	if err != nil {
@@ -562,7 +564,7 @@ func startHandler(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolR
 		return newResult("success"), nil
 	}
 
-	shmData, shmFd, err := attachShm()
+	shmData, shmFd, err := attachShm(instanceID)
 	if err != nil {
 		return newError(err.Error()), nil
 	}
@@ -606,6 +608,11 @@ func startHandler(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolR
 	for _, ist := range instancesState {
 		ist.wg.Add(1)
 		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("c4_asfp2_server: instance goroutine panic (id=%s): %v", ist.cfg.ID, r)
+				}
+			}()
 			defer ist.wg.Done()
 			runServer(ist, shmData)
 		}()
@@ -695,7 +702,7 @@ func main() {
 		&mcp.Tool{
 			Name:        "start",
 			Description: "Start ASFP2 server instances",
-			InputSchema: json.RawMessage(`{"type":"object","properties":{"config_path":{"type":"string"}},"required":["config_path"]}`),
+			InputSchema: json.RawMessage(`{"type":"object","properties":{"instance_id":{"type":"string"},"config_path":{"type":"string"}},"required":["instance_id","config_path"]}`),
 		},
 		startHandler,
 	)

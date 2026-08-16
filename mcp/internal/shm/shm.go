@@ -78,7 +78,7 @@ type SharedMemory struct {
 }
 
 func ShmPath(instanceID string) string {
-	return ShmDir + "/c4_" + instanceID
+	return ShmDir + "/" + instanceID
 }
 
 // Open attaches to an existing shared memory object (O_RDWR, no O_CREAT).
@@ -123,7 +123,7 @@ func Create(instanceID string, maxPoints int) (*SharedMemory, error) {
 	fd, err := unix.Open(path, unix.O_CREAT|unix.O_EXCL|unix.O_RDWR, 0600)
 	if err != nil {
 		if os.IsExist(err) {
-			return nil, fmt.Errorf("SHM_ALREADY_EXISTS: /dev/shm/c4_%s is already created", instanceID)
+			return nil, fmt.Errorf("SHM_ALREADY_EXISTS: %s is already created", instanceID)
 		}
 		return nil, fmt.Errorf("SHM_SYSCALL_FAILED: shm_open failed - %w", err)
 	}

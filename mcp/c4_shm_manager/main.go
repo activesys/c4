@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"regexp"
 	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -25,9 +26,24 @@ type CreateShmInput struct {
 	ConfigPath string `json:"config_path,omitempty" jsonschema:"optional,absolute path to config.json for config-based sizing"`
 }
 
+type AdjustShmInput struct {
+	InstanceID string `json:"instance_id" jsonschema:"required"`
+	ConfigPath string `json:"config_path" jsonschema:"required"`
+}
+
+var instanceIDRe = regexp.MustCompile(`^c4_[a-zA-Z0-9]+$`)
+
+func validateInstanceID(id string) bool {
+	return instanceIDRe.MatchString(id)
+}
+
 func createShmHandler(ctx context.Context, req *mcp.CallToolRequest, input CreateShmInput) (
 	*mcp.CallToolResult, any, error,
 ) {
+	if !validateInstanceID(input.InstanceID) {
+		return newError("INVALID_INSTANCE_ID: instance_id must match ^c4_[a-zA-Z0-9]+$"), nil, nil
+	}
+
 	var sm *shm.SharedMemory
 	var err error
 
@@ -144,6 +160,9 @@ func createFromConfig(configPath string, instanceID string) (*shm.SharedMemory, 
 		return nil, err
 	}
 
+	if len(writers) == 0 && len(readers) == 0 {
+		return shm.Create(instanceID, shm.DefaultMaxPoints)
+	}
 	if len(writers) == 0 || len(readers) == 0 {
 		return nil, fmt.Errorf("CONFIG_MISSING_SECTION: 'c4_shm_manager.writer' or 'c4_shm_manager.reader' is empty")
 	}
@@ -242,18 +261,39 @@ func createFromConfig(configPath string, instanceID string) (*shm.SharedMemory, 
 		return nil, fmt.Errorf("CONFIG_WRITE_FAILED: marshal failed: %v", err)
 	}
 
-	tmpPath := configPath + ".tmp"
-	if err := os.WriteFile(tmpPath, out, 0644); err != nil {
+	if err := writeConfigAtomic(configPath, out); err != nil {
 		rollback(sm)
-		return nil, fmt.Errorf("CONFIG_WRITE_FAILED: write failed: %v", err)
-	}
-	if err := os.Rename(tmpPath, configPath); err != nil {
-		rollback(sm)
-		os.Remove(tmpPath)
-		return nil, fmt.Errorf("CONFIG_WRITE_FAILED: rename failed: %v", err)
+		return nil, err
 	}
 
 	return sm, nil
+}
+
+func writeConfigAtomic(configPath string, out []byte) error {
+	tmpPath := configPath + ".tmp"
+	tmp, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+	if err != nil {
+		return fmt.Errorf("CONFIG_WRITE_FAILED: open temp file failed: %w", err)
+	}
+	if _, err := tmp.Write(out); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("CONFIG_WRITE_FAILED: write failed: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("CONFIG_WRITE_FAILED: fsync failed: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("CONFIG_WRITE_FAILED: close failed: %w", err)
+	}
+	if err := os.Rename(tmpPath, configPath); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("CONFIG_WRITE_FAILED: rename failed: %w", err)
+	}
+	return nil
 }
 
 func rollback(sm *shm.SharedMemory) {
@@ -303,26 +343,26 @@ func queryStatusHandler(ctx context.Context, req *mcp.CallToolRequest) (*mcp.Cal
 	return newResult(string(data)), nil
 }
 
-func attachExistingShm() (*shm.SharedMemory, error) {
-	entries, err := os.ReadDir("/dev/shm")
+func attachExistingShm(instanceID string) (*shm.SharedMemory, error) {
+	sm, err := shm.Open(shm.ShmPath(instanceID))
 	if err != nil {
-		return nil, fmt.Errorf("SHM_OPEN_FAILED: cannot read /dev/shm: %v", err)
+		return nil, fmt.Errorf("SHM_NOT_CREATED: shared memory not initialized, call create_shm first")
 	}
-	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), "c4_") {
-			return shm.Open("/dev/shm/" + e.Name())
-		}
-	}
-	return nil, fmt.Errorf("SHM_OPEN_FAILED: no c4_* shared memory found in /dev/shm")
+	return sm, nil
 }
 
-func adjustShmHandler(ctx context.Context, req *mcp.CallToolRequest, input struct{ ConfigPath string `json:"config_path"` }) (*mcp.CallToolResult, any, error) {
+func adjustShmHandler(ctx context.Context, req *mcp.CallToolRequest, input AdjustShmInput) (*mcp.CallToolResult, any, error) {
+	if !validateInstanceID(input.InstanceID) {
+		return newError("INVALID_INSTANCE_ID: instance_id must match ^c4_[a-zA-Z0-9]+$"), nil, nil
+	}
+
 	if state.sm == nil {
-		sm, err := attachExistingShm()
+		sm, err := attachExistingShm(input.InstanceID)
 		if err != nil {
 			return newError(err.Error()), nil, nil
 		}
 		state.sm = sm
+		rebuildPointCount(sm)
 	}
 
 	if _, err := os.Stat(state.sm.Path()); os.IsNotExist(err) {
@@ -336,6 +376,9 @@ func adjustShmHandler(ctx context.Context, req *mcp.CallToolRequest, input struc
 	}
 
 	configPath := input.ConfigPath
+	if _, err := os.Stat(configPath); err != nil {
+		return newError("CONFIG_PATH_MISSING: config_path parameter is empty or configuration file not found"), nil, nil
+	}
 
 	// 空 JSON 内容（{} / null / 空白）→ no-op：无需调整，直接返回 success
 	if isDefaultConfigContent(configPath) {
@@ -500,16 +543,22 @@ func adjustShmHandler(ctx context.Context, req *mcp.CallToolRequest, input struc
 		return newError(fmt.Sprintf("CONFIG_WRITE_FAILED: marshal failed: %v", err)), nil, nil
 	}
 
-	tmpPath := configPath + ".tmp"
-	if err := os.WriteFile(tmpPath, out, 0644); err != nil {
-		return newError(fmt.Sprintf("CONFIG_WRITE_FAILED: write failed: %v", err)), nil, nil
-	}
-	if err := os.Rename(tmpPath, configPath); err != nil {
-		os.Remove(tmpPath)
-		return newError(fmt.Sprintf("CONFIG_WRITE_FAILED: rename failed: %v", err)), nil, nil
+	if err := writeConfigAtomic(configPath, out); err != nil {
+		return newError(err.Error()), nil, nil
 	}
 
 	return newResult("success"), nil, nil
+}
+
+func rebuildPointCount(sm *shm.SharedMemory) {
+	h := sm.HeaderInfo()
+	count := uint32(0)
+	for i := 1; i <= int(h.MaxPoints); i++ {
+		if sm.BlockInfo(i).State == 1 {
+			count++
+		}
+	}
+	sm.SetHeaderUint32(shm.HdrOffPointCount, count)
 }
 
 func newResult(text string) *mcp.CallToolResult {
@@ -549,7 +598,7 @@ func main() {
 		&mcp.Tool{
 			Name:        "adjust_shm",
 			Description: "Adjust shared memory capacity and point allocation based on config file",
-			InputSchema: json.RawMessage(`{"type":"object","properties":{"config_path":{"type":"string","description":"Absolute path to config.json"}},"required":["config_path"]}`),
+			InputSchema: json.RawMessage(`{"type":"object","properties":{"instance_id":{"type":"string","description":"C4 instance identifier. instance_id is the shared memory name (must match c4_[a-zA-Z0-9]+)"},"config_path":{"type":"string","description":"Absolute path to config.json"}},"required":["instance_id","config_path"]}`),
 		},
 		adjustShmHandler,
 	)

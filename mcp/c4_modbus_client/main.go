@@ -10,8 +10,8 @@ import (
 	"log"
 	"net"
 	"os"
+	"regexp"
 	"sort"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -270,23 +270,18 @@ func validateConfig(instances []modbusInstance) error {
 //  Shared memory (O_RDWR)
 // ──────────────────────────────────────────────
 
-func attachShm() ([]byte, int, error) {
-	entries, err := os.ReadDir("/dev/shm")
-	if err != nil {
-		return nil, 0, fmt.Errorf("SHM_OPEN_FAILED: cannot read /dev/shm: %v", err)
-	}
+// instanceIDRe is the valid instance_id / shm name pattern (see docs/design/c4_modbus_client.md §6.1).
+var instanceIDRe = regexp.MustCompile("^c4_[a-zA-Z0-9]+$")
 
-	var shmPath string
-	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), "c4_") {
-			shmPath = "/dev/shm/" + e.Name()
-			break
-		}
-	}
-	if shmPath == "" {
-		return nil, 0, fmt.Errorf("SHM_OPEN_FAILED: no c4_* shared memory found in /dev/shm")
-	}
+// validateInstanceID reports whether id is a legal shm name for a modbus client instance.
+func validateInstanceID(id string) bool {
+	return instanceIDRe.MatchString(id)
+}
 
+// attachShm opens the POSIX shm segment for instanceID directly by name.
+// The modbus client is a Writer, so the segment is opened with O_RDWR.
+func attachShm(instanceID string) ([]byte, int, error) {
+	shmPath := "/dev/shm/" + instanceID
 	fd, err := unix.Open(shmPath, unix.O_RDWR, 0)
 	if err != nil {
 		return nil, 0, fmt.Errorf("SHM_OPEN_FAILED: shm_open failed for %s: %v", shmPath, err)
@@ -696,6 +691,11 @@ func pollRound(ist *instanceState, shmData []byte) {
 }
 
 func runClient(ist *instanceState, shmData []byte) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("runClient panic recovered: %v", r)
+		}
+	}()
 	defer ist.wg.Done()
 	defer ist.closeConn()
 
@@ -725,6 +725,10 @@ func startHandler(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolR
 	if err := json.Unmarshal(req.Params.Arguments, &args); err != nil {
 		return newError("CONFIG_PATH_MISSING: cannot parse arguments"), nil
 	}
+	instanceID, _ := args["instance_id"].(string)
+	if !validateInstanceID(instanceID) {
+		return newError(fmt.Sprintf("INVALID_INSTANCE_ID: instance_id '%s' must match pattern ^c4_[a-zA-Z0-9]+$", instanceID)), nil
+	}
 	configPath, _ := args["config_path"].(string)
 	if configPath == "" {
 		return newError("CONFIG_PATH_MISSING: config_path is required"), nil
@@ -739,7 +743,7 @@ func startHandler(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolR
 		return newError(err.Error()), nil
 	}
 
-	shmData, shmFd, err := attachShm()
+	shmData, shmFd, err := attachShm(instanceID)
 	if err != nil {
 		return newError(err.Error()), nil
 	}
@@ -860,7 +864,7 @@ func main() {
 		&mcp.Tool{
 			Name:        "start",
 			Description: "Start Modbus/TCP client polling instances",
-			InputSchema: json.RawMessage(`{"type":"object","properties":{"config_path":{"type":"string"}},"required":["config_path"]}`),
+			InputSchema: json.RawMessage(`{"type":"object","properties":{"instance_id":{"type":"string"},"config_path":{"type":"string"}},"required":["instance_id","config_path"]}`),
 		},
 		startHandler,
 	)

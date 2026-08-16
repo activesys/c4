@@ -8,9 +8,9 @@ import (
 	"log"
 	"net"
 	"os"
+	"regexp"
 	"runtime"
 	"sort"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -173,26 +173,20 @@ func validateConfig(instances []clientInstance) error {
 	return nil
 }
 
+// instanceIDRegex validates the mandatory instance_id format (^c4_[a-zA-Z0-9]+$).
+// instance_id doubles as the POSIX shared memory object name under /dev/shm.
+var instanceIDRegex = regexp.MustCompile("^c4_[a-zA-Z0-9]+$")
+
+func validateInstanceID(id string) bool {
+	return instanceIDRegex.MatchString(id)
+}
+
 // ──────────────────────────────────────────────
 //  Shared memory (O_RDONLY)
 // ──────────────────────────────────────────────
 
-func attachShm() ([]byte, int, error) {
-	entries, err := os.ReadDir("/dev/shm")
-	if err != nil {
-		return nil, 0, fmt.Errorf("SHM_OPEN_FAILED: cannot read /dev/shm: %v", err)
-	}
-
-	var shmPath string
-	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), "c4_") {
-			shmPath = "/dev/shm/" + e.Name()
-			break
-		}
-	}
-	if shmPath == "" {
-		return nil, 0, fmt.Errorf("SHM_OPEN_FAILED: no c4_* shared memory found in /dev/shm")
-	}
+func attachShm(instanceID string) ([]byte, int, error) {
+	shmPath := "/dev/shm/" + instanceID
 
 	fd, err := unix.Open(shmPath, unix.O_RDONLY, 0)
 	if err != nil {
@@ -565,6 +559,11 @@ func sendRound(ist *instanceState, shmData []byte) {
 }
 
 func runSender(ist *instanceState, shmData []byte) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("runSender panic recovered for instance '%s': %v", ist.cfg.Name, r)
+		}
+	}()
 	timer := time.NewTicker(time.Duration(ist.cfg.Timer) * time.Millisecond)
 	defer timer.Stop()
 
@@ -583,6 +582,7 @@ func runSender(ist *instanceState, shmData []byte) {
 // ──────────────────────────────────────────────
 
 type ClientStartInput struct {
+	InstanceID string `json:"instance_id" jsonschema:"required,ASFP2 client instance id (^c4_[a-zA-Z0-9]+$)"`
 	ConfigPath string `json:"config_path" jsonschema:"required,absolute path to config.json"`
 }
 
@@ -594,6 +594,13 @@ func startHandler(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolR
 	var args map[string]any
 	if err := json.Unmarshal(req.Params.Arguments, &args); err != nil {
 		return newError("CONFIG_PATH_MISSING: cannot parse arguments"), nil
+	}
+	instanceID, _ := args["instance_id"].(string)
+	if instanceID == "" {
+		return newError("CONFIG_PATH_MISSING: instance_id is required"), nil
+	}
+	if !validateInstanceID(instanceID) {
+		return newError(fmt.Sprintf("INVALID_INSTANCE_ID: instance_id must match ^c4_[a-zA-Z0-9]+$, got '%s'", instanceID)), nil
 	}
 	configPath, _ := args["config_path"].(string)
 	if configPath == "" {
@@ -614,7 +621,7 @@ func startHandler(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolR
 		return newResult("success"), nil
 	}
 
-	shmData, shmFd, err := attachShm()
+	shmData, shmFd, err := attachShm(instanceID)
 	if err != nil {
 		return newError(err.Error()), nil
 	}
@@ -754,7 +761,7 @@ func main() {
 		&mcp.Tool{
 			Name:        "start",
 			Description: "Start ASFP2 client sender instances",
-			InputSchema: json.RawMessage(`{"type":"object","properties":{"config_path":{"type":"string"}},"required":["config_path"]}`),
+			InputSchema: json.RawMessage(`{"type":"object","properties":{"instance_id":{"type":"string"},"config_path":{"type":"string"}},"required":["instance_id","config_path"]}`),
 		},
 		startHandler,
 	)
