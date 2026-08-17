@@ -343,7 +343,7 @@ Agent 维护一张全局映射表：
       "shm_id": 100,
       "type": "float32",
       "sources": [
-        {"mcp": "iec104_client", "common_addr": 1, "ioa": 16385}
+        {"mcp": "iec104_client", "common_address": 1, "ioa": 16385}
       ],
       "targets": [
         {"mcp": "asfp2_client", "asfp2_key": 200}
@@ -751,11 +751,11 @@ Agent（TypeScript）与 MCP Server（Go）的交互分为两部分：**运行�
 | `t1` | int | 发送超时（秒） |
 | `t2` | int | 接收超时（秒） |
 | `t3` | int | 空闲超时（秒），超时后发送 TEST FR |
-| `modules` | int | 支持的遥测/遥信/遥脉等模块数量 |
+| `modules` | int | 发送/接收序号（N(S)/N(R)）的模数，固定 32768（15 位序号，不可配置） |
 | `common_address` | int | 公共地址（CASDU） |
 | `discard_cp56time2a` | int | 忽略 CP56Time2a 时间戳：1=忽略, 0=使用 |
 | `ignore_qds` | int | 忽略品质描述字：1=忽略, 0=使用 |
-| `it_timer` | int | 对时周期（毫秒） |
+| `it_timer` | int | 累计量召唤周期（毫秒） |
 | `gi_timer` | int | 总召周期（毫秒） |
 
 **points 数组元素**（参见 `docs/C4.docx` §19.11）：
@@ -978,6 +978,15 @@ IEC104 采集（2 个主变 RTU）和 ASFP2 转发（到中心侧数据库和第
 均应实现的通用生命周期接口，供 Agent 在 Stop-Start 协议和故障恢复中使用。
 
 **操作粒度**：`stop` 和 `start` 的操作对象是整个 MCP 服务进程。`stop` 关闭所有数据路径并销毁实例状态，`start` 重新加载配置并启动全部实例。共享内存级别的调整由 `c4_shm_manager` 的 `adjust_shm(instance_id, config_path)` 工具负责。
+
+**返回时机语义**（所有数据路径 MCP 服务必须遵循）：
+
+- `start` 的返回时机是「所有实例均已启动」——各实例的 goroutine 已创建并进入运行循环。
+  `start` **不等待**实例是否成功连接服务器/设备、是否收到对端连接、应用层握手（如 IEC 104 的
+  STARTDT）是否完成。这些运行时行为的结果（成功或失败）记录到日志，由实例内部的连接管理
+  （重连 / 重试）逻辑异步处理，**不作为 `start` 的返回条件或错误码**。
+- `stop` 的返回时机是「所有实例均已销毁」——实例管理的连接（TCP 连接、监听端口等）必须全部关闭，
+  共享内存映射释放，进程回到初始化完成但未启动的状态。
 
 #### Tool: `stop`
 
