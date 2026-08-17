@@ -201,9 +201,8 @@ ASFP2 发送实例。
      d. 以 O_RDONLY 模式 shm_open 已有共享内存
      e. mmap 共享内存，校验 magic
      f. 构建 shm_id → asfp2_key 正向映射索引（内部数据结构）
-     g. 为每个配置实例启动一个 goroutine，连接目标服务器
-     h. 等待所有 goroutine 的 TCP 连接全部建立
-     i. 返回 "success" 或 isError 报告失败原因
+      g. 为每个配置实例启动一个 goroutine，异步发起连接并进入发送循环
+      h. 返回 "success"（不等待 TCP 连接建立，连接结果由各 goroutine 异步处理，见 §4.5）
   6. Agent 收到成功应答 → c4_asfp2_client 进入运行状态
 
 运行阶段：
@@ -240,8 +239,7 @@ sequenceDiagram
     C->>C: 校验 magic
     C->>C: 构建 shm_id→addr 映射
     C->>C: 启动 N 个 Client goroutine
-    C->>C: 等待所有 TCP 连接建立
-    C-->>A: "success"
+    C-->>A: "success"（不等待连接）
 
     Note over C: 各 goroutine 独立发送 ASFP2 数据
 
@@ -591,9 +589,9 @@ var index map[uint32]*PointMapping
 
 #### Tool: `start`
 
-加载配置文件、附加共享内存、启动所有 ASFP2 Client goroutine。
-**操作原子性**：全部实例的 TCP 连接建立成功才返回 `"success"`；任一实例连接失败则
-tear down 已建立的 goroutine（关闭连接、清理资源），恢复到调用前状态，返回 `isError: true`。
+加载配置文件、附加共享内存、启动所有 ASFP2 Client goroutine（各 goroutine 异步发起连接）。
+**返回时机**：所有实例均已启动即返回 `"success"`，**不等待 TCP 连接建立**——连接成功与否
+记录到日志，由各 goroutine 的连接管理逻辑（§4.5）异步处理（见 [c4_architecture.md §3.3.1](c4_architecture.md)）。
 **首次调用**完成服务初始化。**在 `stop` 之后可再次调用**——`stop` 已释放共享内存，
 `start` 重新 `shm_open` + `mmap` 后加载最新配置并启动实例。与首次启动执行完全相同的流程。
 **若服务当前处于运行状态（已 start 且未 stop），返回 `ALREADY_RUNNING`。**
@@ -612,7 +610,6 @@ tear down 已建立的 goroutine（关闭连接、清理资源），恢复到调
 | `SHM_CORRUPTED` | 共享内存 magic 校验失败 |
 | `SHM_OPEN_FAILED` | 无法打开共享内存（可能 `c4_shm_manager` 未创建） |
 | `SHM_ID_NOT_ASSIGNED` | 配置中存在 shm_id 未分配（=0）的 point——shm_id 必须由 `c4_shm_manager` 回填后才能使用 |
-| `CONNECT_FAILED` | 部分或全部实例 TCP 连接失败 |
 
 **MCP 应答示例**：
 
@@ -623,9 +620,9 @@ tear down 已建立的 goroutine（关闭连接、清理资源），恢复到调
 // <-- 应答
 {"jsonrpc": "2.0", "id": 1, "result": {"content": [{"type": "text", "text": "success"}], "isError": false}}
 
-// ========== 业务错误：连接失败 ==========
+// ========== 业务错误：shm_id 未分配 ==========
 // <-- 应答
-{"jsonrpc": "2.0", "id": 1, "result": {"content": [{"type": "text", "text": "CONNECT_FAILED: connect to 172.16.109.11:9999 failed: connection refused"}], "isError": true}}
+{"jsonrpc": "2.0", "id": 1, "result": {"content": [{"type": "text", "text": "SHM_ID_NOT_ASSIGNED: point hnals_1_scada.windspeed has shm_id=0"}], "isError": true}}
 ```
 
 ---
@@ -653,7 +650,7 @@ tear down 已建立的 goroutine（关闭连接、清理资源），恢复到调
 | 共享内存 magic 校验失败 | `start` | 返回 `SHM_CORRUPTED`，Agent 应重建共享内存后重试 |
 | 无法打开共享内存 | `start` | 返回 `SHM_OPEN_FAILED` |
 | 配置中存在 shm_id 未分配（=0） | `start` | 返回 `SHM_ID_NOT_ASSIGNED`——`c4_shm_manager` 必须先回填 |
-| 部分实例 TCP 连接失败 | `start` | 返回 `CONNECT_FAILED`——tear down 已建立的 goroutine，恢复到调用前状态 |
+| TCP 连接失败（目标不可达/拒绝连接） | 运行时 | 记录日志 → 启动 T0 重连（§4.5），不阻塞其他实例 |
 | Seqlock 读取时 magic 失效 | 运行时 | 跳过该 block，记录错误日志 |
 | 读取到非数值类型的 block | 运行时 | 跳过该 point，递增 items_skipped |
 | TCP 发送失败 | 运行时 | 递增 send_errors → 关闭连接 → 启动 T0 重连 |

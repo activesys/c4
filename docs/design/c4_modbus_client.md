@@ -216,9 +216,8 @@ Modbus/TCP 设备连接实例。
      d. 以 O_RDWR 模式 shm_open 已有共享内存
      e. mmap 共享内存，校验 magic
      f. 构建 (uid, fun, addr) → shm_id 反向映射索引（内部数据结构）
-     g. 为每个配置实例启动一个 goroutine，主动连接设备
-     h. 等待所有 goroutine 的 TCP 连接全部建立
-     i. 返回 "success" 或 isError 报告失败原因
+      g. 为每个配置实例启动一个 goroutine，异步发起连接并进入采集循环
+      h. 返回 "success"（不等待 TCP 连接建立，连接结果由各 goroutine 异步处理，见 §4.4）
   6. Agent 收到成功应答 → c4_modbus_client 进入运行状态
 
 运行阶段：
@@ -256,8 +255,7 @@ sequenceDiagram
     C->>C: 校验 magic
     C->>C: 构建 (uid,fun,addr)→shm_id 映射
     C->>C: 启动 N 个 Client goroutine
-    C->>C: 等待所有 net.Dial 成功
-    C-->>A: "success"
+    C-->>A: "success"（不等待连接）
 
     Note over C,D: 各 goroutine 主动轮询设备（请求/响应）
 
@@ -275,12 +273,14 @@ sequenceDiagram
 
 ### 3.2 连接失败处理
 
-`start` 要求**全部实例的 TCP 连接建立成功才返回 `"success"`**。若任一实例连接失败
-（`CONNECT_FAILED`），则 tear down 已建立的 goroutine（关闭连接、清理资源），恢复到
-调用前状态，返回 `isError: true` 并携带失败实例的 `ip:port`。
+`start` 只负责启动所有实例的 goroutine，**不等待 TCP 连接建立**（见
+[c4_architecture.md §3.3.1](c4_architecture.md) 返回时机语义）。每个 Client goroutine 启动后
+异步发起 `net.DialTimeout`：
 
-> 与 `c4_asfp2_server` 的差异：server 处理的是"端口冲突"（配置级冲突），client 处理的
-> 是"连接失败"（网络级故障，设备不可达/拒绝连接）。
+- 连接成功 → 进入轮询采集循环（§4.5）
+- 连接失败（设备不可达 / 拒绝连接）→ 记录日志，按 `t0` 周期重连直到成功（§4.4）
+
+连接失败**不导致 `start` 返回错误**，也不会 tear down 其他已启动的 goroutine。
 
 ### 3.3 停止与重启 —— C4_FUN_00063
 
@@ -405,7 +405,8 @@ Modbus/TCP ADU（最大 260 字节 = 7 + 253）
 
 ### 4.4 连接处理
 
-`c4_modbus_client` 作为 **Modbus TCP 主站**，主动发起 TCP 连接：
+`c4_modbus_client` 作为 **Modbus TCP 主站**，主动发起 TCP 连接。连接由各 Client goroutine
+在启动后异步发起（`start` 不等待连接结果，见 [c4_architecture.md §3.3.1](c4_architecture.md)）：
 
 ```
 1. net.DialTimeout("tcp", "{ip}:{port}", t0)  → 建立到设备的 TCP 连接（`t0` 为连接超时）
@@ -687,9 +688,9 @@ func writeBlock(shmPtr unsafe.Pointer, shmID uint32, dataType uint8,
 
 #### Tool: `start`
 
-加载配置文件、附加共享内存、启动所有 Client goroutine 并连接设备。
-**操作原子性**：全部实例的 TCP 连接建立成功才返回 `"success"`；任一实例连接失败则
-tear down 已建立的 goroutine（关闭连接、清理资源），恢复到调用前状态，返回 `isError: true`。
+加载配置文件、附加共享内存、启动所有 Client goroutine（各 goroutine 异步发起连接）。
+**返回时机**：所有实例均已启动即返回 `"success"`，**不等待 TCP 连接建立**——连接成功与否
+记录到日志，由各 goroutine 的连接管理逻辑（§4.4）异步处理（见 [c4_architecture.md §3.3.1](c4_architecture.md)）。
 **首次调用**完成服务初始化。**在 `stop` 之后可再次调用**——`stop` 已释放共享内存，
 `start` 重新 `shm_open` + `mmap` 后加载最新配置并启动实例。与首次启动执行完全相同的流程。
 **若服务当前处于运行状态（已 start 且未 stop），返回 `ALREADY_RUNNING`。**
@@ -709,7 +710,6 @@ tear down 已建立的 goroutine（关闭连接、清理资源），恢复到调
 | `SHM_OPEN_FAILED` | 无法打开共享内存（可能 `c4_shm_manager` 未创建） |
 | `SHM_ID_NOT_ASSIGNED` | 配置中存在 shm_id 未分配（=0）的 point——shm_id 必须由 `c4_shm_manager` 回填后才能使用 |
 | `INVALID_POINT` | point 字段非法（`fun`/`addr`/`type`/`swap` 等），错误信息指明具体字段与取值 |
-| `CONNECT_FAILED` | 部分或全部实例 TCP 连接失败 |
 
 **MCP 应答示例**：
 
@@ -720,9 +720,9 @@ tear down 已建立的 goroutine（关闭连接、清理资源），恢复到调
 // <-- 应答
 {"jsonrpc": "2.0", "id": 1, "result": {"content": [{"type": "text", "text": "success"}], "isError": false}}
 
-// ========== 业务错误：连接失败 ==========
+// ========== 业务错误：point 字段非法 ==========
 // <-- 应答
-{"jsonrpc": "2.0", "id": 1, "result": {"content": [{"type": "text", "text": "CONNECT_FAILED: connect to 192.168.110.1:502 failed: connection refused"}], "isError": true}}
+{"jsonrpc": "2.0", "id": 1, "result": {"content": [{"type": "text", "text": "INVALID_POINT: point windspeed has invalid fun=99"}], "isError": true}}
 ```
 
 ---
@@ -751,7 +751,7 @@ tear down 已建立的 goroutine（关闭连接、清理资源），恢复到调
 | 共享内存 magic 校验失败 | `start` | 返回 `SHM_CORRUPTED`，Agent 应重建共享内存后重试 |
 | 无法打开共享内存 | `start` | 返回 `SHM_OPEN_FAILED` |
 | 配置中存在 shm_id 未分配（=0） | `start` | 返回 `SHM_ID_NOT_ASSIGNED`——`c4_shm_manager` 必须先回填 |
-| 部分实例 TCP 连接失败 | `start` | 返回 `CONNECT_FAILED`——tear down 已建立的 goroutine，恢复到调用前状态 |
+| TCP 连接失败（设备不可达/拒绝连接） | 运行时 | 记录日志 → 按 t0 周期重连（§4.4），不阻塞其他实例 |
 | 设备返回异常响应（§4.3） | 运行时 | 跳过该批次，递增 errors |
 | 请求超时（t1 超时） | 运行时 | 递增 errors → 按 retries 重试 → 仍失败则关闭连接重连 |
 | 设备返回地址不匹配/畸形响应 | 运行时 | 丢弃未命中映射的字节，递增 items_dropped（仅畸形响应时发生） |
@@ -797,7 +797,7 @@ tear down 已建立的 goroutine（关闭连接、清理资源），恢复到调
 | 二进制格式 | ASFP2 帧（Flag + Length + Count + Attribute） | MBAP Header（7B）+ PDU（功能码 + 数据） |
 | 地址映射 | `addr → shm_id`（ASFP2 key） | `(uid, fun, addr) → shm_id`（三维映射） |
 | 数量上限 | 无（随包内 item 数） | 单次请求 ≤ 2000 线圈 / ≤ 125 寄存器 |
-| 启动失败场景 | 端口冲突（配置级） | 连接失败（网络级） |
+| 启动失败场景 | 端口冲突（配置级） | 无（连接失败属运行时，start 不等待连接） |
 | 配置字段 | `port`、`t1`、`t2`、`forward_kack`、`inverse_keep` | `ip` + `port`、`t0`、`t1`、`retries`、`timer`、`hton_register` 等 |
 | Points 字段 | `id`、`addr`、`shm_id` | `id`、`uid`、`addr`、`fun`、`type`、`swap`、`shm_id` |
 

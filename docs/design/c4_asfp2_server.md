@@ -183,9 +183,8 @@ ASFP2 Server 监听实例。
      d. 以 O_RDWR 模式 shm_open 已有共享内存
      e. mmap 共享内存，校验 magic
      f. 构建 addr → shm_id 反向映射索引（内部数据结构）
-     g. 为每个配置实例启动一个 goroutine，监听对应端口
-     h. 等待所有 goroutine 的 `net.Listen` 全部成功
-     i. 返回 "success" 或 isError 报告失败原因
+      g. 为每个配置实例启动一个 goroutine，异步监听对应端口
+      h. 返回 "success"（不等待 net.Listen 成功，监听结果由各 goroutine 异步处理）
   6. Agent 收到成功应答 → c4_asfp2_server 进入运行状态
 
 运行阶段：
@@ -222,8 +221,7 @@ sequenceDiagram
     S->>S: 校验 magic
     S->>S: 构建 addr→shm_id 映射
     S->>S: 启动 N 个 Server goroutine
-    S->>S: 等待所有 net.Listen 成功
-    S-->>A: "success"
+    S-->>A: "success"（不等待监听）
 
     Note over S: 各 goroutine 独立接收 ASFP2 数据
 
@@ -242,6 +240,10 @@ sequenceDiagram
 ### 3.2 端口冲突处理
 
 若配置中多个实例指定了相同的 `port`，`start` 工具返回 `isError: true` 并携带错误码 `PORT_CONFLICT`。
+
+> **端口被占用（非配置冲突）**：单个实例的 `port` 被系统其他进程占用时，属于运行时事件——该实例的
+> goroutine 在 `net.Listen` 失败后记录日志并停止，**不导致 `start` 返回错误**，也不影响其余实例
+> （见 [c4_architecture.md §3.3.1](c4_architecture.md) 返回时机语义）。
 
 ### 3.3 停止与重启 —— C4_FUN_00058
 
@@ -516,7 +518,9 @@ ASFP2 接收端无独立的采集周期——写入频率取决于发送端的�
 
 #### Tool: `start`
 
-加载配置文件、附加共享内存、启动所有 ASFP2 Server goroutine。
+加载配置文件、附加共享内存、启动所有 ASFP2 Server goroutine（各 goroutine 异步监听端口）。
+**返回时机**：所有实例均已启动即返回 `"success"`，**不等待 net.Listen 成功**——监听结果
+记录到日志（见 [c4_architecture.md §3.3.1](c4_architecture.md)）。
 **首次调用**完成服务初始化。**在 `stop` 之后可再次调用**——`stop` 已释放共享内存，`start` 重新 `shm_open` + `mmap` 后加载最新配置并启动实例。与首次启动执行完全相同的流程。
 **若服务当前处于运行状态（已 start 且未 stop），返回 `ALREADY_RUNNING`。**
 
@@ -572,7 +576,7 @@ ASFP2 接收端无独立的采集周期——写入频率取决于发送端的�
 | `config_path` 参数缺失 | `start` | 返回 `CONFIG_PATH_MISSING` |
 | 配置文件格式错误 | `start` | 返回 `isError: true` + `CONFIG_PARSE_ERROR` |
 | 端口重复（配置冲突） | `start` | 返回 `isError: true` + `PORT_CONFLICT` |
-| 单个端口被占用（非配置冲突） | `start` | 返回 `isError: true` + 具体端口；不影响其余实例 |
+| 单个端口被占用（非配置冲突） | 运行时 | 记录日志，该实例停止，不影响其余实例 |
 | 共享内存 magic 校验失败 | `start` | 返回 `SHM_CORRUPTED`，Agent 应重建共享内存后重试 |
 | 无法打开共享内存 | `start` | 返回 `SHM_OPEN_FAILED` |
 | ASFP2 Flag 不匹配 | 运行时 | 丢弃数据包，递增 parse_errors |
