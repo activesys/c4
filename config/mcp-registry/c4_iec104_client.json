@@ -1,0 +1,45 @@
+{
+  "service_type": "c4_iec104_client",
+  "display_name": "IEC104 数据采集",
+  "role": "writer",
+  "protocols": [{
+    "protocol": "iec104",
+    "description": "IEC 60870-5-104 远动数据采集客户端，从远动装置采集遥信/遥测/遥脉数据后写入共享内存",
+    "selection_rules": [
+      { "condition": "device.protocol == 'iec104'", "description": "IEC104 协议设备数据采集" }
+    ]
+  }],
+  "config_schema": {
+    "required": ["id", "ip", "port"],
+    "fields": {
+      "id":         { "type": "string",  "source": "plan",    "default": null,  "description": "实例唯一标识" },
+      "name":       { "type": "string",  "source": "plan",    "default": null,  "description": "实例名称" },
+      "ip":         { "type": "string",  "source": "plan",    "default": null,  "description": "远动装置 IP 地址" },
+      "port":       { "type": "integer", "source": "plan",    "default": 2404,  "description": "IEC104 端口（默认 2404）" },
+      "k":          { "type": "integer", "source": "default", "default": 12,    "description": "发送窗口大小（未确认 I 帧最大数）" },
+      "w":          { "type": "integer", "source": "default", "default": 8,     "description": "接收窗口大小（收到 w 个 I 帧回确认）" },
+      "t0":         { "type": "integer", "source": "default", "default": 30,    "description": "连接建立超时（秒）" },
+      "t1":         { "type": "integer", "source": "default", "default": 15,    "description": "发送/测试超时（秒）" },
+      "t2":         { "type": "integer", "source": "default", "default": 10,    "description": "确认超时（秒），须小于 t1" },
+      "t3":         { "type": "integer", "source": "default", "default": 20,    "description": "链路空闲测活超时（秒）" },
+      "modules":    { "type": "integer", "source": "default", "default": 32768, "description": "发送/接收序号模数（协议固定 32768）" },
+      "common_address": { "type": "integer", "source": "default", "default": 1, "description": "ASDU 公共地址" },
+      "ioa_size":   { "type": "integer", "source": "default", "default": 3,    "description": "信息对象地址字节数（1/2/3）" },
+      "discard_cp56time2a": { "type": "integer", "source": "default", "default": 0, "description": "忽略设备时标（1=忽略，用本地时间）" },
+      "ignore_qds": { "type": "integer", "source": "default", "default": 0,    "description": "忽略品质描述字（1=无效点也写入）" },
+      "it_timer":   { "type": "integer", "source": "default", "default": 0,    "description": "累计量召唤周期（毫秒，0=禁用）" },
+      "gi_timer":   { "type": "integer", "source": "default", "default": 1000, "description": "总召唤周期（毫秒，0=禁用）" }
+    }
+  },
+  "binary_path": "/usr/local/bin/c4_iec104_client",
+  "error_mappings": {
+    "ALREADY_RUNNING": "服务已在运行中，无需重复启动",
+    "CONFIG_PATH_MISSING": "配置文件路径无效，请检查 Agent 部署是否正确",
+    "CONFIG_PARSE_ERROR": "配置文件格式错误，请检查配置内容",
+    "INVALID_CONFIG": "实例配置无效，请检查超时或地址参数",
+    "SHM_CORRUPTED": "数据存储异常，请联系管理员检查共享内存状态",
+    "SHM_OPEN_FAILED": "无法访问数据存储，请检查共享内存配置",
+    "SHM_ID_NOT_ASSIGNED": "数据点未分配通道，请重新生成接入方案",
+    "INVALID_POINT": "数据点配置无效，请检查信息对象地址"
+  }
+}
