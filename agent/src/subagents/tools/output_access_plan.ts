@@ -30,9 +30,14 @@ const forwardTargetSchema = z.object({
     name: z.string().describe("转发目标名称，如 中心侧数据库"),
     protocol: z.string().describe("转发协议，如 asfp2, influxdb"),
     connection: z.object({
-        ip: z.string().describe("目标 IP"),
-        port: z.number().describe("目标端口"),
+        ip: z.string().optional().describe("目标 IP（asfp2 等 TCP 协议用）"),
+        port: z.number().optional().describe("目标端口（asfp2 等 TCP 协议用）"),
+        url: z.string().optional().describe("InfluxDB 写入端点 URL（influxdb 用，如 http://172.16.109.12:8086）"),
+        token: z.string().optional().describe("InfluxDB 认证 token（influxdb 用）"),
+        org: z.string().optional().describe("InfluxDB 组织名（influxdb 用）"),
+        bucket: z.string().optional().describe("InfluxDB bucket 名（influxdb 用）"),
     }),
+    measurement: z.string().optional().describe("InfluxDB measurement 名（influxdb 用，所有数据点共用；缺省时用场站缩写）"),
 });
 
 const accessPlanArgSchema = z.object({

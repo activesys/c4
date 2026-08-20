@@ -40,6 +40,11 @@
 → **调用 output_access_plan({ ... })**
 → 成功后，用自然语言展示方案摘要，询问"是否确认执行？"
 
+用户消息含 "生成接入方案，并写入 InfluxDB"
+→ forward_targets 的 protocol 为 "influxdb"，connection 用 url/token/org/bucket，measurement 为入库表名：
+  - forward_targets: [{ name: "华能阿拉善InfluxDB入库", protocol: "influxdb", connection: { url: "http://172.16.109.12:8086", token: "YOUR_TOKEN", org: "activesys", bucket: "hnals" }, measurement: "wind_turbine" }]
+→ **调用 output_access_plan({ ... })**，其余流程同上
+
 **修改/删除调用示例：**
 用户："将 1#风机的 IP 改为 192.168.110.5"
 → 复述："将 1#风机（数据采集）的通信地址改为 192.168.110.5"，询问"是否确认修改？"

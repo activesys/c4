@@ -466,7 +466,7 @@ interface ServicePoint {
 | 服务类型 | point 字段 | 含义 | 来源 |
 |----------|-----------|------|------|
 | `c4_asfp2_client` | `key`, `addr` | 转发点配置 | plan + default |
-| `c4_influxdb_client` | `key` | 入库点引用 | plan |
+| `c4_influxdb_client` | `key`, `measurement` | 入库点引用 + measurement 名 | plan |
 
 **3.2.1.2 字段值来源（config_schema.source 驱动）**
 
@@ -532,9 +532,14 @@ interface ForwardTargetSpec {
   name: string                // 目标名称，如 "中心侧数据库"
   protocol: string            // 转发协议，如 "asfp2", "influxdb"
   connection: {
-    ip: string                // 目标 IP
-    port: number              // 端口
+    ip?: string               // 目标 IP（asfp2 等 TCP 协议）
+    port?: number             // 端口（asfp2 等 TCP 协议）
+    url?: string              // InfluxDB 写入端点 URL（influxdb）
+    token?: string            // InfluxDB 认证 token（influxdb）
+    org?: string              // InfluxDB 组织名（influxdb）
+    bucket?: string           // InfluxDB bucket 名（influxdb）
   }
+  measurement?: string        // InfluxDB measurement 名（influxdb，缺省用场站缩写）
   // 转发点的 addr 映射（可选，由 step-decomposer 自动分配）
   point_addr_start?: number   // 转发点 addr 起始值，默认自动分配
 }
@@ -575,8 +580,8 @@ interface ForwardTargetSpec {
 1. `site.abbr` + `device.seq` + 服务角色缩写 → 生成 `instance.id`（如 `hnals_1_scada`）
 2. `device.connection.{ip, port}` → 填入 `source="plan"` 的实例配置字段
 3. `device.points[]` → 映射到 Writer 服务的 `points[]`（name→id, addr, uid, fun, type, swap）
-4. `forward_targets[].connection.{ip, port}` → 填入 Reader 服务的实例配置
-5. 每个采集点自动生成对应的 Reader point：`key = {instance.id}.{point.name}`，`addr` 由 step-decomposer 分配
+4. `forward_targets[].connection` → 填入 Reader 服务的实例配置（asfp2: `ip`/`port`；influxdb: `url`/`token`/`org`/`bucket`）
+5. 每个采集点自动生成对应的 Reader point：`key = {instance.id}.{point.name}`，`addr` 由 step-decomposer 分配（influxdb 无 `addr`，改填 `measurement`，缺省用 `site.abbr`）
 
 **3.2.1.3 实例 id 生成规则**
 

@@ -1,0 +1,41 @@
+{
+  "service_type": "c4_influxdb_client",
+  "display_name": "InfluxDB 数据存储",
+  "role": "reader",
+  "protocols": [{
+    "protocol": "influxdb",
+    "description": "InfluxDB 数据入库客户端，从共享内存读取数据后写入 InfluxDB 时序数据库",
+    "selection_rules": [
+      { "condition": "target.role == 'store'", "description": "数据入库场景（写入 InfluxDB 时序数据库）" }
+    ]
+  }],
+  "config_schema": {
+    "required": ["id", "url", "token", "org", "bucket"],
+    "fields": {
+      "id":         { "type": "string",  "source": "plan",    "default": null,  "description": "实例唯一标识" },
+      "name":       { "type": "string",  "source": "plan",    "default": null,  "description": "实例名称" },
+      "url":        { "type": "string",  "source": "plan",    "default": null,  "description": "InfluxDB 写入端点 URL（如 http://172.16.109.12:8086）" },
+      "token":      { "type": "string",  "source": "plan",    "default": null,  "description": "认证 token（必填，空字符串视为缺失；1.x 未启用认证时填任意非空值）" },
+      "org":        { "type": "string",  "source": "plan",    "default": null,  "description": "组织名（必填，空字符串视为缺失；1.x 时填任意非空值，被忽略）" },
+      "bucket":     { "type": "string",  "source": "plan",    "default": null,  "description": "bucket 名（必填，空字符串视为缺失；1.x 时填数据库名）" },
+      "precision":  { "type": "string",  "source": "default", "default": "ms",  "description": "时间戳精度：ns/us/ms/s（默认 ms）" },
+      "batch_size": { "type": "integer", "source": "default", "default": 5000,  "description": "单次 flush 行数上限（0 或负数视为非法）" },
+      "flush_interval": { "type": "integer", "source": "default", "default": 1000, "description": "flush 间隔（毫秒，0 禁用时间触发）" },
+      "timer":      { "type": "integer", "source": "default", "default": 100,   "description": "共享内存轮询周期（毫秒）" },
+      "gzip":       { "type": "integer", "source": "default", "default": 1,     "description": "是否启用 gzip 压缩请求体（1=启用，0=关闭）" },
+      "t0":         { "type": "integer", "source": "default", "default": 30,    "description": "HTTP 请求超时（秒）" },
+      "retries":    { "type": "integer", "source": "default", "default": 3,     "description": "flush 失败最大重试次数（0 不重试）" }
+    }
+  },
+  "binary_path": "/usr/local/bin/c4_influxdb_client",
+  "error_mappings": {
+    "ALREADY_RUNNING": "服务已在运行中，无需重复启动",
+    "CONFIG_PATH_MISSING": "配置文件路径无效，请检查 Agent 部署是否正确",
+    "CONFIG_PARSE_ERROR": "配置文件格式错误，请检查配置内容",
+    "INVALID_CONFIG": "实例配置无效，请检查数据库地址或认证信息",
+    "INVALID_POINT": "数据点配置无效，请检查数据点类型或名称",
+    "SHM_CORRUPTED": "数据存储异常，请联系管理员检查共享内存状态",
+    "SHM_OPEN_FAILED": "无法访问数据存储，请检查共享内存配置",
+    "SHM_ID_NOT_ASSIGNED": "数据点未分配通道，请重新生成接入方案"
+  }
+}

@@ -31,11 +31,16 @@ const deviceInputSchema = z.object({
 
 const forwardTargetInputSchema = z.object({
     name: z.string().describe("转发目标名称"),
-    protocol: z.string().describe("转发协议，如 asfp2"),
+    protocol: z.string().describe("转发协议，如 asfp2, influxdb"),
     connection: z.object({
-        ip: z.string(),
-        port: z.number(),
+        ip: z.string().optional().describe("目标 IP（asfp2 等 TCP 协议用）"),
+        port: z.number().optional().describe("目标端口（asfp2 等 TCP 协议用）"),
+        url: z.string().optional().describe("InfluxDB 写入端点 URL（influxdb 用，如 http://172.16.109.12:8086）"),
+        token: z.string().optional().describe("InfluxDB 认证 token（influxdb 用）"),
+        org: z.string().optional().describe("InfluxDB 组织名（influxdb 用）"),
+        bucket: z.string().optional().describe("InfluxDB bucket 名（influxdb 用）"),
     }),
+    measurement: z.string().optional().describe("InfluxDB measurement 名（influxdb 用，缺省时用场站缩写）"),
 });
 
 // ── 修改/删除步骤（LLM 直接提供，非确定性生成）──────────
@@ -182,24 +187,40 @@ function generate_steps(
                 : `forward_${ft.name.replace(/[^a-zA-Z0-9_]/g, "_").toLowerCase()}`;
 
             const reader_points: ServicePoint[] = [];
+            const is_influxdb = svc_type === "c4_influxdb_client";
+            const measurement = ft.measurement || site_abbr;
             let auto_addr = 3001;
             for (const writer_step of steps) {
                 for (const pt of writer_step.points) {
-                    reader_points.push({
-                        id: `${writer_step.instance.id}.${pt.id}`,
-                        key: `${writer_step.instance.id}.${pt.id}`,
-                        addr: auto_addr++,
-                        shm_id: 0,
-                    });
+                    const point_key = `${writer_step.instance.id}.${pt.id}`;
+                    if (is_influxdb) {
+                        reader_points.push({
+                            id: point_key,
+                            key: point_key,
+                            measurement,
+                            shm_id: 0,
+                        });
+                    } else {
+                        reader_points.push({
+                            id: point_key,
+                            key: point_key,
+                            addr: auto_addr++,
+                            shm_id: 0,
+                        });
+                    }
                 }
             }
 
             const instance: Record<string, unknown> = {
                 id: forward_instance_id,
                 name: ft.name,
-                ip: ft.connection.ip,
-                port: ft.connection.port,
             };
+            // 透传 connection 字段：asfp2 提供 ip/port，influxdb 提供 url/token/org/bucket
+            for (const [k, v] of Object.entries(ft.connection)) {
+                if (v !== undefined && v !== null && v !== "") {
+                    instance[k] = v;
+                }
+            }
 
             const entry = registry.queryRegistry(svc_type);
             if (entry?.config_schema) {

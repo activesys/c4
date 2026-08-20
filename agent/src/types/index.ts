@@ -7,12 +7,13 @@ export type StepAction = "add" | "modify" | "delete";
 // ── Service Point ────────────────────────────────────────
 export interface ServicePoint {
   id: string;                   // 采集点标识符
-  addr: number;                 // 协议地址
+  addr?: number;                // 协议地址（Writer 及 asfp2 Reader）
   uid?: number;                 // Modbus: 单元标识符
   fun?: number;                 // Modbus: 功能码
   type?: number;                // Modbus: 数据类型枚举
   swap?: number;                // Modbus: 字节交换大小
   key?: string;                 // Reader: 引用的 Writer key
+  measurement?: string;         // influxdb: measurement 名
   shm_id: number;               // 全局 shm_id，默认 0
 }
 
@@ -45,7 +46,15 @@ export interface DeviceSpec {
 export interface ForwardTargetSpec {
   name: string;
   protocol: string;
-  connection: { ip: string; port: number };
+  connection: {
+    ip?: string;      // asfp2 等 TCP 协议目标 IP
+    port?: number;    // asfp2 等 TCP 协议目标端口
+    url?: string;     // influxdb 写入端点 URL
+    token?: string;   // influxdb 认证 token
+    org?: string;     // influxdb 组织名
+    bucket?: string;  // influxdb bucket 名
+  };
+  measurement?: string;  // influxdb: 所有 point 共用的 measurement 名（缺省时用 site.abbr）
   point_addr_start?: number;
 }
 
