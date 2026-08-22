@@ -26,7 +26,7 @@ Agent 系统覆盖数据接入流程中 Agent 侧的全部职能：
 
 | 阶段 | 功能 | 目标承担方式 | 当前实现 |
 |------|------|---------|---------|
-| **理解** | C4_FUN_00001 理解自然语言、C4_FUN_00002/00003 解析文档 | SuperWorker + doc-parser 子代理 | SuperWorker + csv/xlsx/txt parser 工具 + `responseFormat` |
+| **理解** | C4_FUN_00001 理解自然语言、C4_FUN_00002/00003 收集信息 | SuperWorker + info-gatherer 子代理 | SuperWorker + csv/xlsx/txt parser 工具 + `responseFormat` |
 | **规划** | C4_FUN_00004 生成接入方案、C4_FUN_00044 分解为可执行配置 | SuperWorker → plan-generator → step-decomposer | SuperWorker + `output_plan_steps` 工具 |
 | **执行** | C4_FUN_00006 MCP 生命周期管理、C4_FUN_00007 常规操作自主执行 | SuperWorker 直接执行 | 同（确定性代码，不受架构影响） |
 | **交互** | C4_FUN_00041 Web 界面、C4_FUN_00005 非技术语言 | Express + React | 同 |
@@ -39,8 +39,8 @@ Agent 系统覆盖数据接入流程中 Agent 侧的全部职能：
 | 功能码 | 功能名称 | 当前实现 | 设计章节 | 可确定性测试 |
 |--------|---------|---------|---------|:--:|
 | C4_FUN_00001 | 理解自然语言 | SuperWorker 系统提示 + 对话能力 | §3.1 | ❌（LLM 推理） |
-| C4_FUN_00002 | 解析结构化文档 | csv_parser / xlsx_parser 工具 + `responseFormat` | §3.2 | ❌（LLM 推理） |
-| C4_FUN_00003 | 解析非结构化文档 | txt_parser 工具 + `responseFormat` | §3.2 | ❌（LLM 推理） |
+| C4_FUN_00002 | 收集结构化文档接入信息 | csv_parser / xlsx_parser 工具 + `responseFormat` | §3.2 | ❌（LLM 推理） |
+| C4_FUN_00003 | 收集非结构化文档接入信息 | txt_parser 工具 + `responseFormat` | §3.2 | ❌（LLM 推理） |
 | C4_FUN_00004 | 生成接入方案 | LLM 推理 + 自然语言输出（待添加 `output_access_plan` 工具） | §3.2 | ❌（LLM 推理） |
 | C4_FUN_00044 | 分解为可执行配置 | `output_plan_steps` 工具 + Zod 校验 | §3.2.1 | ❌（LLM 推理） |
 | C4_FUN_00005 | 非技术语言交互 | SuperWorker 系统提示硬约束 | §3.1 | ❌（LLM 行为） |
@@ -125,7 +125,7 @@ while (!resultAchieved && retries < maxRetries) {
 
 ```
 SuperWorker (createDeepAgent)
-  ├─ doc-parser 子代理     (文件解析 → 结构化设备信息)
+  ├─ info-gatherer 子代理     (解析文档 + 推断协议 + 收集信息 → 结构化设备信息)
   ├─ plan-generator 子代理  (设备信息 → AccessPlan)
   └─ step-decomposer 子代理 (AccessPlan → ServiceStep[])
 ```
@@ -203,14 +203,14 @@ SuperWorker (createAgent)
          │
          ▼
 ┌─────────────────────────────────────────────────────┐
-│ Step 1: doc-parser                                   │
+│ Step 1: info-gatherer                                   │
 │                                                       │
 │ LLM 发现 path=...csv → 调用 csv_parser({filePath})    │
 │ csv_parser 返回 raw tabular data (headers + rows)     │
 │ LLM 分析 raw data + 对话上下文                         │
 │ responseFormat 强制产出结构化 deviceInfo:             │
 │   { devices: [{ name:"1#风机", protocol:"modbus_tcp", │
-│                 connection:{ip,port}, points:[...] }]} │
+│                 ip:"...", port:502, points:[...] }]} │
 │                                                       │
 │ → deviceInfo 被 C4Agent wrapper 捕获                  │
 │ → SS E 输出自然语言摘要:"解析完成，设备名：1#风机..."  │
@@ -286,7 +286,7 @@ const superWorker = createDeepAgent({
   ],
   tools: [/* MCP 工具运行时注入 */],
   subagents: [
-    docParserSubagent,
+    infoGathererSubagent,
     planGeneratorSubagent,
     stepDecomposerSubagent,
   ],
@@ -316,10 +316,14 @@ const agent = createAgent({
 
 ### 3.2 工具定义与执行模块
 
-> **注意**：以下定义的 `doc-parser`、`plan-generator`、`step-decomposer` 在目标架构中为子代理，
+> **注意**：以下定义的 `info-gatherer`、`plan-generator`、`step-decomposer` 在目标架构中为子代理，
 > 当前实现中为 SuperWorker 的扁平工具。此处以工具形式描述当前实现，子代理形式为目标架构预留。
 
-**doc-parser 工具集**（C4_FUN_00002 / 00003）：
+**info-gatherer**（原 doc-parser，C4_FUN_00002 / 00003）：
+
+负责**收集接入所需的全部必要信息**——解析文档、推断协议、收集实例参数与点表字段，缺失时逐个询问用户补齐。
+接入任务（add/modify/delete）天然是「采集（Writer）+ 转发（Reader）」的完整链路，info-gatherer **同时收集两端**：
+采集设备（devices）与转发目标（forward_targets），缺一端即信息不完整。产出"信息齐全"的设备信息，供 plan-generator 组装方案。
 
 | 工具 | 职责 | 输入 | 输出 |
 |------|------|------|------|
@@ -327,49 +331,200 @@ const agent = createAgent({
 | `xlsx_parser` | 读取 Excel，转 CSV 后同 csv_parser | `filePath` | 同上 |
 | `txt_parser` | 读取纯文本文件 | `filePath` | `{content}` |
 
-工具只做**纯格式提取**，不做语义推断。LLM 拿到 raw data 后，由 `responseFormat: deviceInfoSchema` 强制产出结构化设备信息：
+解析工具只做**纯格式提取**，不做语义推断。LLM 拿到 raw data 后，结合 `service_catalog`（含各协议
+`point_fields`）理解列含义、推断协议、映射点字段，由 `responseFormat: deviceInfoSchema` 产出结构化设备信息。
+
+`deviceInfoSchema` 是 info-gatherer 的输出骨架。info-gatherer **负责收集齐必要信息**——协议（推断或询问）、采集目标标识 abbr（候选，从描述提取）、
+实例参数（`source=plan` 的字段：`default=null` 必填，有 `default` 提示默认值）、点表字段（`point_fields`），缺失时逐个询问用户补齐（见下"信息收集与询问机制"）：
 
 ```typescript
 const deviceInfoSchema = z.object({
     devices: z.array(z.object({
         name: z.string(),            // 从对话上下文提取
-        protocol: z.string(),        // 根据数据特征推断
-        connection: z.object({
-            ip: z.string(),          // 缺失时填 ""
-            port: z.number(),
-        }),
-        points: z.array(z.object({
-            name: z.string(), addr: z.number(),
-            uid: z.number().optional(), fun: z.number().optional(),
-            type: z.number().optional(), swap: z.number().optional(),
-        })),
+        abbr: z.string(),            // 采集目标标识（候选，info-gatherer 从描述提取，见 §3.2.1.3a）
+        protocol: z.string(),        // 协议必填——info-gatherer 三层推断 + 询问闭环保证（见下）
+        points: z.array(z.object({   // 点字段宽松，具体字段由 point_fields 决定
+            name: z.string(),
+        }).passthrough()),
         missing_fields: z.array(z.string()).optional(),
-    })),
+    }).passthrough()),               // 实例 plan 字段（ip/port、url/token 等）直接平铺，由 config_schema.source=plan 声明
+    forward_targets: z.array(z.object({
+        name: z.string(),            // 转发目标名称
+        abbr: z.string(),            // 转发目标标识（候选，info-gatherer 从描述提取，见 §3.2.1.3a）
+        protocol: z.string(),        // 转发协议必填——info-gatherer 推断 + 询问闭环保证
+        missing_fields: z.array(z.string()).optional(),
+    }).passthrough()),               // 实例 plan 字段（ip/port、url/token 等）+ 目标级字段（measurement）平铺
 });
 ```
 
+> 骨架仅保留 `name`/`protocol`/`points` 三要素，其余字段（实例 plan 字段、协议特有点字段）
+> 一律 `.passthrough()` 放行。info-gatherer 按 registry 的 `point_fields`/`config_schema` 收集齐必要字段
+> （`source=plan` 的实例字段：`default=null` 必填、有 `default` 提示默认值；+ `point_fields` 的全部点字段），缺失时询问用户补齐。
+
+**协议推断（`protocol` 字段，归属 info-gatherer）**：协议是业务信息，由 LLM 分层推断，**不硬编码任何协议**。
+推断**由 info-gatherer 完成**——它用 `service_catalog`（含各服务的 `point_fields`）理解点表列 + 推断协议，分三层：
+
+1. **从点表字段推断**：对比 `service_catalog` 中各 Writer 服务的 `point_fields`，若点表列与某协议
+   唯一匹配（如含 `uid`/`fun`/`type`/`swap` 列 → Modbus），据此确定协议
+2. **从用户描述推断**：若多协议的 `point_fields` 无法区分（如协议 A、B 的点表都只是整数地址列），
+   从用户消息中的描述（「采集 Modbus 设备」、「接 IEC104 远动装置」）分析协议类型
+3. **询问用户**（C4_FUN_00005）：前两步均无法确定时，询问用户补充协议/通信方式信息，
+   得知协议后**用该协议的 `point_fields` 重新理解点表列**，再继续收集其余信息
+
+> 三层推断**同时适用于 Writer（采集协议）与 Reader（转发协议）**——Writer 从采集点表列推断，
+> Reader 从转发目标描述推断（如「转发到上级系统」→ ASFP2、「入库」→ InfluxDB）。两类协议都确定后信息才算收集齐。
+
+> 协议推断成功后**不单独打断用户**，协议作为方案的一部分在 plan-generator 的方案确认环节隐含确认。
+> `deviceInfo.protocol` 与 `AccessPlan.protocol` 都是**必填**——info-gatherer 通过三层推断 + 询问用户兜底
+> 保证协议在收尾时必已确定（推断不出就询问，不产出空协议），到 step-decomposer 查 registry 时协议已就绪。
+
+**信息收集与询问机制**（C4_FUN_00005 缺失引导）：
+
+info-gatherer 收集两类必要信息，都由 registry 声明：
+
+| 类别 | 来源 | 判定「必需」的依据 |
+|------|------|----------------|
+| **实例参数** | `config_schema.fields` 中 `source=plan` 的字段（除 `id`/`name`） | `source=plan` 且 `default=null` |
+| **点表字段** | `point_fields`（含 name/type/description，全部必须） | 全部字段 |
+
+> `source=default` 的字段（如 `timer`）不收集，直接填默认值；`source=plan` 且有 `default` 的字段（如
+> `port=502`）询问时提示默认值、允许留空跳过；`id`/`name` 由 agent 生成。
+> 上述两类必要信息**对采集设备（Writer）和转发目标（Reader）都适用**——两者都有实例参数（`config_schema.source=plan`）和点表字段（`point_fields`），info-gatherer 分别收集齐全。
+
+**收集流程（循环直到收集齐）**：解析文档 → 推断协议（失败则询问用户协议后重新理解列）→
+**确定性完整性校验** → 缺失则**逐个询问**（一次一项）→ 用户提供 → 再校验 → 循环。
+
+**确定性完整性校验**（info-gatherer 收尾时，SuperWorker 用确定性代码执行）：
+- info-gatherer 产出 deviceInfo 后、传给 plan-generator 前，SuperWorker 对照 registry 的
+  `point_fields`（全部字段）+ `source=plan` 且 `default=null` 的实例字段检查是否齐全
+- **缺失 vs 类型错误的判定分离**：本步只做「键存在性检查」——逐键判断 `point_fields` 全部字段与
+  `source=plan` 且 `default=null` 的实例字段是否**都有值**（键存在且非空），**不涉及类型合法性**；类型校验交给
+  step-decomposer 的运行时强校验（§3.2 双层校验 ②）做三态判定
+- 缺失（键不存在或值为空）→ 返回缺失清单 → info-gatherer 逐个询问用户补齐 → 再校验 → 循环，
+  齐全才放行给 plan-generator；类型错误在本步**不拦截**，由 step-decomposer 兜底
+- 保证「信息齐全」契约由**确定性代码**兜底，而非 LLM 自觉
+
+**询问 vs 确认分离**：询问（info-gatherer，补齐缺失信息，如「请提供 IP」）≠ 确认（plan-generator，
+批准方案，如「是否执行？」）。必填字段（`default=null`）的询问由界面技术保证必答；有 `default` 的
+字段询问时提示默认值、允许留空跳过（留空即用默认值）。
+
 **plan-generator**（C4_FUN_00004）：
 
-当前实现中，plan-generator 是 LLM 的隐式推理步骤。LLM 根据 `deviceInfo` + `service_catalog` 在自然语言中描述接入方案并等待确认。待添加 `output_access_plan` 结构化输出工具后，此步骤可产出结构化的 `AccessPlan`。
+当前实现中，plan-generator 是 LLM 的隐式推理步骤。LLM 根据 info-gatherer 产出的**信息齐全的 deviceInfo** +
+`service_catalog` 选型并组装方案，在自然语言中描述接入方案并等待确认。待添加 `output_access_plan`
+结构化输出工具后，此步骤可产出结构化的 `AccessPlan`。
+
+> plan-generator **不再推断协议、不再收集信息**——协议已由 info-gatherer 确定，必要信息已收集齐，
+> 它只做「选型 + 组装方案 + 方案确认」。
+
+**方案确认（含协议隐含确认 + 标识确认）**：展示接入方案时，须一并展示协议与采集/转发目标标识（abbr），
+让用户确认**协议是否正确**、**abbr 是否绑定到正确的设备**——协议由 info-gatherer 推断或询问确定，
+abbr 由 §3.2.1.3a 记忆库检索 + 确认确定，二者都作为方案的一部分让用户最终确认。
 
 **step-decomposer**（C4_FUN_00044）—— `output_plan_steps` 工具：
 
 ```typescript
 const outputPlanStepsTool = tool(
-    async ({ steps }) => {
-        const vr = validate_plan_steps(steps);
-        if (!vr.valid) return JSON.stringify({ success: false, errors: vr.errors });
+    async (input) => {
+        // 运行时校验：按 protocol 查 registry，动态构建强校验 schema
+        for (const dev of input.devices) {
+            const svcType = find_service_type(registry, dev.protocol, "writer");
+            const entry = registry.queryRegistry(svcType);
+            const pointSchema = pointFieldsToZod(entry.point_fields);   // 点字段 → Zod
+            const configSchema = configFieldsToZod(entry.config_schema); // 实例字段 → Zod（白名单）
+            for (const pt of dev.points) {
+                const r = pointSchema.safeParse(pt);
+                if (!r.success) return JSON.stringify({ success: false, errors: r.error.issues });
+            }
+            const r2 = configSchema.safeParse(pickPlanFields(dev, entry.config_schema));   // 校验实例 plan 字段（剥离结构化键）
+            if (!r2.success) return JSON.stringify({ success: false, errors: r2.error.issues });
+        }
+        // 校验转发目标（Reader）
+        for (const ft of input.forward_targets) {
+            const svcType = find_service_type(registry, ft.protocol, "reader");
+            const entry = registry.queryRegistry(svcType);
+            const configSchema = configFieldsToZod(entry.config_schema);
+            const r = configSchema.safeParse(pickPlanFields(ft, entry.config_schema));
+            if (!r.success) return JSON.stringify({ success: false, errors: r.error.issues });
+        }
+        const steps = generate_steps(input, registry);
         return JSON.stringify({ success: true, steps });
     },
     {
         name: "output_plan_steps",
         description: "将接入方案分解为增量 MCP 服务配置步骤...",
-        schema: z.object({ steps: z.array(serviceStepSchema) }),
+        schema: z.object({ /* 宽松骨架，与 AccessPlan 同构（devices + forward_targets） */ }),
     },
 );
 ```
 
-双层校验：Zod schema 校验（结构） + `validate_plan_steps()` 业务校验（id 格式、去重）。
+**双层校验**（协议无关，是 agent 与 mcp 的边界）：
+
+| 层 | 位置 | 职责 | schema 来源 |
+|---|------|------|-----------|
+| ① 声明式 schema | 工具定义时 | 宽松骨架（name/protocol/points），`.passthrough()` 放行协议特有字段 | 静态，协议无关 |
+| ② 运行时强校验 | 工具 async 函数内 | 按 protocol 查 registry，动态构建 Zod：`pointFieldsToZod` 校验点字段 + `configFieldsToZod` 校验实例字段（白名单） | registry 的 `point_fields`/`config_schema` 驱动 |
+
+> ② 是 agent 与 mcp 的**边界**：只有通过 registry 驱动强校验的数据才进入 `generate_steps` →
+> `merge_config_from_steps` → config.json。校验失败在此拦截，**绝不流入 mcp**。
+
+**运行时校验的三态结果**（按字段逐个判定）：
+
+| 结果 | 判定 | 处理 |
+|------|------|------|
+| 通过 | 值存在且类型合法 | 继续 |
+| 类型错误 | 值存在但类型不符（如 `addr` 传成字符串） | 返回结构化错误 → LLM 重试（§1.4 ReAct） |
+| 信息缺失 | 必要字段未提供（point_fields 全部字段 + `source=plan` 且 `default=null` 的实例字段） | 已由 info-gatherer 收尾的确定性校验保证，此处是双保险最后防线——若仍发生说明链路有 bug，返回错误 |
+
+> **C4_FUN_00005 缺失引导**（C4_RS_00261）：业务字段（地址/表名/实例参数等）的值来自**用户**或 registry
+> **显式声明的 `default`**（协议标准默认值，如 Modbus TCP 端口 502）；agent 不得在 registry 未声明时
+> 自行编造默认值（C4_RS_00044）。缺失引导**由 info-gatherer 负责**（见上「信息收集与询问机制」），
+> step-decomposer 的运行时校验只是最后防线。引导清单由 registry 的 `point_fields`（全部字段）与
+> `source=plan` 且 `default=null` 的实例字段声明驱动，零协议硬编码。
+
+配套的协议无关通用转换器（写一次，所有协议复用）：
+
+```typescript
+// point_fields → Zod schema（registry 驱动，无协议硬编码）
+function pointFieldsToZod(pointFields: PointField[]): z.ZodObject<any> {
+    const shape: Record<string, z.ZodTypeAny> = {};
+    for (const f of pointFields) {
+        shape[f.name] = typeToZod(f.type).describe(f.description);   // 全部字段必填（无默认值）
+    }
+    return z.object(shape).passthrough();   // passthrough 放行 id/key/shm_id 等通用字段
+}
+
+// config_schema.source=plan 的实例字段 → Zod schema（registry 驱动，无协议硬编码）
+function configFieldsToZod(configSchema: ConfigSchema): z.ZodObject<any> {
+    const shape: Record<string, z.ZodTypeAny> = {};
+    for (const [name, f] of Object.entries(configSchema.fields)) {
+        if (f.source !== "plan") continue;  // source=default 的字段不校验
+        const t = typeToZod(f.type).describe(f.description);
+        shape[name] = f.default === null ? t : t.optional();  // default=null 必填，有 default 可选（跳过则用默认值）
+    }
+    return z.object(shape).strict();        // strict：拒绝未声明的字段（白名单）
+}
+
+// 剥离结构化键（id/name/abbr/protocol/points 等），只保留 source=plan 的平铺字段子集——
+// 供 configFieldsToZod 的 .strict() 白名单校验前调用，避免误伤 AccessPlan 的结构化字段
+function pickPlanFields(obj: Record<string, unknown>, configSchema: ConfigSchema): Record<string, unknown> {
+    const out: Record<string, unknown> = {};
+    for (const [name, f] of Object.entries(configSchema.fields)) {
+        if (f.source === "plan" && name in obj) {
+            out[name] = obj[name];
+        }
+    }
+    return out;
+}
+```
+
+> **passthrough vs strict 的取舍**：`pointFieldsToZod` 用 `.passthrough()` 放行 point 的通用字段
+> （`id`/`key`/`shm_id`）；`configFieldsToZod` 用 `.strict()`（白名单）——instance 里除声明字段外
+> **不该有任何东西**，拼错的 `prot`、凭空加的 `foo` 都会被拒绝，防止垃圾字段流入 config.json。
+> instance 的 `id`/`name` 由 generate_steps 生成，`abbr`/`protocol`/`points` 是 AccessPlan 的结构化字段，均不经过校验。
+
+> **白名单作用域 = 实例平铺 plan 字段**：`configFieldsToZod` 只校验 `source=plan` 的平铺字段，结构化键不在此列。
+> 校验前用 `pickPlanFields(dev, config_schema)` 剥离结构化键，只取 plan 字段子集传入 `.strict()`，避免误伤合法字段。
 
 **执行模块（确定性代码，非子代理）**：
 
@@ -439,34 +594,36 @@ interface ServiceStep {
   points: ServicePoint[]       // 数据点列表
 }
 
-// 数据点（Writer / Reader 共用，字段按服务类型区分）
-interface ServicePoint {
-  // ---- Writer 通用 ----
-  id: string                   // 采集点标识符（global key = {instance.id}.{point.id}）
-  // + 协议特有字段（addr, uid, fun, type 等）
+// 数据点（Writer / Reader 共用，字段由 registry 声明）
+// Writer 点用 `id` 标识（采集点名），Reader 点用 `key` 标识（引用 Writer 点），二者互斥——
+// 用判别联合强制：id 与 key 恰好其一致合法，双缺或双填均被类型系统拒绝
+type ServicePoint = WriterPoint | ReaderPoint;
 
-  // ---- Reader 通用 ----
-  key?: string                 // 引用的 Writer key（{service_id}.{point_id}）
-  // + 协议特有字段（addr 等）
+interface WriterPoint {
+  id: string                   // Writer 点标识：采集点名（global key = {instance.id}.{point.id}）
+  key?: never                  // Writer 点无 key
+  shm_id: number               // 固定为 0，由 c4_shm_manager 分配后回填
+  [field: string]: unknown     // 业务字段由 point_fields 声明（Writer / Reader 统一）
+}
 
-  // shm_id 固定为 0，由 c4_shm_manager 分配后回填
+interface ReaderPoint {
+  id?: never                   // Reader 点无 id
+  key: string                  // Reader 点标识：引用 Writer 点（值 = {writer_instance_id}.{point_id}），agent 确定性生成
+  shm_id: number               // 固定为 0，由 c4_shm_manager 分配后回填
+  [field: string]: unknown     // 业务字段由 point_fields 声明（Writer / Reader 统一）
 }
 ```
 
-**Writer 点特有字段**（按服务类型）：
+**Writer 点字段**：由 Registry 的 `point_fields` 描述（每个字段含 `name`/`type`/`description`，**全部必须提供、无默认值**）。
+step-decomposer 遍历 `point_fields`，从点表/设备信息中按字段名提取对应值，**不硬编码任何协议字段**。
+例如 Modbus 的 `point_fields` 含 `addr/uid/fun/type/swap`，IEC104 只含 `addr`。
 
-| 服务类型 | point 字段 | 含义 | 来源 |
-|----------|-----------|------|------|
-| `c4_modbus_client` | `uid`, `addr`, `fun`, `type`, `swap` | Modbus 寄存器参数 | plan（从点表提取） |
-| `c4_iec104_client` | `addr` | IEC104 信息体地址 (IOA) | plan（从点表提取） |
-| `c4_asfp2_server` | `addr` | ASFP2 协议 key（接收端） | plan |
+**Reader 点字段**：Reader 与 Writer 统一使用 `point_fields` 描述业务字段（如 ASFP2 的 `addr` 转发地址、
+InfluxDB 的 `measurement` 表名），**不区分 reader_point**。Reader 的 point 比 Writer 多一个 `key`
+通用字段（引用 Writer 的点，值 = `{writer_instance_id}.{point_id}`，agent 确定性生成，非业务数据）。
 
-**Reader 点特有字段**（按服务类型）：
-
-| 服务类型 | point 字段 | 含义 | 来源 |
-|----------|-----------|------|------|
-| `c4_asfp2_client` | `key`, `addr` | 转发点配置 | plan + default |
-| `c4_influxdb_client` | `key`, `measurement` | 入库点引用 + measurement 名 | plan |
+step-decomposer 按 `{id（Writer）/ key（Reader）, shm_id:0} + point_fields（用户提供）` 通用生成 point，
+**不区分具体服务类型**。点表业务字段（`point_fields`）**无默认值、无自动分配**——用户未提供时由 C4_FUN_00005 引导补充。
 
 **3.2.1.2 字段值来源（config_schema.source 驱动）**
 
@@ -474,15 +631,26 @@ interface ServicePoint {
 
 | source | 含义 | 填充方式 |
 |--------|------|---------|
-| `"plan"` | 需从 AccessPlan 提取 | step-decomposer 从用户确认的方案中取值，如 IP、设备名 |
+| `"plan"` | 需从 AccessPlan 提取 | 从方案取值；提取不到时 `default=null` 报错，有 `default` 用默认值 |
 | `"default"` | 使用默认值 | 直接取 `config_schema.fields[field].default` |
 
 step-decomposer 对每个服务类型：
 1. 调 `queryRegistryTool(service_type)` 获取完整 config_schema
 2. 遍历 `config_schema.fields`：
-   - `source: "plan"` → 从 AccessPlan 对应字段提取
+   - `source: "plan"` → 从 AccessPlan 对应字段提取；提取不到时 `default=null` 报错，有 `default` 用默认值
    - `source: "default"` → 填入 `default` 值
-3. `config_schema.required` 中的字段必须全部有值，否则报错
+3. `source: "plan"` 且 `default=null` 的字段必须有值，否则报错
+
+**实例 plan 字段**：`config_schema` 中 `source: "plan"` 的字段（除 `id`/`name` 等实例标识外）
+即实例的业务字段，**直接平铺在 AccessPlan 的 device/forward_target 上**，不做"连接/认证/归属"
+之类的语义分类——step-decomposer 按 config_schema 逐字段提取，不硬编码 `ip/port/url` 等。
+Modbus 的 `ip/port`、InfluxDB 的 `url/token/org/bucket`、未来串口协议的 `serial_port/baud_rate`
+都由各自 registry 的 `config_schema` 声明，agent 代码零协议硬编码、零语义猜测。
+
+**运行时强校验**：实例字段与点字段在进入 `generate_steps` 前，由 registry 驱动动态构建
+Zod schema 校验（见 §3.2 的"双层校验"）：点字段用 `pointFieldsToZod`，实例字段用 `configFieldsToZod`
+（`.strict()` 白名单，拒绝未声明字段）。`source=plan` 且 `default=null` 的实例字段与 `point_fields`（全部字段）
+共同构成 agent 与 mcp 的边界——校验失败返回 LLM 重试，不写入 config.json。
 
 ##### 3.2.1.2a AccessPlan 格式定义
 
@@ -506,42 +674,25 @@ interface AccessPlan {
 
 // 单个采集设备
 interface DeviceSpec {
-  name: string                // 设备名称，如 "1#风机"
-  seq: number                 // 设备编号，如 1（用于生成 instance.id）
-  protocol: string            // 通信协议，如 "modbus_tcp", "iec104"
-  connection: {
-    ip: string                // 设备 IP
-    port: number              // 端口
-  }
+  name: string                // 设备名称（中文显示，如 "1#升压站"）
+  abbr: string                // 采集目标标识（候选，LLM 从用户消息提取，如 "transformer1"）；须经 §3.2.1.3a 记忆确认后固化，最终 id 以记忆库为准
+  protocol: string            // 通信协议（必填——由 info-gatherer 推断或询问确定，plan-generator 方案确认，见 §3.2 协议推断）
   points: DevicePoint[]       // 采集点列表
+  [field: string]: unknown    // 实例 plan 字段直接平铺（ip/port、url/token/org/bucket 等，由 config_schema.source=plan 声明）
 }
 
-// 采集点（从点表提取）
+// 采集点（从点表提取）—— 仅保留 name 骨架，协议特有字段由 registry 的 point_fields 声明
 interface DevicePoint {
-  name: string                // 点名称，如 "windspeed"（对应 point.id）
-  addr: number                // 协议地址（Modbus=寄存器地址, IEC104=IOA）
-  // 以下为协议特有字段，视设备协议而定：
-  uid?: number                // Modbus: 单元标识符
-  fun?: number                // Modbus: 功能码
-  type?: number               // Modbus: 数据类型枚举
-  swap?: number               // Modbus: 字节交换大小
+  name: string                // 点名称（对应 point.id）
+  [field: string]: unknown    // 如 addr/uid/fun/type/swap（Modbus）、addr（IEC104）
 }
 
-// 转发目标
+// 转发目标 —— 实例 plan 字段直接平铺，目标级字段由 point_fields 声明
 interface ForwardTargetSpec {
-  name: string                // 目标名称，如 "中心侧数据库"
-  protocol: string            // 转发协议，如 "asfp2", "influxdb"
-  connection: {
-    ip?: string               // 目标 IP（asfp2 等 TCP 协议）
-    port?: number             // 端口（asfp2 等 TCP 协议）
-    url?: string              // InfluxDB 写入端点 URL（influxdb）
-    token?: string            // InfluxDB 认证 token（influxdb）
-    org?: string              // InfluxDB 组织名（influxdb）
-    bucket?: string           // InfluxDB bucket 名（influxdb）
-  }
-  measurement?: string        // InfluxDB measurement 名（influxdb，缺省用场站缩写）
-  // 转发点的 addr 映射（可选，由 step-decomposer 自动分配）
-  point_addr_start?: number   // 转发点 addr 起始值，默认自动分配
+  name: string                // 目标名称（中文显示，如 "中心侧数据库"）
+  abbr: string                // 转发目标标识（候选，LLM 从用户消息提取，如 "center"）；须经 §3.2.1.3a 记忆确认后固化，最终 id 以记忆库为准
+  protocol: string            // 转发协议（必填——由 info-gatherer 推断或询问确定，plan-generator 方案确认，见 §3.2 协议推断）
+  [field: string]: unknown    // 实例 plan 字段（ip/port、url/token/org/bucket 等）+ 目标级字段（measurement，由 point_fields 声明）
 }
 ```
 
@@ -556,9 +707,10 @@ interface ForwardTargetSpec {
   "devices": [
     {
       "name": "1#风机",
-      "seq": 1,
+      "abbr": "wt1",
       "protocol": "modbus_tcp",
-      "connection": { "ip": "192.168.110.1", "port": 502 },
+      "ip": "192.168.110.1",
+      "port": 502,
       "points": [
         { "name": "windspeed",  "addr": 1000, "uid": 1, "fun": 3, "type": 10, "swap": 2 },
         { "name": "temperature", "addr": 1002, "uid": 1, "fun": 3, "type": 10, "swap": 2 }
@@ -568,8 +720,10 @@ interface ForwardTargetSpec {
   "forward_targets": [
     {
       "name": "中心侧数据库",
+      "abbr": "center",
       "protocol": "asfp2",
-      "connection": { "ip": "172.16.109.11", "port": 9999 }
+      "ip": "172.16.109.11",
+      "port": 9999
     }
   ]
 }
@@ -577,34 +731,123 @@ interface ForwardTargetSpec {
 
 **step-decomposer 如何使用 AccessPlan**：
 
-1. `site.abbr` + `device.seq` + 服务角色缩写 → 生成 `instance.id`（如 `hnals_1_scada`）
-2. `device.connection.{ip, port}` → 填入 `source="plan"` 的实例配置字段
-3. `device.points[]` → 映射到 Writer 服务的 `points[]`（name→id, addr, uid, fun, type, swap）
-4. `forward_targets[].connection` → 填入 Reader 服务的实例配置（asfp2: `ip`/`port`；influxdb: `url`/`token`/`org`/`bucket`）
-5. 每个采集点自动生成对应的 Reader point：`key = {instance.id}.{point.name}`，`addr` 由 step-decomposer 分配（influxdb 无 `addr`，改填 `measurement`，缺省用 `site.abbr`）
+1. `site.abbr` + `target.abbr`（采集/转发目标标识）→ 生成 `instance.id`（如 `hnals_transformer1`）
+2. `device` 的 plan 字段（平铺）→ 填入 `source="plan"` 的实例配置字段（字段名由 config_schema 声明，见 §3.2.1.2）
+3. `device.points[]` → 映射到 Writer 服务的 `points[]`（字段由 point_fields 声明提取）
+4. `forward_targets[]` 的 plan 字段（平铺）→ 填入 Reader 服务的实例配置（字段名由 config_schema 声明）
+5. 每个采集点生成对应的 Reader point：`{id, key, shm_id:0} + point_fields（用户提供）`（见 §3.2.1.1）
 
 **3.2.1.3 实例 id 生成规则**
 
 `id` 是 config.json 中每个服务实例的唯一标识。step-decomposer 按以下规则生成：
 
 ```
-{site_abbr}_{device_seq}_{role_abbr}
+{site_abbr}_{target_abbr}
 ```
 
 其中：
 - `site_abbr`：场站缩写，从 AccessPlan 提取（如 "hnals" = 华能阿拉善）
-- `device_seq`：设备编号，从 AccessPlan 提取（如 "1" = 1#风机）
-- `role_abbr`：角色缩写，按服务类型固定映射：
-  - `c4_modbus_client` → `scada`
-  - `c4_iec104_client` → `transformer`
-  - `c4_asfp2_client` → `asfp2`
-  - `c4_influxdb_client` → `influx`
-  - 其余 → llm_assign（step-decomposer 自行命名）
+- `target_abbr`：**采集目标标识**（Writer）/ **转发目标标识**（Reader），由 LLM 从用户消息提取，
+  是**用户提供的业务信息**。命名规则：**设备类型英文名 + 编号（多台时）**，单台直接用类型名。
+  例如："采集 1#风机" → `wt1`（wind turbine 1）；"采集 1#升压站" → `transformer1`；"采集升压站"（单台、无编号）→ `transformer`；
+  "采集华能通辽开鲁风场风功率预测数据" → `power_forecast`。
 
-示例：`hnals_1_scada` = 华能阿拉善 1# 风机 SCADA 采集
+> ⚠️ abbr 由 LLM 提取是**非确定性**操作，不能每次操作都重新提取——其跨会话稳定性由
+> §3.2.1.3a「id 稳定性保障（abbr 记忆与确认机制）」保证：首次提取后固化到记忆库，
+> 后续 modify/delete/加点操作引用已存 id，不再重新提取 abbr。
+
+示例：`hnals_transformer1` = 华能阿拉善 1# 升压站采集；`hnals_power_forecast` = 华能阿拉善风功率预测入库
+
+> **协议与角色解耦**：id **不含协议/服务类型信息**。协议是技术维度（Modbus/IEC104/ASFP2），
+> 采集目标是业务维度（升压站/风功率预测），两者正交、非一一对应。同一采集目标无论用
+> Modbus 还是 IEC104，id 都不变。id 只反映业务维度，协议信息由 service_type（config.json 的
+> 顶层 key）承载。
 
 points 的 `id` 字段直接使用点表中的点名称（如 `windspeed`、`temperature`），
-全局 key 自动组合为 `{instance.id}.{point.id}`（如 `hnals_1_scada.windspeed`）。
+全局 key 自动组合为 `{instance.id}.{point.id}`（如 `hnals_transformer1.windspeed`）。
+点名称需为不含 `.`/`/` 等分隔符的合法标识符，否则会破坏 global key 的 `{instance.id}.{point.id}` 解析。
+
+**3.2.1.3a id 稳定性保障（abbr 记忆与确认机制）**
+
+`abbr` 由 LLM 从用户自然语言描述提取，是**非确定性**操作——同一台「1#风机」在不同会话、
+不同措辞下可能被提取成 `wt1` / `windturbine1` / `fan1`。而 `id` 的硬约束是**稳定**
+（modify/delete 按 id 精确匹配、Reader key 跨重启引用）。因此 abbr **不能每次操作重新提取**，
+必须「首次提取后固化 + 后续检索确认」。
+
+**记忆库（abbr registry）**：agent 内部状态，持久化于 `~/.local/c4/abbr_registry.json`
+（非 MCP 配置，MCP 服务不读取）：
+
+```json
+{
+  "site": { "name": "华能阿拉善", "abbr": "hnals" },
+  "entries": [
+    {
+      "id": "hnals_wt1",
+      "name": "1#风机",
+      "abbr": "wt1",
+      "service_type": "c4_modbus_client",
+      "role": "writer",
+      "description": "采集 1#风机的数据"
+    }
+  ]
+}
+```
+
+- `id`：稳定实例 id（主键），由 `{site_abbr}_{abbr}` 生成，**固化后永不改变**
+- `name` / `description`：设备名称 + 首次接入时的原始描述（用于后续检索匹配）
+- `service_type` / `role`：所属服务类型与角色（重建时从 config.json 顶层 key + Registry 反推）
+
+**site 获取机制**（一个 C4 实例 = 一个场站的一台接入服务器，site 是单例）：
+- **首次启动**：C4 询问当前场站信息（名称 + 缩写），用户提供后记录到 `site` 字段，之后固化不再重新提取
+- **后续接入的场站归属校验**：
+  - 用户资料**无场站信息** → 默认就是当前场站的资料
+  - 用户资料**出现场站信息** → 可能多个场站共用一份点表，需提醒用户确认场站归属
+  - 资料**明确不属于当前场站** → 提醒用户「该资料不属于当前场站」
+
+**id 确定流程**（info-gatherer 生成+检索 → plan-generator 确认 → SuperWorker 固化）：
+
+1. **识别操作意图 + 提取候选**（info-gatherer）：info-gatherer 收集信息时，先识别操作意图
+   （add / modify / delete），再从用户描述提取目标标识、生成候选 abbr（`wt1`），写入 deviceInfo.abbr——
+   此 abbr 仅是**候选**，不作最终依据。
+2. **检索记忆库**（info-gatherer，生成算法的一部分）：生成候选时**必须查记忆库**——复用历史 + 避免冲突。
+   查库结果**结合操作意图**解释：
+   - 命中 `active` 记录 → 候选 id = 已存 `id`（复用历史）
+   - 无命中 + `add` → 视为新设备，用候选 abbr
+   - 无命中 + `modify`/`delete` → 报错「目标不存在，可能已删除或从未接入」
+3. **确认环节**（plan-generator，★ 确定性来源，不可省略 ★）：无论命中与否，都必须向用户确认后才固化为最终 id——
+   此确认**作为方案确认提示里的一个条目**，与协议确认、执行动作合并为**单次确认**（§3.2），
+   不单独打断用户、不产生第二次询问：
+   - 命中：在方案确认提示中列出「将在 `hnals_wt1`（1#风机）上修改/删除/加点」
+   - 未命中（新增）：在方案确认提示中列出「将新建设备 `hnals_wt1`（1#风机）」
+   用户对整份方案（协议 + abbr 绑定 + 执行动作）做**一次性批准**，而非先确认 abbr 再确认方案。
+4. **固化**（SuperWorker 确定性代码）：确认后，将 `<描述, id>` 写入记忆库；delete 时从记忆库**物理删除**该记录。
+   固化与 `mergeConfigFromSteps`（写 config.json）同为 SuperWorker 的确定性文件操作。
+
+**abbr 冲突处理**（新设备候选 abbr 与已有记录相同时）：
+
+| 场景 | 判定依据 | 处理 |
+|------|---------|------|
+| 同一设备加点 | 描述也匹配已有记录 | 询问「是否在 `hnals_wt1` 上增加点？」→ 合并（modify/add points） |
+| 不同设备撞 abbr | 描述不同（如「2#风机」也被提取成 `wt1`） | ★ 重新生成不同 abbr（`wt1_2` / `windturbine1`），不得复用 |
+
+> **判定依据是「描述是否也匹配」，而非仅 abbr 相同**——abbr 相同但描述不同，是两台不同设备
+> 撞车，必须重新生成不同 abbr，而不是「增加点」。
+
+**生命周期**（abbr 的删除规则）：
+
+- `delete` 设备时，记忆库记录**物理删除**——记忆库只保留在用设备，不保留已删除设备的历史。
+- 删除后，该 abbr 立即空闲，可被新设备复用（无冲突，因为旧设备已从 config.json 移除）。
+
+**记忆库重建**（abbr_registry.json 丢失/损坏时）：
+- `site` 丢失 → 重新询问用户（site 是单例，问一次即可重新固化）
+- `entries` 丢失 → 从 config.json 重建：`id` 取自 `instance.id`，`name` 取自 `instance.name`，
+  `abbr` 由 `id` 反推（去掉 `{site_abbr}_` 前缀），`description` 退化为 `name`
+- 因此 abbr_registry 是可重建的派生数据，config.json 是权威数据源，双源**完全一致、无任何丢失**
+
+> **为什么需要这套机制**：LLM 文本提取天然非确定，记忆库 + 确认把「非确定的提取」变成
+> 「一次提取 + 确认固化 + 后续查表」，从而保证 id 跨会话稳定。记忆库只提供**候选**
+> （「想起来可能是谁」），用户确认负责**最终判定**（「确定就是谁」）——二者缺一不可，
+> 确认是不可省略的确定性来源。
 
 **3.2.1.4 Writer/Reader 自动分类**
 
@@ -622,7 +865,7 @@ points 的 `id` 字段直接使用点表中的点名称（如 `windspeed`、`tem
 
 **示例 1：add（首次接入风机）**
 
-输入 AccessPlan：接入华能阿拉善 1# 风机，协议 modbus_tcp，IP 192.168.110.1，数据点 windspeed(addr=1000) 和 temperature(addr=1002)
+输入 AccessPlan：接入华能阿拉善 1# 风机（采集目标标识 `wt1`），协议 modbus_tcp，IP 192.168.110.1，数据点 windspeed(addr=1000) 和 temperature(addr=1002)；转发到中心侧（目标标识 `center`，asfp2），转发地址由用户指定从 3001 起
 
 step-decomposer 输出 AccessPlanSteps：
 
@@ -632,8 +875,8 @@ step-decomposer 输出 AccessPlanSteps：
     "action": "add",
     "service_type": "c4_modbus_client",
     "instance": {
-      "id": "hnals_1_scada",
-      "name": "华能阿拉善1#风机SCADA服务",
+      "id": "hnals_wt1",
+      "name": "华能阿拉善1#风机采集服务",
       "ip": "192.168.110.1",
       "port": 502
     },
@@ -646,14 +889,14 @@ step-decomposer 输出 AccessPlanSteps：
     "action": "add",
     "service_type": "c4_asfp2_client",
     "instance": {
-      "id": "hnals_asfp2_center",
+      "id": "hnals_center",
       "name": "转发到中心侧数据库",
       "ip": "172.16.109.11",
       "port": 9999
     },
     "points": [
-      {"key": "hnals_1_scada.windspeed",  "addr": 3001},
-      {"key": "hnals_1_scada.temperature", "addr": 3002}
+      {"key": "hnals_wt1.windspeed",  "addr": 3001},
+      {"key": "hnals_wt1.temperature", "addr": 3002}
     ]
   }
 ]
@@ -668,8 +911,8 @@ step-decomposer 输出 AccessPlanSteps：
     "reader": ["c4_asfp2_client"]
   },
   "c4_modbus_client": [{
-    "name": "华能阿拉善1#风机SCADA服务",
-    "id": "hnals_1_scada",
+    "name": "华能阿拉善1#风机采集服务",
+    "id": "hnals_wt1",
     "ip": "192.168.110.1",
     "port": 502,
     "hton_register": 1, "hton_total": 0,
@@ -682,15 +925,15 @@ step-decomposer 输出 AccessPlanSteps：
     ]
   }],
   "c4_asfp2_client": [{
-    "id": "hnals_asfp2_center",
+    "id": "hnals_center",
     "name": "转发到中心侧数据库",
     "ip": "172.16.109.11", "port": 9999,
     "t0": 30, "t1": 20, "t2": 10,
     "key_sequence": 1, "same_data_type": 1, "same_timestamp": 1, "smart": 1,
     "forward_kack": 255, "inverse_keep": 0, "timer": 100,
     "points": [
-      {"key": "hnals_1_scada.windspeed",  "addr": 3001, "shm_id": 0},
-      {"key": "hnals_1_scada.temperature", "addr": 3002, "shm_id": 0}
+      {"key": "hnals_wt1.windspeed",  "addr": 3001, "shm_id": 0},
+      {"key": "hnals_wt1.temperature", "addr": 3002, "shm_id": 0}
     ]
   }]
 }
@@ -711,14 +954,14 @@ step-decomposer 输出 AccessPlanSteps：
     "action": "add",
     "service_type": "c4_asfp2_client",
     "instance": {
-      "id": "hnals_asfp2_third",
+      "id": "hnals_third",
       "name": "转发到第三方数据服务器",
       "ip": "172.16.109.13",
       "port": 9999
     },
     "points": [
-      {"key": "hnals_1_scada.windspeed",  "addr": 3001},
-      {"key": "hnals_1_scada.temperature", "addr": 3002}
+      {"key": "hnals_wt1.windspeed",  "addr": 3001},
+      {"key": "hnals_wt1.temperature", "addr": 3002}
     ]
   }
 ]
@@ -728,7 +971,7 @@ step-decomposer 输出 AccessPlanSteps：
 
 **示例 3：delete（停用设备）**
 
-用户请求停用华能阿拉善 2# 风机（`hnals_2_scada`）。
+用户请求停用华能阿拉善 2# 风机（`hnals_wt2`）。
 该设备只有一个采集服务，没有专属的转发目标。
 
 step-decomposer 输出 AccessPlanSteps：
@@ -738,12 +981,12 @@ step-decomposer 输出 AccessPlanSteps：
   {
     "action": "delete",
     "service_type": "c4_modbus_client",
-    "instance": { "id": "hnals_2_scada" }
+    "instance": { "id": "hnals_wt2" }
   }
 ]
 ```
 
-执行模块：删除 `c4_modbus_client[]` 中 id=`hnals_2_scada` 的条目。
+执行模块：删除 `c4_modbus_client[]` 中 id=`hnals_wt2` 的条目。
 若这是 `c4_modbus_client` 的最后一个实例，同时从 `c4_shm_manager.writer[]` 中移除
 `"c4_modbus_client"`。
 
@@ -760,7 +1003,8 @@ step-decomposer 输出 AccessPlanSteps：
 
   action = "add":
     1. 合并 instance + points，shm_id 全部填 0
-    2. 将 service_type 的所有 Registry default 字段补齐（source=default 的字段）
+    2. 将 service_type 的所有 Registry default 字段补齐（source=default 的字段；
+       source=plan 且有 default 的字段已在 generate_steps 阶段填默认值，见 §3.2.1.2）
     3. 检查 points 的 id 不重复，instance.id 不与现有冲突
     4. 追加到 config.json[service_type][] 末尾
     5. 若 config.json[service_type] 之前为空或不存在：
@@ -790,7 +1034,7 @@ step-decomposer 输出 AccessPlanSteps：
 ```
 用户输入（自然语言 + 上传文件）
   │
-  ▼  doc-parser
+  ▼  info-gatherer
 设备信息（内存对象，JSON）           ← 无名称，即解析结果
   │
   ▼  plan-generator
@@ -808,7 +1052,7 @@ config.json（磁盘文件）              ← 持久化产物，跨重启生存
 
 | 产物 | 形态 | 存在位置 | 生命周期 | 格式 | 谁生产 | 谁消费 |
 |------|------|---------|---------|------|--------|--------|
-| **设备信息** | 内存对象 | LangGraph state / 子代理返回值 | 解析后即用，不持久化 | 结构化 JSON（`{name, protocol, points[]}`） | doc-parser | plan-generator |
+| **设备信息** | 内存对象 | LangGraph state / 子代理返回值 | 解析后即用，不持久化 | 结构化 JSON（`{name, protocol, points[]}`） | info-gatherer | plan-generator |
 | **AccessPlan** | 内存对象 | AgentState.accessPlan | 生成 → 展示 → 确认后传递给 step-decomposer | 结构化 JSON（协议、设备、数据点映射、转发目标） | plan-generator | SuperWorker（展示）、step-decomposer（分解） |
 | **AccessPlanSteps** | 内存对象 | SuperWorker → 执行模块传参 | 生成 → 校验 → 传入 mergeConfigFromSteps 后销毁 | 结构化 JSON（`ServiceStep[]`，含 action） | step-decomposer | 执行模块 |
 | **config.json** | 磁盘文件 | `~/.local/c4/config.json` | 首次接入创建，之后每次接入更新，跨重启永久存续 | MCP 服务全量配置（见 c4_architecture.md §3.2） | 执行模块 | MCP 服务（启动读取）、Agent（下次接入参考） |
@@ -817,7 +1061,7 @@ config.json（磁盘文件）              ← 持久化产物，跨重启生存
 
 | 产物 | 用户可见？ | 呈现方式 |
 |------|:--:|---------|
-| 设备信息 | ✅ | doc-parser 解析后 SuperWorker 以自然语言展示摘要 |
+| 设备信息 | ✅ | info-gatherer 收集后 SuperWorker 以自然语言展示摘要 |
 | AccessPlan | ✅ | plan-generator 生成后 SuperWorker 以非技术语言展示方案，**必须等待用户确认** |
 | AccessPlanSteps | ❌ | 纯内部，用户不可见——Agent 保证 config_schema + 默认值填充的正确性 |
 | config.json | ❌ | 纯内部，用户不可见——确定性代码合并，零误改 |
@@ -831,9 +1075,9 @@ SuperWorker 是所有错误的唯一出口——子代理失败时 SuperWorker �
 
 | 子代理 | 失败模式 | 处理方式 |
 |--------|---------|---------|
-| **doc-parser** | 文件格式损坏或不支持 | "无法识别此文件格式，请确认文件完整且格式为 Excel、CSV、PDF 或图片。" |
-| doc-parser | 解析成功但缺少关键字段 | 列出已有和缺失信息："找到了风速、温度共 2 个数据点，但缺少设备 IP 地址，请提供。" |
-| **plan-generator** | 无法推断协议 / 未找到支持的服务 | "无法从设备信息确定通信方式。请提供通信方式（如设备直连、串口连接）和相关参数。" |
+| **info-gatherer** | 文件格式损坏或不支持 | "无法识别此文件格式，请确认文件完整且格式为 Excel、CSV、PDF 或图片。" |
+| info-gatherer | 收集时缺少必要信息 | 逐个询问用户补齐："找到了风速、温度共 2 个数据点，但缺少设备 IP 地址，请提供。" |
+| **plan-generator** | 未找到支持的服务类型 | "无法找到匹配的 MCP 服务。请确认设备的通信方式，或检查是否已部署对应的 MCP 服务。" |
 | **step-decomposer** | output_plan_steps 校验失败 | 重试一次。仍失败："配置生成遇到问题，请重新描述需求。不需要您提供技术细节，只需说明要接入哪个设备、转发到哪个系统。" |
 | **执行模块** | stop 失败 | 回滚。放弃操作。"无法停止现有服务，接入请求已取消。当前运行的数据采集未受影响。" |
 | 执行模块 | adjust_shm 失败（config 类：配置冲突/缺失） | 回退 config.json.bak → start 恢复。"接入方案中的配置与现有配置冲突，请调整后重试。" |
@@ -927,19 +1171,20 @@ Registry 内容分两层交付，避免上下文窗口膨胀：
 
 | 层 | 注入方式 | 内容 | 使用者 | 上下文位置 |
 |---|---------|------|--------|-----------|
-| **L1: 服务摘要** | 系统提示模板变量 `{{ service_catalog }}` | 服务名、display_name、role、protocols（含 description 和 selection_rules） | SuperWorker 路由 / plan-generator 选型 | **始终加载** |
-| **L2: 完整定义** | 工具调用 `queryRegistryTool(service_type)` | 完整 Registry JSON（含 config_schema、binary_path、error_mappings） | step-decomposer 生成配置 | **按需拉取** |
+| **L1: 服务摘要** | 系统提示模板变量 `{{ service_catalog }}` | 服务名、display_name、role、protocols（含 description 和 selection_rules）、point_fields（含字段说明）、config_schema 中 `source=plan` 字段摘要（区分 `default=null` 必填 / 有默认值可选） | SuperWorker 路由 / info-gatherer 推断协议+收集信息 / plan-generator 选型 | **始终加载** |
+| **L2: 完整定义** | 工具调用 `queryRegistryTool(service_type)` | 完整 Registry JSON（含 config_schema 全量、binary_path、error_mappings） | step-decomposer 生成配置 | **按需拉取** |
 
 **约束**：
-- `{{ service_catalog }}` **只注入 L1**，不包含 `config_schema`、`binary_path`、`error_mappings`
+- `{{ service_catalog }}` **只注入 L1**，不包含 `config_schema` 全量字段、`binary_path`、`error_mappings`；但包含 `config_schema` 的 `source=plan` 字段摘要（供 info-gatherer 判断哪些字段必需收集、哪些有默认值可跳过）
 - `queryRegistryTool` 返回指定服务的**完整 JSON**（所有字段）
 - step-decomposer 只拉取当前 AccessPlan 涉及的服务类型，不全量加载
-- plan-generator 通过 L1 选择协议，无需调用 `queryRegistryTool`（其 tools 列表不含此工具）
+- info-gatherer、plan-generator 通过 L1 推断协议/选型，无需调用 `queryRegistryTool`（其 tools 列表不含此工具）
 
 **运行时构建**：Agent 启动时 `McpServiceRegistry.loadFromDirectory()` 扫描全部 Registry JSON，
 提取 L1 摘要生成 `service_catalog` 字符串，注入以下系统提示：
 - SuperWorker 系统提示（§3.1）— 路由决策用途
-- plan-generator 系统提示（§3.2）— 协议选择用途
+- info-gatherer 系统提示（§3.2）— 协议推断 + 信息收集用途
+- plan-generator 系统提示（§3.2）— 选型用途
 
 L2 完整 JSON 保留在注册表内存中，仅 step-decomposer 通过 `queryRegistryTool` 按需拉取。
 
@@ -956,8 +1201,14 @@ L2 完整 JSON 保留在注册表内存中，仅 step-decomposer 通过 `queryRe
       { "condition": "device.port == 502", "description": "标准 Modbus TCP 端口" }
     ]
   }],
+  "point_fields": [
+    { "name": "addr", "type": "integer", "description": "寄存器地址" },
+    { "name": "uid",  "type": "integer", "description": "单元标识符" },
+    { "name": "fun",  "type": "integer", "description": "功能码" },
+    { "name": "type", "type": "integer", "description": "数据类型" },
+    { "name": "swap", "type": "integer", "description": "字节交换" }
+  ],
   "config_schema": {
-    "required": ["id", "ip", "port", "timer"],
     "fields": {
       "ip":   { "type": "string",  "source": "plan",    "default": null, "description": "设备 IP" },
       "port": { "type": "integer", "source": "plan",    "default": 502,  "description": "端口" },
@@ -971,6 +1222,23 @@ L2 完整 JSON 保留在注册表内存中，仅 step-decomposer 通过 `queryRe
   }
 }
 ```
+
+> **协议无关性（C4_FUN_00017 核心）**：Agent 代码中**不得出现**任何协议/服务专属词汇
+> （`modbus`/`iec104`/`asfp2`/`influxdb`/`uid`/`swap`/`measurement` 等）。
+> 所有协议知识由 Registry JSON 提供：
+> - `point_fields` → Writer/Reader 共用的点表业务字段定义（**全部必须提供、无默认值**），**双重角色**：
+>   ① 注入 service_catalog 供 LLM 理解点表列；② 驱动运行时强校验（`pointFieldsToZod` 动态构建 Zod）
+> - `config_schema` 中 `source=plan` 的字段（除 `id`/`name`）→ 实例 plan 字段（平铺 + 校验，不做语义分类）
+>
+> **协议与角色解耦**：协议（Modbus/IEC104/ASFP2）与角色/采集目标（升压站/风功率预测）是正交维度，
+> **非一一对应**。instance.id 由**采集目标标识**（用户提供、LLM 提取）生成，**不含协议信息**（见 §3.2.1.3）。
+>
+> **业务字段取值原则**（C4_RS_00044 + C4_RS_00261）：地址、表名、采集目标、实例参数等业务字段的值
+> 来自**用户**或 registry **显式声明的 `default`**（协议标准默认值）；agent 不得在 registry 未声明时
+> 自行编造默认值（C4_RS_00044）。缺失时由 C4_FUN_00005 引导补充。
+>
+> 校验边界（§3.2 双层校验）：声明式 schema 宽松（可扩展），运行时按 registry 动态强校验
+> （错误不流入 mcp）。新增一个 MCP 服务 = 只交付「二进制 + Registry JSON」，**零 Agent 代码改动**。
 
 **Registry JSON 由谁生成**：MCP 服务的开发者。每个 MCP 服务作为独立的 Go 项目交付，
 Registry JSON 是服务包的一部分，与服务代码同仓库。Agent 不生成它——只读取它。
@@ -1118,15 +1386,15 @@ React SPA                    Express Server
                            │  })
                            │
                            ▼  SuperWorker 检测到文件上传
-                           │  → task(doc-parser,
+                           │  → task(info-gatherer,
                            │       prompt="解析文件 /tmp/upload_abc.xlsx，提取设备信息")
                            │
-                           ▼  doc-parser 的 xlsxParserTool 打开文件路径，读取内容
+                           ▼  info-gatherer 的 xlsxParserTool 打开文件路径，读取内容
   仪表盘组件  ──HTTP─→  GET  /api/services
 ```
 
 **文件传递方式**：Express 将文件保存到磁盘后，把**文件路径**传给 SuperWorker 的消息文本。
-doc-parser 的工具通过路径打开文件读取，不传 base64（大文件会撑爆上下文窗口）。
+info-gatherer 的工具通过路径打开文件读取，不传 base64（大文件会撑爆上下文窗口）。
 
 `@langchain/react` 能力：子代理实时进度（`stream.subagents`）、对话（`stream.messages`）、todo 进度（`stream.values.todos`）、用户确认中断（`stream.interrupt`）。
 
@@ -1139,7 +1407,7 @@ doc-parser 的工具通过路径打开文件读取，不传 base64（大文件�
 **处理链路**：
 
 ```
-SuperWorker → doc-parser: 解析 Excel 点表
+SuperWorker → info-gatherer: 解析 Excel 点表
   → { name:"1#风机", protocol:"modbus_tcp", points:[windspeed, temperature] }
 
 SuperWorker → plan-generator: 生成接入方案
@@ -1156,7 +1424,7 @@ SuperWorker → 直接执行 Stop-Start 协议（确定性代码，非子代理�
 flowchart TD
     User["用户上传 Excel + 描述"] --> C["SuperWorker"]
 
-    subgraph DocParse["doc-parser"]
+    subgraph InfoGather["info-gatherer"]
         X["解析 Excel 点表"] --> D["设备信息"]
     end
 
@@ -1173,7 +1441,7 @@ flowchart TD
         Stop["Stop"] --> Adjust["adjust_shm()"] --> Start["Start"]
     end
 
-    C -->|"task"| DocParse --> C
+    C -->|"task"| InfoGather --> C
     C -->|"task"| PlanGen --> C
     C -->|"等待确认"| User -->|"确认"| C
     C -->|"task"| StepDec --> C
@@ -1200,13 +1468,13 @@ c4/agent/                              # Agent 系统
 │   │   ├── prompts/system.txt         # SuperWorker 系统提示模板
 │   │   └── subagents.ts               # 子代理注册
 │   ├── subagents/
-│   │   ├── doc_parser.ts              # C4_FUN_00002/00003
+│   │   ├── info_gatherer.ts           # C4_FUN_00002/00003
 │   │   ├── plan_generator.ts          # C4_FUN_00004
 │   │   ├── step_decomposer.ts         # C4_FUN_00044
 │   │   └── tools/
 │   │       ├── output_plan_steps.ts   # 结构化输出
 │   │       ├── query_registry.ts      # 查询 Registry
-│   │       └── doc_parsers.ts         # 文档解析
+│   │       └── info_gatherer_tools.ts  # 文档解析工具（csv/xlsx/txt parser）
 │   ├── registry/
 │   │   ├── registry.ts               # McpServiceRegistry（单例）
 │   │   ├── loader.ts                 # 目录扫描
