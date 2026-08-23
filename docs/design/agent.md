@@ -1066,6 +1066,31 @@ config.json（磁盘文件）              ← 持久化产物，跨重启生存
 | AccessPlanSteps | ❌ | 纯内部，用户不可见——Agent 保证 config_schema + 默认值填充的正确性 |
 | config.json | ❌ | 纯内部，用户不可见——确定性代码合并，零误改 |
 
+**AgentState（运行时状态）**：SuperWorker 维护的接入流程状态，`AccessPlan` 存于 `AgentState.accessPlan`；
+`AgentState` 是 `GET /api/state` 的最小可观测出口（§3.5，仅暴露可观测子集）：
+
+```typescript
+interface AgentState {
+    phase: "idle" | "collecting" | "planning" | "confirmed" | "executing"
+    //  idle=空闲 / collecting=info-gatherer 收集 / planning=plan-generator 规划
+    //  confirmed=用户已确认 / executing=step-decomposer + 执行
+    hasAccessPlan: boolean      // 是否存在待执行的 AccessPlan（等价于 accessPlan !== null，作为不暴露对象的可观测布尔）
+    accessPlan: AccessPlan | null  // 待执行的方案（plan-generator 产出后赋值，确认后传入 step-decomposer 时置 null；经 checkpoint 持久化（若启用），不经 GET /api/state 暴露）
+    lastError: string | null    // 最近一次错误（非技术语言），无错误 = null
+}
+```
+
+**`GET /api/state`**（§3.5 Web 层）：返回 `AgentState` 的**可观测子集**（`phase` / `hasAccessPlan` / `lastError`），
+不暴露完整 `accessPlan` 内容：
+
+```json
+{ "phase": "idle", "hasAccessPlan": false, "lastError": null }
+```
+
+> AgentState 持久化于 LangGraph checkpoint（§5.1 `state.backend`）。`kill()` → 重启后能否自动恢复
+> `phase` 与 `accessPlan`，取决于当前实现是否加载 persistent checkpoint——若 checkpoint 未自动恢复，
+> 相关测试需降级为 TypeScript 单元测试（mock checkpoint）。
+
 ### 3.2.2 错误处理
 
 SuperWorker 是所有错误的唯一出口——子代理失败时 SuperWorker 向用户呈现非技术语言的
@@ -1391,6 +1416,7 @@ React SPA                    Express Server
                            │
                            ▼  info-gatherer 的 xlsxParserTool 打开文件路径，读取内容
   仪表盘组件  ──HTTP─→  GET  /api/services
+  仪表盘组件  ──HTTP─→  GET  /api/state     (AgentState：phase / hasAccessPlan / lastError)
 ```
 
 **文件传递方式**：Express 将文件保存到磁盘后，把**文件路径**传给 SuperWorker 的消息文本。
