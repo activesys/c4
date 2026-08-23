@@ -30,9 +30,9 @@
 |------|------|------|
 | Agent 启动流程 | agent.md §3.2.3 | 启动时的配置加载、MCP 连接、无条件 Stop-Start |
 | `GET /api/services` | agent.md §3.3, §3.5 | Registry L1 服务摘要查询 |
-| `GET /api/state` | agent.md §3.1 | Agent 运行时状态查询：`phase`、`hasAccessPlan`、`lastError` |
+| `GET /api/state` | agent.md §3.2.1.7 | Agent 运行时状态查询：`phase`、`hasAccessPlan`、`lastError` |
 | `POST /api/chat` (SSE) | agent.md §3.1, §3.5 | SuperWorker 对话、子代理调度、方案生成、执行触发 |
-| `POST /api/upload` | agent.md §3.5 | 文件上传 → doc-parser 解析 |
+| `POST /api/upload` | agent.md §3.5 | 文件上传 → info-gatherer 解析 |
 
 ### 1.4 测试层次
 
@@ -207,9 +207,9 @@ class AgentHandle:
 | # | 用例 | 输入条件 | 断言 |
 |---|------|---------|------|
 | 1.1 | 返回所有已注册服务 | `mcp-registry/` 含 c4_modbus_client, c4_iec104_client, c4_asfp2_server, c4_asfp2_client, c4_influxdb_client 共 5 个 JSON | `GET /api/services` 返回数组长度 = 5 |
-| 1.2 | 每项含 L1 必须字段 | 同上 | 每项含 `service_type`, `display_name`, `role`, `protocols[]` |
+| 1.2 | 每项含 L1 必须字段 | 同上 | 每项含 `service_type`, `display_name`, `role`, `protocols[]`, `point_fields` |
 | 1.3 | protocols 含 description 和 selection_rules | 同上 | `protocols[0]` 含 `protocol`, `description`, `selection_rules[]` |
-| 1.4 | L1 不含 L2 字段 | 同上 | 每项**不**含 `config_schema`, `binary_path`, `error_mappings` |
+| 1.4 | L1 不含 L2 全量字段 | 同上 | 每项**不**含 `config_schema` 全量字段、`binary_path`、`error_mappings`（L1 仅含 `config_schema` 的 `source=plan` 字段摘要） |
 | 1.5 | Registry 目录为空 | `mcp-registry/` 为空目录 | 返回空数组 `[]`，Agent 正常就绪（不崩溃） |
 | 1.6 | Registry 目录缺失 | `mcp-registry/` 不存在 | Agent 不崩溃；`GET /api/services` 返回 200（空数组）或 5xx（启动失败），两种行为均视为合理防御 |
 | 1.7 | 单个 JSON 文件损坏 | `mcp-registry/` 中 1 个文件为非 JSON | Agent 不崩溃；`GET /api/services` 正常返回其余有效服务（损坏文件不导致全局加载失败） |
@@ -318,54 +318,68 @@ pytest                # 全跑（L2 在无 API key 时自动 skip）
 
 | # | 用例 | 输入 | 预期（可观察副作用） |
 |---|------|------|---------------------|
-| 4.2.1 | 上传文档触发 doc-parser | `POST /api/upload`（上传 xlsx 点表）+ `POST /api/chat` "接入华能阿拉善1#风机" | 对话文本中出现从点表解析出的设备名/协议名/数据点信息（非空，非"无法解析"） |
-| 4.2.2 | 查询类消息不触发子代理 | `POST /api/chat` "现在有哪些设备在运行" | 对话文本中**不**出现设备名+协议+数据点的结构化枚举（即不是 doc-parser 的输出格式） |
+| 4.2.1 | 上传文档触发 info-gatherer | `POST /api/upload`（上传 xlsx 点表）+ `POST /api/chat` "接入华能阿拉善1#风机" | 对话文本中出现从点表解析出的设备名/协议名/数据点信息（非空，非"无法解析"） |
+| 4.2.2 | 查询类消息不触发子代理 | `POST /api/chat` "现在有哪些设备在运行" | 对话文本中**不**出现设备名+协议+数据点的结构化枚举（即不是 info-gatherer 的输出格式） |
 | 4.2.3 | 问候类消息直接回答 | `POST /api/chat` "你好" | SSE 流正常关闭，无 error，有 assistant 文本回复 |
 | 4.2.4 | 空消息处理 | `POST /api/chat` "" | Agent 不崩溃，返回合理的引导性回复或提示 |
 
 > **注**：不直接断言 SSE 事件名（如 `subagent_start`），因为事件格式依赖 deepagents/LangGraph
-> 框架实现细节，不属于 agent.md 定义的接口。改为验证 doc-parser 的可观察副作用——
+> 框架实现细节，不属于 agent.md 定义的接口。改为验证 info-gatherer 的可观察副作用——
 > 解析结果是否出现在对话文本中。
 
-### 4.3 文档解析 (doc-parser)
+### 4.3 信息收集 (info-gatherer)
 
-**被测对象**：doc-parser 子代理（agent.md §3.2 — C4_FUN_00002）
+**被测对象**：info-gatherer 子代理（agent.md §3.2 — C4_FUN_00002 / 00003）
+
+**职责**：解析文档 → 推断协议 → 收集实例参数与点表字段，缺失时逐个询问用户补齐（agent.md §3.2「信息收集与询问机制」）。info-gatherer **同时收集两端**：采集设备（devices）与转发目标（forward_targets）。
 
 **被测接口**：`POST /api/upload` + `POST /api/chat`
 
 | # | 用例 | 输入 | 预期 |
 |---|------|------|------|
-| 4.3.1 | 解析合法 xlsx 点表 | 上传含 "windspeed, addr=1000" 等字段的点表 | SSE 流中文档解析结果含设备名、协议、数据点列表（由 doc-parser 子代理产出） |
+| 4.3.1 | 解析合法 xlsx 点表 | 上传含 "windspeed, addr=1000" 等字段的点表 | SSE 流中收集结果含设备名、协议、数据点列表（由 info-gatherer 子代理产出） |
 | 4.3.2 | 解析合法 csv 点表 | 上传 CSV 格式点表 | 同上 |
 | 4.3.3 | 上传不支持的文件格式 | 上传 .txt 或二进制文件 | Agent 给出友好提示（非技术语言的错误描述），不崩溃 |
 | 4.3.4 | 上传损坏的 xlsx | 上传截断/损坏的 Excel | 同上 |
-| 4.3.5 | 点表缺少关键字段 | 点表无 IP 地址列 | Agent 列出已有信息 + 明确指出缺失字段（如 IP） |
+| 4.3.5 | 点表缺少必填字段 | 缺少 `source=plan` 且 `default=null` 的实例参数（如 IP） | Agent 列出已有信息 + 明确指出缺失字段（如 IP），逐个询问用户补齐（C4_FUN_00005 缺失引导） |
+| 4.3.6 | 协议：从点表字段唯一推断 | 点表含 `uid/fun/type/swap` 列（仅 Modbus 匹配） | 协议确定为 Modbus，不询问用户 |
+| 4.3.7 | 协议：从用户描述推断 | 多协议点表字段无法区分 + 用户说"采集 Modbus 设备" | 协议确定为 Modbus，不询问 |
+| 4.3.8 | 协议：前两层无法确定 → 询问 | 点表字段无法区分 + 用户未提协议 | Agent 主动询问协议（非技术语言），得知后用该协议 point_fields 重新理解点表列 |
+| 4.3.9 | 协议：Reader（转发协议）推断 | 用户说"转发到上级系统" / "入库" | 转发协议从转发目标描述推断（→ ASFP2 / InfluxDB），不询问；转发目标实例参数缺失时逐个询问补齐 |
+
+> **协议推断三层**（agent.md §3.2）：① 从点表字段唯一匹配 → ② 从用户描述推断 → ③ 询问用户兜底。
+> 推断成功后**不单独打断用户**，协议作为方案的一部分在 plan-generator 方案确认环节隐含确认。
 
 ### 4.4 方案生成 (plan-generator)
 
 **被测对象**：plan-generator 子代理 → AccessPlan 生成（agent.md §3.2 — C4_FUN_00004）
 
-**被测接口**：`POST /api/chat`（doc-parser 完成后继续对话）
+**职责**：plan-generator **不再推断协议、不再收集信息**——基于 info-gatherer 产出的信息齐全的 deviceInfo，只做「选型 + 组装方案 + 方案确认」（agent.md §3.2）。
+
+**被测接口**：`POST /api/chat`（info-gatherer 完成后继续对话）
 
 | # | 用例 | 输入 | 预期 — 结构 | 预期 — 交互 |
 |---|------|------|------------|------------|
-| 4.4.1 | Modbus → ASFP2 转发方案 | doc-parser 结果含 Modbus 设备 + "转发到中心侧" | 判断条件略宽松：只要对话文本包含接入方案的关键要素即可进入确认流程 | 对话文本含"确认"或等价关键词（表示等待用户确认） |
-| 4.4.2 | 无转发目标时仅采集 | doc-parser 结果含 Modbus 设备，不提转发 | 对话文本含等待确认的信号（仍需确认方案） | 方案描述仅含采集，不含转发 |
-| 4.4.3 | 无法推断协议 | doc-parser 结果缺少协议信息 | — | Agent 主动询问澄清（非技术语言），不进入 confirm 状态 |
-| 4.4.4 | 协议无可用服务 | 设备使用 Agent 不支持的协议（如 DNP3） | — | Agent 告知无可用服务，不生成错误方案 |
+| 4.4.1 | Modbus → ASFP2 转发方案 | info-gatherer 结果含 Modbus 设备 + "转发到中心侧" | 判断条件略宽松：只要对话文本包含接入方案的关键要素即可进入确认流程 | 对话文本含"确认"或等价关键词（表示等待用户确认） |
+| 4.4.2 | 无转发目标时仅采集 | info-gatherer 结果含 Modbus 设备，不提转发 | 对话文本含等待确认的信号（仍需确认方案） | 方案描述仅含采集，不含转发 |
+| 4.4.3 | 协议无可用服务 | 设备使用 Agent 不支持的协议（如 DNP3） | — | Agent 告知无可用服务，不生成错误方案 |
 
 ### 4.5 用户确认与拒绝
+
+**方案确认含协议隐含确认 + abbr 绑定确认**（agent.md §3.2、§3.2.1.3a step3）：展示方案时一并展示协议与 abbr 绑定，用户对整份方案（协议 + abbr 绑定 + 执行动作）做**一次性批准**，不产生第二次询问。
 
 | # | 用例 | 输入 | 预期 |
 |---|------|------|------|
 | 4.5.1 | 用户确认方案 | interrupt 后发送确认消息（如 "确认" / "好的"） | 流程继续进入 step-decomposer → 执行 |
 | 4.5.2 | 用户拒绝方案 | interrupt 后发送拒绝消息（如 "取消" / "不对"） | 流程停止，不生成 config.json，不执行 Stop-Start |
+| 4.5.3 | 方案展示含 abbr 绑定（新增） | 首次接入（无历史）的方案确认 | 方案确认文本含设备名/采集目标描述（abbr 绑定的可读呈现），列出「将新建设备 `hnals_wt1`」；用户确认后 id 固化为 `{site_abbr}_{abbr}` |
+| 4.5.4 | 方案展示含 abbr 绑定（命中） | 已有 `hnals_wt1` → modify/delete/加点的方案确认 | 方案确认文本列出「将在 `hnals_wt1`（1#风机）上修改/删除/加点」，复用已存 id 而非新 id |
 
 ### 4.6 执行验证（副作用检查）
 
 **被测对象**：step-decomposer + 执行模块（agent.md §3.2 — C4_FUN_00044 + C4_FUN_00006/00007）
 
-**触发路径**：完整 L2 流程：上传点表 → doc-parser → plan-generator → 用户确认 → step-decomposer + 执行
+**触发路径**：完整 L2 流程：上传点表 → info-gatherer → plan-generator → 用户确认 → step-decomposer + 执行
 
 #### 4.6.1 add 操作（首次接入 + 追加）
 
@@ -379,14 +393,14 @@ pytest                # 全跑（L2 在无 API key 时自动 skip）
 
 #### 4.6.2 modify 操作（修改已有实例）
 
-**场景**：已有 config.json 含 `hnals_1_scada`（IP: 192.168.110.1）。用户请求修改该设备的 IP 和/或添加新采集点。
+**场景**：已有 config.json 含 `hnals_wt1`（IP: 192.168.110.1）。用户请求修改该设备的 IP 和/或添加新采集点。
 
 | # | 用例 | 触发方式 | 预期 |
 |---|------|---------|------|
-| 4.6.2.1 | 修改实例参数（IP/端口） | 在已有设备的基础上，请求"将 1#风机的 IP 改为 192.168.110.5" | config.json 中 `hnals_1_scada.ip` = 192.168.110.5，其余字段不变；服务重启后使用新 IP |
-| 4.6.2.2 | 修改采集点参数 | 请求"将 windspeed 的寄存器地址从 1000 改为 1002" | `hnals_1_scada.points[]` 中 `windspeed.addr` = 1002；其他字段不变；shm_id 不变 |
-| 4.6.2.3 | 新增采集点 | 请求"给 1#风机增加风向采集点" | `hnals_1_scada.points[]` 末尾追加新 point（含新 `id`）；旧 point 保留且 shm_id 不变；adjust_shm 为新 point 分配 shm_id |
-| 4.6.2.4 | 删除采集点 | 请求"不再采集 1#风机的温度数据" | `hnals_1_scada.points[]` 中移除 temperature；adjust_shm 回收对应 shm 块 |
+| 4.6.2.1 | 修改实例参数（IP/端口） | 在已有设备的基础上，请求"将 1#风机的 IP 改为 192.168.110.5" | config.json 中 `hnals_wt1.ip` = 192.168.110.5，其余字段不变；服务重启后使用新 IP |
+| 4.6.2.2 | 修改采集点参数 | 请求"将 windspeed 的寄存器地址从 1000 改为 1002" | `hnals_wt1.points[]` 中 `windspeed.addr` = 1002；其他字段不变；shm_id 不变 |
+| 4.6.2.3 | 新增采集点 | 请求"给 1#风机增加风向采集点" | `hnals_wt1.points[]` 末尾追加新 point（含新 `id`）；旧 point 保留且 shm_id 不变；adjust_shm 为新 point 分配 shm_id |
+| 4.6.2.4 | 删除采集点 | 请求"不再采集 1#风机的温度数据" | `hnals_wt1.points[]` 中移除 temperature；adjust_shm 回收对应 shm 块 |
 | 4.6.2.5 | 修改不存在的实例 | 请求修改一个不存在的设备 ID | Agent 返回友好错误提示（非技术语言），不修改 config.json |
 
 #### 4.6.3 delete 操作（删除实例）
@@ -397,8 +411,36 @@ pytest                # 全跑（L2 在无 API key 时自动 skip）
 |---|------|---------|------|
 | 4.6.3.1 | 删除单个实例（仍有同类型其他实例） | 请求"停用 2#风机" | 目标实例从 `c4_modbus_client[]` 中移除；`c4_shm_manager.writer[]` 仍含 `c4_modbus_client`；旧 shm 块被 adjust_shm 回收 |
 | 4.6.3.2 | 删除最后一个实例 | 先删到只剩 1 个 modbus → 再请求删除最后一个 | 目标实例移除 → `c4_modbus_client[]` 为空 → `c4_shm_manager.writer[]` 移除 `c4_modbus_client` |
-| 4.6.3.3 | 删除被 Reader 引用的设备（相关性检查） | config 中有 modbus(hnals_1_scada) + asfp2_client(key 引用 hnals_1_scada.windspeed) → 请求停用 1#风机 | 执行后 config.json 中目标设备被移除，同时 asfp2_client 的 points[] 中不再有指向已删除设备的 key 引用 |
+| 4.6.3.3 | 删除被 Reader 引用的设备（相关性检查） | config 中有 modbus(hnals_wt1) + asfp2_client(key 引用 hnals_wt1.windspeed) → 请求停用 1#风机 | 执行后 config.json 中目标设备被移除，同时 asfp2_client 的 points[] 中不再有指向已删除设备的 key 引用 |
 | 4.6.3.4 | 删除不存在的实例 | 请求删除不存在的设备 ID | Agent 返回友好错误提示，不修改 config.json |
+
+#### 4.6.4 id 稳定性（abbr 记忆与确认机制）
+
+**被测对象**：abbr 记忆库 + id 确定流程（agent.md §3.2.1.3a）
+
+**核心不变式**：同一采集/转发目标的 `instance.id` 跨会话稳定——首次接入固化，后续 modify/delete/加点复用已存 id，不重新提取 abbr。
+
+**记忆库**：`~/.local/c4/abbr_registry.json`（agent 内部状态，非 MCP 配置），持久化 `<id, name, abbr, description>`。测试中位于 config_dir（`~/.local/c4/` 等效路径）。
+
+| # | 用例 | 触发方式 | 预期 |
+|---|------|---------|------|
+| 4.6.4.1 | 首次接入固化 id + 写入记忆库 | 首次 add "采集1#风机"（无历史）→ 确认执行 | config.json 生成 `hnals_wt1`；`abbr_registry.json` 出现 `{id:"hnals_wt1", abbr:"wt1"}` 记录 |
+| 4.6.4.2 | modify 复用同一 id（跨会话稳定） | 4.6.4.1 后重启 Agent → 请求"将1#风机的 IP 改为 X" | config.json 仍是 `hnals_wt1`（不重新提取 abbr，不产生 `hnals_windturbine1` 等新 id） |
+| 4.6.4.3 | 同一设备加点 → 合并，不新建实例 | 4.6.4.1 后 → 再次 add "采集1#风机"（复提 abbr=`wt1` 且描述匹配） | 判为同一设备：询问「是否在 `hnals_wt1` 上加点」→ 合并；`c4_modbus_client[]` 实例数不变（不新建） |
+| 4.6.4.4 | 不同设备撞 abbr → 重新生成 | 已有 `hnals_wt1`（1#风机）→ 新 add "采集2#风机"（LLM 也可能提取成 `wt1`） | 生成不同 abbr（如 `wt1_2`），新实例 `hnals_wt1_2`；`hnals_wt1` 不受影响 |
+| 4.6.4.5 | delete 物理删除记忆 | delete "停用1#风机" | config.json 移除 `hnals_wt1`；`abbr_registry.json` 中该记录**物理删除**（不保留历史） |
+| 4.6.4.6 | 删除后 abbr 释放可复用 | 4.6.4.5 后 → 重新 add "采集1#风机" | 可用 `wt1` 生成新 `hnals_wt1`（无冲突，旧记录已删除） |
+| 4.6.4.7 | modify/delete 目标不在记忆库 | 请求 modify/delete 一个记忆库中无记录的设备（如从未接入过） | info-gatherer 检索记忆库阶段即报错「目标不存在，可能已删除或从未接入」，不进入方案生成，不修改 config.json |
+| 4.6.4.8 | entries 丢失 → 从 config.json 重建 | 仅删 `abbr_registry.json` 的 `entries`（保留 `site`）→ 重启 → modify 已有设备 | 从 config.json 重建 entries：`id`/`name` 恢复，`abbr` 由 id 反推（去 `{site_abbr}_` 前缀），`description` 退化为 name；modify 仍复用正确 id |
+| 4.6.4.9 | site 丢失 → 重新询问 | 仅丢 `site`（保留 `entries`）→ 重启 → 触发接入 | Agent 重新询问场站（名称+缩写），用户提供后重新固化 site；entries 保留不重建 |
+| 4.6.4.10 | site 首次询问固化 | 首次启动（无 `abbr_registry.json`，无 config.json）→ 发起接入 | Agent 询问场站名称+缩写 → 用户提供后写入 `site` 字段 → 之后固化不再重新提取 |
+| 4.6.4.11 | 场站归属校验（三态） | 已有 site=华能阿拉善，分别上传：① 无场站信息的点表 ② 含场站信息（归属不明，可能多场站共用）的点表 ③ 明确标注其他场站的点表 | ① 默认当前场站 ② 提醒用户确认场站归属 ③ 提醒「该资料不属于当前场站」 |
+| 4.6.4.12 | 记忆库损坏 JSON 恢复 | 将 `abbr_registry.json` 截断为损坏 JSON → 重启 → 触发接入 | 等同「site 丢失 + entries 丢失」：重新询问场站 + 从 config.json 重建 entries |
+
+> **断言面**：`abbr_registry.json` 文件内容（确定性副作用）+ config.json 的 `instance.id` 稳定性。
+> abbr 提取是 LLM 非确定性操作，故 4.6.4.4 断言「id 不同且不覆盖旧实例」，而非精确 abbr 值。
+> 记忆库**写入/删除**（固化，agent.md §3.2.1.3a step4）由 SuperWorker 确定性代码执行，**检索/读取**（step2）
+> 属 info-gatherer（LLM）；固化与 entries 重建可通过预构造 abbr_registry.json + config.json 绕过 LLM 做 L1 级精确断言。
 
 ### 4.7 非技术语言约束
 
@@ -410,11 +452,11 @@ pytest                # 全跑（L2 在无 API key 时自动 skip）
 
 | 类别 | 禁止词 | 例外场景 | 来源 |
 |------|--------|---------|------|
-| 共享内存/内部术语 | shm_id, shm, 共享内存, adjust_shm, point_count, max_points | **无例外** — 任何场景均禁止 | §3.1 规则2 |
-| 内部标识/错误码 | MCP, output_plan_steps, config_schema, CONFIG_MISSING_SECTION, DUPLICATE_KEY, SHM_CORRUPTED, SHM_NOT_CREATED, SHM_SYSCALL_FAILED | **无例外** | §3.1 规则3,4 |
-| 协议术语 | Modbus TCP, IEC104, ASFP2 | 方案展示等待确认时可用协议名 + 通俗解释（如"通过 Modbus 通信采集风机数据"）；能力介绍时可用协议名（如"我可以采集 Modbus 设备的数据"） | §3.1 规则1 |
-| 端口号 | 数字形式的端口（如 `:502`） | 方案展示时配合通俗解释可用（如"通过标准端口连接设备"） | §3.1 规则4 |
-| JSON 原文 | 连续出现 `"key":` 模式或多层 `{}` 嵌套 | **无例外** — 禁止向用户直接展示 JSON 结构 | §3.1 规则4 |
+| 共享内存/内部术语 | shm_id, shm, 共享内存, adjust_shm, point_count, max_points | **无例外** — 任何场景均禁止 | §1.2.1 C4_FUN_00005 |
+| 内部标识/错误码 | MCP, output_plan_steps, config_schema, CONFIG_MISSING_SECTION, DUPLICATE_KEY, SHM_CORRUPTED, SHM_NOT_CREATED, SHM_SYSCALL_FAILED | **无例外** | §1.2.1 C4_FUN_00005 |
+| 协议术语 | Modbus TCP, IEC104, ASFP2 | 方案展示等待确认时可用协议名 + 通俗解释（如"通过 Modbus 通信采集风机数据"）；能力介绍时可用协议名（如"我可以采集 Modbus 设备的数据"） | §1.2.1 C4_FUN_00005 |
+| 端口号 | 数字形式的端口（如 `:502`） | 方案展示时配合通俗解释可用（如"通过标准端口连接设备"） | §1.2.1 C4_FUN_00005 |
+| JSON 原文 | 连续出现 `"key":` 模式或多层 `{}` 嵌套 | **无例外** — 禁止向用户直接展示 JSON 结构 | §1.2.1 C4_FUN_00005 |
 
 | # | 用例 | 触发方式 | 断言 |
 |---|------|---------|------|
@@ -459,18 +501,18 @@ pytest                # 全跑（L2 在无 API key 时自动 skip）
 
 | # | 用例 | 触发方式 | 预期 |
 |---|------|---------|------|
-| 4.8.6 | step-decomposer 失败 → 用户收到非技术语言提示 | 上传一个内容混乱的点表（如字段名拼写错误、数值越界），使 doc-parser 解析后 plan-generator 生成的方案在 step-decomposer 分解时失败 | 用户收到的错误消息不匹配任何黑名单术语；消息含引导性内容（如"请重新描述需求"）；不残留 config.json.tmp |
+| 4.8.6 | step-decomposer 失败 → 用户收到非技术语言提示 | 上传一个内容混乱的点表（如字段名拼写错误、数值越界），使 info-gatherer 解析后 plan-generator 生成的方案在 step-decomposer 分解时失败 | 用户收到的错误消息不匹配任何黑名单术语；消息含引导性内容（如"请重新描述需求"）；不残留 config.json.tmp |
 
 > **4.8.6 的实现注记**：此用例仅验证用户在 step-decomposer 失败时看到的最终错误消息。
 > agent.md §3.2.2 规定的 "output_plan_steps 校验失败 → 重试一次 → 仍失败" 机制属于
 > 子代理内部逻辑，适合通过 TypeScript 单元测试（`GenericFakeChatModel`）验证，不在本
 > 黑盒测试方案覆盖范围内。
 
-### 4.9 AgentState 持久化（agent.md §3.1）
+### 4.9 AgentState 持久化（agent.md §3.2.1.7）
 
 | # | 用例 | 触发方式 | 断言 |
 |---|------|---------|------|
-| 4.9.1 | 接入流程中途重启 → 状态恢复 | 完成 doc-parser + plan-generator → `agent.get_state()` 确认 `hasAccessPlan = true` → `agent.kill()` → `agent.restart()` | 重启后 `agent.get_state()` 返回 `hasAccessPlan = true`（用户无需重新上传点表即可继续） |
+| 4.9.1 | 接入流程中途重启 → 状态恢复 | 完成 info-gatherer + plan-generator → `agent.get_state()` 确认 `hasAccessPlan = true` → `agent.kill()` → `agent.restart()` | 重启后 `agent.get_state()` 返回 `hasAccessPlan = true`（用户无需重新上传点表即可继续） |
 | 4.9.2 | 用户确认后中断 → 状态保持 | 4.9.1 后 → 发送确认消息 → `agent.kill()`（step-decomposer 执行前）→ `agent.restart()` | 重启后 `agent.get_state()` 返回 `phase` 反映已确认状态，Agent 可继续执行 |
 | 4.9.3 | 执行完成后状态重置 | 完成一次完整接入 → `agent.get_state()` | `phase = "idle"`, `hasAccessPlan = false` |
 | 4.9.4 | 状态重置后可处理新接入 | 在 4.9.3 之后发起新的接入请求 | Agent 正常启动新流程，不混淆上一次接入的设备和配置 |
@@ -479,7 +521,7 @@ pytest                # 全跑（L2 在无 API key 时自动 skip）
 > ```json
 > { "phase": "idle", "hasAccessPlan": false, "lastError": null }
 > ```
-> 此端点是 agent.md §3.1 AgentState 的最小可观测出口，不暴露完整 accessPlan 内容。
+> 此端点是 agent.md §3.2.1.7 AgentState 的最小可观测出口，不暴露完整 accessPlan 内容。
 >
 > ⚠️ **前提**：§4.9.1、§4.9.2 依赖 LangGraph checkpoint 在 `kill()` → `restart()` 后
 > 自动恢复 `phase` 和 `accessPlan` 字段。这要求 `createDeepAgent` 在初始化时能从
