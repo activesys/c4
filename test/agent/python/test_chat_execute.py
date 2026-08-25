@@ -10,22 +10,25 @@ C4 Agent L2 功能测试 — 执行验证 & 错误恢复 & 状态持久化
   4.6.1.3  原子写入 → 无 .tmp 残留, .bak 存在
   4.6.1.4  writer/reader 分类 → 与 Registry 一致
   4.6.1.5  追加设备 → 新实例追加, 旧实例保留
-  4.6.2.1  修改 IP → 实例 IP 变更, 其余不变
-  4.6.2.2  修改点参数 → point addr 变更
-  4.6.3.1  删除实例 → 从数组移除
+   4.6.2.1  修改 IP → 实例 IP 变更, 其余不变
+   4.6.2.2  修改点参数 → point addr 变更
+   4.6.2.4  删除采集点 → points[] 移除 temperature
+   4.6.2.5  修改不存在的实例 → 友好错误, config 不变
+   4.6.3.1  删除实例 → 从数组移除
+   4.6.3.4  删除不存在的实例 → 友好错误, config 不变
 
-§4.8 错误恢复路径:
-  4.8.1  adjust_shm 失败 — DUPLICATE_KEY 回退 .bak
-  4.8.2  adjust_shm 失败 — CONFIG_MISSING_SECTION 回退 .bak
-  4.8.3  adjust_shm 失败 — UNKNOWN_READER_KEY 回退 .bak
+§4.8 错误恢复路径（4.8.1-4.8.3/4.8.5 为预构造 config 的确定性测试，绕过 LLM）:
+  4.8.1  adjust_shm 失败 — DUPLICATE_KEY 回退 .bak（内容级断言 + 非技术语言错误）
+  4.8.2  adjust_shm 失败 — CONFIG_MISSING_SECTION 回退 .bak（内容级断言）
+  4.8.3  adjust_shm 失败 — UNKNOWN_READER_KEY 回退 .bak（内容级断言）
   4.8.4  adjust_shm 失败 — SHM_SYSCALL_FAILED 不回退 config
-  4.8.5  start 部分失败
+  4.8.5  start 部分失败 — 注入 binary_path 不存在的 mock 服务
   4.8.6  step-decomposer 失败 — 用户消息验证
 
-§4.9 AgentState 持久化:
-  4.9.1  接入流程中途重启 → 状态恢复
-  4.9.2  用户确认后中断 → 状态保持
-  4.9.3  执行完成后状态重置 → phase=idle
+§4.9 AgentState 持久化（GET /api/state 观测 phase / hasAccessPlan / lastError）:
+  4.9.1  接入流程中途重启 → hasAccessPlan=true 恢复
+  4.9.2  用户确认后中断 → phase=confirmed 保持
+  4.9.3  执行完成后状态重置 → phase=idle + hasAccessPlan=false（强断言）
   4.9.4  状态重置后可处理新接入
 """
 
@@ -34,6 +37,7 @@ import os
 import subprocess
 import sys
 import time
+from copy import deepcopy
 from pathlib import Path
 
 import pytest  # type: ignore
@@ -420,6 +424,110 @@ class TestExecuteModify:
                     f"Point addr should change. Before: {addr_before}, After: {new_addr}"
                 )
 
+    @retry_llm(max_attempts=3)
+    def test_delete_point(self, chat, agent, tmp_path):
+        """4.6.2.4: 删除采集点 → points[] 移除 temperature，其余点保留"""
+        csv_path = create_full_csv(tmp_path)
+
+        result = full_access_flow(
+            chat, agent, str(csv_path),
+            upload_msg="接入华能阿拉善1#风机",
+            plan_msg="生成接入方案，并转发到中心侧",
+            confirm=True,
+            tmp_path=tmp_path,
+        )
+        time.sleep(3)
+
+        config_path = agent.config_dir / "config.json"
+        if not config_path.exists():
+            pytest.skip("config.json not generated — cannot test delete point")
+        config_before = assert_config_json_valid(config_path)
+        modbus_before = config_before.get("c4_modbus_client", [])
+        if not modbus_before:
+            pytest.skip("No modbus instances")
+
+        def _find_point(instances, keyword):
+            """在实例列表中查找含 keyword 的 point（匹配 id 或 name 字段）。"""
+            for inst in instances:
+                for pt in inst.get("points", []):
+                    if keyword in str(pt.get("id", "")).lower() or keyword in str(
+                        pt.get("name", "")
+                    ).lower():
+                        return inst, pt
+            return None, None
+
+        _, temp_before = _find_point(modbus_before, "temperature")
+        assert temp_before is not None, (
+            "Precondition: config should contain a temperature point"
+        )
+
+        # 请求删除采集点
+        with chat.send("不再采集 1#风机的温度数据") as s:
+            text = s.text_content()
+        assert len(text) > 0, "Delete point request should produce a response"
+
+        with chat.send("确认修改") as s:
+            text2 = s.text_content()
+        assert len(text2) > 0
+        time.sleep(3)
+
+        config_after = assert_config_json_valid(config_path)
+        modbus_after = config_after.get("c4_modbus_client", [])
+        _, temp_after = _find_point(modbus_after, "temperature")
+        assert temp_after is None, (
+            f"temperature point should be removed from points[]. "
+            f"Remaining: {[p.get('id') for inst in modbus_after for p in inst.get('points', [])]}"
+        )
+        # 其他采集点保留
+        _, wind_after = _find_point(modbus_after, "windspeed")
+        assert wind_after is not None, (
+            "windspeed point should remain after deleting temperature"
+        )
+
+    @retry_llm(max_attempts=3)
+    def test_modify_nonexistent_instance(self, chat, agent, tmp_path):
+        """4.6.2.5: 修改不存在的设备 → 友好错误（非技术语言），config 不变"""
+        csv_path = create_full_csv(tmp_path)
+
+        result = full_access_flow(
+            chat, agent, str(csv_path),
+            upload_msg="接入华能阿拉善1#风机",
+            plan_msg="生成接入方案，并转发到中心侧",
+            confirm=True,
+            tmp_path=tmp_path,
+        )
+        time.sleep(3)
+
+        config_path = agent.config_dir / "config.json"
+        if not config_path.exists():
+            pytest.skip("config.json not generated — cannot test nonexistent modify")
+        config_before = assert_config_json_valid(config_path)
+        snapshot_before = json.dumps(config_before, sort_keys=True, ensure_ascii=False)
+
+        # 请求修改一个从未接入过的设备 ID（hnals_wt9 不存在）
+        with chat.send("请修改设备 hnals_wt9 的 IP 为 192.168.110.9") as s:
+            text = s.text_content()
+
+        assert len(text) > 0, "Response should not be empty"
+
+        # 友好错误提示（非技术语言），错误场景协议名无豁免
+        friendly_signals = [
+            "不存在", "找不到", "没有找到", "未接入", "从未接入",
+            "没有接入", "没有这个设备", "请确认", "哪个设备",
+        ]
+        has_friendly = any(kw in text for kw in friendly_signals)
+        assert has_friendly, (
+            f"Should give friendly error for nonexistent device. Got: {text[:500]}"
+        )
+        assert_no_technical_terms(text, allow_protocols=False)
+
+        # 不修改 config.json
+        config_after = assert_config_json_valid(config_path)
+        snapshot_after = json.dumps(config_after, sort_keys=True, ensure_ascii=False)
+        assert snapshot_after == snapshot_before, (
+            "config.json must NOT change when modifying a nonexistent instance"
+        )
+
 
 # ══════════════════════════════════════════════
 #  §4.6.3 delete 操作
@@ -482,20 +590,9 @@ class TestExecuteDelete:
             "after deleting one instance"
         )
 
-
-# ══════════════════════════════════════════════
-#  §4.8 错误恢复路径
-# ══════════════════════════════════════════════
-
-
-@pytest.mark.llm
-class TestErrorRecovery:
-    """§4.8 错误恢复路径"""
-
     @retry_llm(max_attempts=3)
-    def test_duplicate_key_rollback_to_bak(self, chat, agent, tmp_path):
-        """4.8.1: adjust_shm 失败 — DUPLICATE_KEY → 回退 .bak"""
-        # 首先需要有 config.json 和 .bak
+    def test_delete_nonexistent_instance(self, chat, agent, tmp_path):
+        """4.6.3.4: 删除不存在的设备 → 友好错误，config 不变"""
         csv_path = create_full_csv(tmp_path)
 
         result = full_access_flow(
@@ -509,26 +606,296 @@ class TestErrorRecovery:
 
         config_path = agent.config_dir / "config.json"
         if not config_path.exists():
-            pytest.skip("config.json not generated — cannot test rollback")
+            pytest.skip("config.json not generated — cannot test nonexistent delete")
         config_before = assert_config_json_valid(config_path)
+        snapshot_before = json.dumps(config_before, sort_keys=True, ensure_ascii=False)
 
-        # 构造重复 key：手动修改 config.json 创建 DUPLICATE_KEY
-        config_before_text = config_path.read_text(encoding="utf-8")
-        # 尝试在 config.json 中复造重复 key — 操作由 Agent 重启时触发
-        bak_path = agent.config_dir / "config.json.bak"
-        if not bak_path.exists():
-            # 没有 .bak，写入一份副本作为 .bak
-            bak_path.write_text(config_before_text, encoding="utf-8")
+        # 请求删除一个从未接入过的设备 ID（hnals_wt9 不存在）
+        with chat.send("请停用设备 hnals_wt9") as s:
+            text = s.text_content()
 
-        # 触发 restart（Agent 重新加载时可能检测错误）
+        assert len(text) > 0, "Response should not be empty"
+
+        # 友好错误提示（非技术语言），错误场景协议名无豁免
+        friendly_signals = [
+            "不存在", "找不到", "没有找到", "未接入", "从未接入",
+            "没有接入", "没有这个设备", "请确认", "哪个设备",
+        ]
+        has_friendly = any(kw in text for kw in friendly_signals)
+        assert has_friendly, (
+            f"Should give friendly error for nonexistent device. Got: {text[:500]}"
+        )
+        assert_no_technical_terms(text, allow_protocols=False)
+
+        # 不修改 config.json
+        config_after = assert_config_json_valid(config_path)
+        snapshot_after = json.dumps(config_after, sort_keys=True, ensure_ascii=False)
+        assert snapshot_after == snapshot_before, (
+            "config.json must NOT change when deleting a nonexistent instance"
+        )
+
+
+# ══════════════════════════════════════════════
+#  §4.8 错误恢复路径
+# ══════════════════════════════════════════════
+#
+# 测试策略（README §4.8 注记）：4.8.1-4.8.3 通过预构造 config.json 直接构造
+# 错误条件，绕过 LLM 生成环节，直接测试执行模块（executeStopAndStart）
+# 的错误处理 —— kill → restart 触发启动期无条件 Stop-Start（agent.md §3.2.3），
+# adjust_shm 失败后按 §3.2.2 协议回退 config.json.bak 并 restart 服务。
+# 4.8.5 通过 registry 注入 binary_path 不存在的 mock 服务模拟 start 失败。
+
+
+# 基线合法配置：c4_asfp2_server (writer) + c4_asfp2_client (reader)。
+# 结构与 test_startup.py 的 _CONFIG_WITH_SERVICES 一致（已被 L1 启动恢复测试验证）。
+_CONFIG_VALID_BASELINE: dict = {
+    "c4_shm_manager": {
+        "instance_id": "c4_test",
+        "max_points": 100000,
+        "writer": ["c4_asfp2_server"],
+        "reader": ["c4_asfp2_client"],
+    },
+    "c4_asfp2_server": [
+        {
+            "id": "test_asfp2_srv_1",
+            "name": "ASFP2接收服务1",
+            "ip": "0.0.0.0",
+            "port": 0,
+            "points": [
+                {"id": "point_1000", "addr": 1000, "shm_id": 0},
+                {"id": "point_1002", "addr": 1002, "shm_id": 0},
+            ],
+        }
+    ],
+    "c4_asfp2_client": [
+        {
+            "id": "test_asfp2_cli_1",
+            "name": "ASFP2转发1",
+            "ip": "127.0.0.1",
+            "port": 9999,
+            "t0": 30,
+            "t1": 20,
+            "t2": 10,
+            "timer": 100,
+            "key_sequence": 1,
+            "same_data_type": 1,
+            "same_timestamp": 1,
+            "smart": 1,
+            "forward_kack": 255,
+            "inverse_keep": 0,
+            "points": [
+                {"key": "test_asfp2_srv_1.point_1000", "addr": 3001, "shm_id": 0},
+                {"key": "test_asfp2_srv_1.point_1002", "addr": 3002, "shm_id": 0},
+            ],
+        }
+    ],
+}
+
+
+def _extract_state_payload(state: dict) -> dict:
+    """
+    兼容两种 GET /api/state 响应形状，返回可观测子集 dict：
+
+      - README §4.9 直接形状:   {phase, hasAccessPlan, lastError}
+      - 包装形状:               {success: bool, state: {phase, hasAccessPlan, lastError}}
+    """
+    if isinstance(state, dict) and isinstance(state.get("state"), dict):
+        return state["state"]
+    return state
+
+
+def _write_config_pair(agent, config: dict, bak: dict) -> Path:
+    """
+    写入 config.json（错误条件）与 config.json.bak（基线合法配置），
+    返回 config.json 路径。
+    """
+    config_path = agent.config_dir / "config.json"
+    bak_path = agent.config_dir / "config.json.bak"
+    bak_path.write_text(
+        json.dumps(bak, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    config_path.write_text(
+        json.dumps(config, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    return config_path
+
+
+class TestErrorRecoveryConfigErrors:
+    """§4.8.1-4.8.3, 4.8.5: adjust_shm config 类错误 + start 部分失败
+
+    确定性测试：预构造 config.json 绕过 LLM，kill → restart 触发启动期
+    无条件 Stop-Start，直接验证执行模块的错误恢复行为（agent.md §3.2.2/§3.2.3）。
+    不依赖 DEEPSEEK_API_KEY，随 L1 一起运行。
+    """
+
+    def _plant_error_and_restart(self, agent, bad_config: dict) -> dict:
+        """写入 .bak=基线 + config.json=错误条件 → kill → restart。返回重启后 state payload。"""
+        _write_config_pair(agent, bad_config, deepcopy(_CONFIG_VALID_BASELINE))
         agent.kill()
         agent.restart()
+        time.sleep(1)  # 给服务进程 spawn/restart 留出时间
+        return _extract_state_payload(agent.get_state())
 
-        # 验证：Agent 就绪，config.json 有效
+    def _assert_rolled_back_to_bak(self, agent, config_path: Path) -> None:
+        """断言 config.json 内容级恢复为 .bak 内容 + 服务被 restart + 无 .tmp 残留 + 非技术语言错误记录。"""
         config_after = assert_config_json_valid(config_path)
-        assert isinstance(config_after, dict), (
-            "config.json should be valid after restart"
+        assert config_after == _CONFIG_VALID_BASELINE, (
+            "config.json should be restored to config.json.bak content after "
+            f"rollback.\nAFTER: {json.dumps(config_after, ensure_ascii=False)[:800]}"
         )
+
+        # 已 stop 的服务被 restart：.bak 中声明的 writer/reader 进程恢复运行
+        assert_process_running("c4_asfp2_server")
+        assert_process_running("c4_asfp2_client")
+
+        # 原子写入无残留
+        assert_no_tmp_file(agent.config_dir)
+
+        # 用户收到底层原因的错误描述（但非技术语言）——README §4.8.1「同上」：
+        # lastError 是 AgentState 的最小可观测出口（agent.md §3.2.1.7：非技术语言）
+        state = _extract_state_payload(agent.get_state())
+        last_error = state.get("lastError")
+        assert last_error, (
+            f"lastError should record the adjust_shm failure. State: {state}"
+        )
+        assert_no_technical_terms(str(last_error), allow_protocols=False)
+
+    def test_duplicate_key_rollback_to_bak(self, agent):
+        """4.8.1: adjust_shm 失败 — DUPLICATE_KEY → config.json 恢复为 .bak 内容"""
+        bad = deepcopy(_CONFIG_VALID_BASELINE)
+        # 构造重复的 {service_id}.{point_id} 全局 key：
+        # 同一 writer 实例中两个 point 的 id 相同 →
+        # 全局 key 'test_asfp2_srv_1.point_1000' 出现两次 → DUPLICATE_KEY
+        bad["c4_asfp2_server"][0]["points"].append(
+            {"id": "point_1000", "addr": 9999, "shm_id": 0}
+        )
+
+        config_path = agent.config_dir / "config.json"
+        self._plant_error_and_restart(agent, bad)
+        self._assert_rolled_back_to_bak(agent, config_path)
+
+    def test_config_missing_section(self, agent):
+        """4.8.2: adjust_shm 失败 — CONFIG_MISSING_SECTION（reader 存在但 writer 为空）→ 回退 .bak"""
+        bad = deepcopy(_CONFIG_VALID_BASELINE)
+        # writer 为空但 reader 非空 → adjust_shm 返回 CONFIG_MISSING_SECTION
+        bad["c4_shm_manager"]["writer"] = []
+
+        config_path = agent.config_dir / "config.json"
+        self._plant_error_and_restart(agent, bad)
+        self._assert_rolled_back_to_bak(agent, config_path)
+
+    def test_unknown_reader_key(self, agent):
+        """4.8.3: adjust_shm 失败 — UNKNOWN_READER_KEY（key 指向不存在的 writer）→ 回退 .bak"""
+        bad = deepcopy(_CONFIG_VALID_BASELINE)
+        # asfp2_client points[0].key 指向不存在的 writer → UNKNOWN_READER_KEY
+        bad["c4_asfp2_client"][0]["points"][0]["key"] = (
+            "nonexistent_srv.nonexistent_point"
+        )
+
+        config_path = agent.config_dir / "config.json"
+        self._plant_error_and_restart(agent, bad)
+        self._assert_rolled_back_to_bak(agent, config_path)
+
+    def test_start_partial_failure(self, agent, registry_dir):
+        """4.8.5: start 部分失败 → 成功服务保持运行，失败服务被报告
+
+        注入方法（README §4.8.5 注记）：在 registry 中新增一个 binary_path
+        不存在的 mock 服务（writer 角色），与正常服务（c4_asfp2_server /
+        c4_asfp2_client）一起写入 config.json。restart 触发启动期 Stop-Start：
+        adjust_shm 成功 → start 阶段 mock 服务失败、其余服务成功。
+        """
+        # 注入 binary_path 不存在的 mock 服务 registry 条目
+        fake_registry = {
+            "service_type": "c4_fake_service",
+            "display_name": "测试注入服务",
+            "role": "writer",
+            "protocols": [
+                {"protocol": "fake", "description": "测试注入用，无真实二进制"}
+            ],
+            "point_fields": [
+                {"name": "addr", "type": "integer", "description": "地址"}
+            ],
+            "config_schema": {
+                "fields": {
+                    "ip": {
+                        "type": "string",
+                        "source": "default",
+                        "default": "0.0.0.0",
+                        "description": "绑定 IP",
+                    },
+                    "port": {
+                        "type": "integer",
+                        "source": "default",
+                        "default": 0,
+                        "description": "端口",
+                    },
+                }
+            },
+            "binary_path": "/nonexistent/c4_fake_service",
+            "error_mappings": {},
+        }
+        fake_path = registry_dir / "c4_fake_service.json"
+        fake_path.write_text(
+            json.dumps(fake_registry, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+        # config 含正常服务（成功）+ mock 服务（start 失败）
+        bad = deepcopy(_CONFIG_VALID_BASELINE)
+        bad["c4_shm_manager"]["writer"].append("c4_fake_service")
+        bad["c4_fake_service"] = [
+            {
+                "id": "test_fake_1",
+                "name": "注入失败服务",
+                "ip": "0.0.0.0",
+                "port": 0,
+                "points": [{"id": "pt_1", "addr": 1, "shm_id": 0}],
+            }
+        ]
+
+        try:
+            config_path = _write_config_pair(agent, bad, deepcopy(_CONFIG_VALID_BASELINE))
+            agent.kill()
+            agent.restart()
+            time.sleep(1)
+
+            # 成功的服务保持运行
+            assert_process_running("c4_asfp2_server")
+            assert_process_running("c4_asfp2_client")
+
+            # 失败的服务未被启动（binary_path 不存在）
+            fake_proc = subprocess.run(
+                ["pgrep", "-f", "c4_fake_service"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            assert not fake_proc.stdout.strip(), (
+                "c4_fake_service should NOT be running "
+                "(its binary_path does not exist)"
+            )
+
+            # 失败的服务被报告：lastError（非技术语言）记录启动失败
+            state = _extract_state_payload(agent.get_state())
+            last_error = state.get("lastError")
+            assert last_error, (
+                f"lastError should report the failed service start. State: {state}"
+            )
+            assert_no_technical_terms(str(last_error), allow_protocols=False)
+
+            # 启动部分失败不回滚 config（adjust_shm 已成功）
+            config_after = assert_config_json_valid(config_path)
+            assert "c4_fake_service" in config_after, (
+                "start 部分失败不触发 config 回退 — config.json 应保留失败服务的声明"
+            )
+        finally:
+            if fake_path.exists():
+                fake_path.unlink()
+
+
+@pytest.mark.llm
+class TestErrorRecovery:
+    """§4.8 错误恢复路径（需 LLM / 特殊环境的用例：4.8.4, 4.8.6）"""
 
     @retry_llm(max_attempts=3)
     def test_step_decomposer_failure_message(self, chat, agent, tmp_path):
@@ -553,87 +920,6 @@ class TestErrorRecovery:
 
         # 无 config.json.tmp 残留
         assert_no_tmp_file(agent.config_dir)
-
-    def test_config_missing_section(self, chat, agent, tmp_path):
-        """4.8.2: adjust_shm 失败 — CONFIG_MISSING_SECTION → 回退 .bak
-
-        前置条件：config 含 reader 但无对应 writer。
-        通过 chat 接口构造：先完成一次完整接入写入 config.json，
-        再手动构造缺失 section → kill + restart 验证恢复。
-        """
-        csv_path = create_full_csv(tmp_path)
-
-        result = full_access_flow(
-            chat, agent, str(csv_path),
-            upload_msg="接入华能阿拉善1#风机",
-            plan_msg="生成接入方案，并转发到中心侧",
-            confirm=True,
-            tmp_path=tmp_path,
-        )
-        time.sleep(3)
-
-        config_path = agent.config_dir / "config.json"
-        if not config_path.exists():
-            pytest.skip("config.json not generated — cannot test section recovery")
-
-        config = assert_config_json_valid(config_path)
-        # 备份当前 config
-        config_text = config_path.read_text(encoding="utf-8")
-        bak_path = agent.config_dir / "config.json.bak"
-        bak_path.write_text(config_text, encoding="utf-8")
-
-        # 构造有 reader 无 writer 的场景
-        shm = config.get("c4_shm_manager", {})
-        if shm.get("writer"):
-            config["c4_shm_manager"]["writer"] = []  # 清空 writer
-            config_path.write_text(json.dumps(config, indent=2, ensure_ascii=False))
-
-        agent.kill()
-        agent.restart()
-
-        # config.json 应被恢复或至少有效
-        config_after = assert_config_json_valid(config_path)
-        assert isinstance(config_after, dict)
-
-    def test_unknown_reader_key(self, chat, agent, tmp_path):
-        """4.8.3: adjust_shm 失败 — UNKNOWN_READER_KEY → 回退 .bak
-
-        前置：asfp2_client 的 points[].key 指向不存在的 writer。
-        """
-        csv_path = create_full_csv(tmp_path)
-
-        result = full_access_flow(
-            chat, agent, str(csv_path),
-            upload_msg="接入华能阿拉善1#风机",
-            plan_msg="生成接入方案，并转发到中心侧",
-            confirm=True,
-            tmp_path=tmp_path,
-        )
-        time.sleep(3)
-
-        config_path = agent.config_dir / "config.json"
-        if not config_path.exists():
-            pytest.skip("config.json not generated")
-
-        config = assert_config_json_valid(config_path)
-        config_text = config_path.read_text(encoding="utf-8")
-        bak_path = agent.config_dir / "config.json.bak"
-        bak_path.write_text(config_text, encoding="utf-8")
-
-        # 修改 asfp2_client 的 key 指向不存在项
-        asfp2 = config.get("c4_asfp2_client", [])
-        if asfp2:
-            for inst in asfp2:
-                for pt in inst.get("points", []):
-                    pt["key"] = "nonexistent_device.nonexistent_point"
-
-        config_path.write_text(json.dumps(config, indent=2, ensure_ascii=False))
-
-        agent.kill()
-        agent.restart()
-
-        config_after = assert_config_json_valid(config_path)
-        assert isinstance(config_after, dict)
 
     def test_shm_syscall_failed_no_config_rollback(self, chat, agent, tmp_path):
         """4.8.4: SHM_SYSCALL_FAILED → config.json 不回退
@@ -707,31 +993,6 @@ class TestErrorRecovery:
                 capture_output=True, timeout=10,
             )
 
-    def test_start_partial_failure(self, chat, agent, tmp_path):
-        """4.8.5: start 部分失败 → 成功服务保持运行, 失败被报告
-
-        注：此用例需要注入会 start 失败的 MCP 服务。
-        通过 registry 中配置不存在的 binary_path 模拟。
-        当前通过检查 Agent 不崩溃 + 返回友好信息来验证基本路径。
-        """
-        csv_path = create_full_csv(tmp_path)
-
-        result = full_access_flow(
-            chat, agent, str(csv_path),
-            upload_msg="接入华能阿拉善1#风机",
-            plan_msg="生成接入方案，并转发到中心侧",
-            confirm=True,
-            tmp_path=tmp_path,
-        )
-        time.sleep(3)
-
-        # 基本的健壮性检查：流程完成后 Agent 仍就绪
-        try:
-            state = agent.get_state()
-            assert isinstance(state, dict), "get_state should return dict"
-        except Exception:
-            pass
-
 
 # ══════════════════════════════════════════════
 #  §4.9 AgentState 持久化
@@ -746,7 +1007,7 @@ class TestAgentState:
     def test_state_restore_after_plan_generation(self, chat, agent, tmp_path):
         """4.9.1: 接入流程中途重启 → 状态恢复
 
-        前置：完成 doc-parser + plan-generator，hasAccessPlan=true。
+        前置：完成 info-gatherer + plan-generator，hasAccessPlan=true。
         kill → restart 后 hasAccessPlan 仍为 true。
         """
         csv_path = create_full_csv(tmp_path)
@@ -761,32 +1022,29 @@ class TestAgentState:
 
         assert len(plan_text) > 0
 
-        # 检查 state
-        try:
-            state = agent.get_state()
-            assert isinstance(state, dict), "get_state should return dict"
-            # hasAccessPlan 应为 true（plan 已生成）
-            has_plan = state.get("hasAccessPlan", state.get("hasAccessPlan", None))
-        except Exception:
-            has_plan = None
+        # README §4.9.1 前置断言：plan 已生成 → hasAccessPlan = true
+        state = _extract_state_payload(agent.get_state())
+        assert state.get("hasAccessPlan") is True, (
+            f"hasAccessPlan should be true after plan generation. State: {state}"
+        )
 
         # kill + restart
         agent.kill()
         agent.restart()
 
-        # 重启后检查 state
-        try:
-            state2 = agent.get_state()
-            assert isinstance(state2, dict)
-        except Exception:
-            pytest.skip("get_state not available — cannot verify state persistence")
+        # 重启后 hasAccessPlan 仍为 true（checkpoint 持久化恢复，用户无需重新上传点表）
+        state2 = _extract_state_payload(agent.get_state())
+        assert state2.get("hasAccessPlan") is True, (
+            f"hasAccessPlan should persist across restart (checkpoint restore). "
+            f"State: {state2}"
+        )
 
     @retry_llm(max_attempts=3)
     def test_state_after_confirm_before_execution(self, chat, agent, tmp_path):
         """4.9.2: 用户确认后中断 → 状态保持
 
         前置：确认方案后，在 step-decomposer 执行前 kill。
-        restart 后 Agent 可继续执行。
+        restart 后 phase 反映已确认状态（"confirmed"），Agent 可继续执行。
         """
         csv_path = create_full_csv(tmp_path)
 
@@ -806,12 +1064,13 @@ class TestAgentState:
         agent.kill()
         agent.restart()
 
-        # Agent 应就绪
-        try:
-            state = agent.get_state()
-            assert isinstance(state, dict)
-        except Exception:
-            pass
+        # 重启后 phase 反映已确认状态
+        state = _extract_state_payload(agent.get_state())
+        phase = state.get("phase")
+        assert phase == "confirmed", (
+            f"After confirm + restart, phase should be 'confirmed', "
+            f"got '{phase}'. State: {state}"
+        )
 
     def test_state_reset_after_completion(self, chat, agent, tmp_path):
         """4.9.3: 执行完成后 → phase="idle", hasAccessPlan=false"""
@@ -826,27 +1085,19 @@ class TestAgentState:
         )
         time.sleep(3)
 
-        # 检查 state
-        try:
-            state = agent.get_state()
-            assert isinstance(state, dict), "get_state should return dict"
+        # README §4.9.3：执行完成后状态重置 — 强断言，不允许静默通过
+        state = _extract_state_payload(agent.get_state())
+        assert isinstance(state, dict), "get_state should return dict"
 
-            phase = state.get("phase", None)
-            has_plan = state.get("hasAccessPlan", state.get("hasAccessPlan", None))
-
-            # phase 应为 "idle"（执行完成后）
-            if phase is not None:
-                assert phase == "idle", (
-                    f"After completion, phase should be 'idle', got '{phase}'"
-                )
-            # hasAccessPlan 应为 false
-            if has_plan is not None:
-                assert has_plan == False, (
-                    f"After completion, hasAccessPlan should be false, got {has_plan}"
-                )
-        except Exception as e:
-            # get_state 可能未实现 — 不 fail，但不验证状态重置
-            pass
+        phase = state.get("phase")
+        assert phase == "idle", (
+            f"After completion, phase should be 'idle', got '{phase}'. State: {state}"
+        )
+        has_plan = state.get("hasAccessPlan")
+        assert has_plan is False, (
+            f"After completion, hasAccessPlan should be false, got {has_plan}. "
+            f"State: {state}"
+        )
 
     @retry_llm(max_attempts=3)
     def test_new_access_after_completion(self, chat, agent, tmp_path):
@@ -863,6 +1114,17 @@ class TestAgentState:
         )
         time.sleep(3)
 
+        # 前置断言：第一次接入完成后状态已重置（§4.9.3）
+        state_after_first = _extract_state_payload(agent.get_state())
+        assert state_after_first.get("phase") == "idle", (
+            f"After first access, phase should reset to 'idle'. "
+            f"State: {state_after_first}"
+        )
+        assert state_after_first.get("hasAccessPlan") is False, (
+            f"After first access, hasAccessPlan should be false. "
+            f"State: {state_after_first}"
+        )
+
         # 第二次接入（不同设备）
         csv2_path = create_full_csv(
             tmp_path, filename="device2.csv",
@@ -877,5 +1139,18 @@ class TestAgentState:
         assert len(text) > 0, (
             f"New access flow should start after completion. Got: {text[:300]}"
         )
-        # 应提到新的设备名而非旧的
-        # Agent 不应混淆（至少能正常响应）
+        # 新流程应针对新设备（2#风机），不混淆上一次接入的 1#风机
+        new_device_signal = (
+            "2#风机" in text or "阿拉善2" in text or "192.168.110.2" in text
+        )
+        assert new_device_signal, (
+            f"New access flow should reference the new device (2#风机). "
+            f"Got: {text[:500]}"
+        )
+        # 新流程已启动：phase 进入接入流程状态（不再是 idle）
+        state_during_second = _extract_state_payload(agent.get_state())
+        phase2 = state_during_second.get("phase")
+        assert phase2 in ("collecting", "planning", "confirmed", "executing"), (
+            f"After new upload, phase should reflect an in-progress flow, "
+            f"got '{phase2}'. State: {state_during_second}"
+        )

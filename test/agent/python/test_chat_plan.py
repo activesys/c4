@@ -13,10 +13,13 @@ C4 Agent L2 功能测试 — 方案生成 & 用户确认
 §4.5 用户确认与拒绝:
   4.5.1  用户确认方案 — 流程继续进入执行
   4.5.2  用户拒绝方案 — 流程停止，不生成 config.json
+  4.5.3  方案展示含 abbr 绑定（新增）— 确认文本列「将新建设备 hnals_wt1」，确认后 id 固化
+  4.5.4  方案展示含 abbr 绑定（命中）— 确认文本列「将在 hnals_wt1 上修改」，复用已存 id
 """
 
 import json
 import os
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -29,6 +32,7 @@ from test_helpers import (
     retry_llm,
     find_interrupt_id,
     run_upload,
+    full_access_flow,
 )
 from assertions import (
     assert_no_technical_terms,
@@ -48,7 +52,7 @@ class TestPlanGeneration:
 
     @retry_llm(max_attempts=3)
     def test_generate_plan_with_forwarding(self, chat, agent, tmp_path):
-        """4.4.1: doc-parser 完成后 "生成方案并转发到中心侧" → 对话含"确认"关键词"""
+        """4.4.1: info-gatherer 完成后 "生成方案并转发到中心侧" → 对话含"确认"关键词"""
         csv_path = create_full_csv(tmp_path)
 
         # Step 1: 上传点表
@@ -244,3 +248,124 @@ class TestConfirmReject:
                 )
             except json.JSONDecodeError:
                 pass
+
+
+# ══════════════════════════════════════════════
+#  §4.5.3/4.5.4 abbr 绑定确认
+# ══════════════════════════════════════════════
+
+
+@pytest.mark.llm
+class TestAbbrBinding:
+    """§4.5.3/4.5.4 方案确认含 abbr 绑定 — 一次性批准，确认后 id 固化
+
+    断言策略（README §4.6.4 断言面）：
+      方案文本断言「列出 hnals_wt1」为 LLM 行为，用宽松关键词；
+      config.json 的 instance.id 为确定性副作用，做结构断言。
+    """
+
+    def _collect_instance_ids(self, config: dict) -> list:
+        """收集 config.json 中所有服务实例的 id（不含 c4_shm_manager）。"""
+        ids: list = []
+        for key, value in config.items():
+            if key == "c4_shm_manager" or not isinstance(value, list):
+                continue
+            for inst in value:
+                if isinstance(inst, dict) and inst.get("id"):
+                    ids.append(inst["id"])
+        return ids
+
+    def _load_config(self, agent, result) -> dict:
+        """从 full_access_flow 结果或 config.json 文件读取有效 config。"""
+        config = result.get("config_json")
+        if config is None:
+            config_path = agent.config_dir / "config.json"
+            if config_path.exists():
+                config = assert_config_json_valid(config_path)
+        assert config is not None, "config.json should be generated"
+        return config
+
+    @retry_llm(max_attempts=3)
+    def test_plan_shows_abbr_binding_new_device(self, chat, agent, tmp_path):
+        """4.5.3: 首次接入 → 方案确认文本列「将新建设备 hnals_wt1」，确认后 id 固化"""
+        csv_path = create_full_csv(tmp_path)
+
+        result = full_access_flow(
+            chat, agent, str(csv_path),
+            upload_msg="接入华能阿拉善1#风机",
+            plan_msg="生成接入方案，并转发到中心侧",
+            confirm=True,
+            tmp_path=tmp_path,
+        )
+        time.sleep(3)
+
+        # 方案确认文本含 abbr 绑定的可读呈现：列出将新建设备 hnals_wt1
+        plan_text = result.get("plan_text", "")
+        assert len(plan_text) > 0, "Plan text should not be empty"
+        assert "hnals_wt1" in plan_text, (
+            f"Plan confirmation should list the new device id 'hnals_wt1'. "
+            f"Got: {plan_text[:500]}"
+        )
+        new_device_signals = ["新建", "新设备", "新增", "创建", "接入"]
+        has_new_signal = any(kw in plan_text for kw in new_device_signals)
+        assert has_new_signal, (
+            f"Plan should present the device as newly created. Got: {plan_text[:500]}"
+        )
+
+        # 用户确认后 id 固化为 {site_abbr}_{abbr} = hnals_wt1
+        config = self._load_config(agent, result)
+        instance_ids = self._collect_instance_ids(config)
+        assert "hnals_wt1" in instance_ids, (
+            f"After confirmation, instance id should be 'hnals_wt1' "
+            f"({{site_abbr}}_{{abbr}}). Got ids: {instance_ids}"
+        )
+
+    @retry_llm(max_attempts=3)
+    def test_plan_shows_abbr_binding_existing_device(self, chat, agent, tmp_path):
+        """4.5.4: 已有 hnals_wt1 → modify 确认文本列「将在 hnals_wt1 上修改」，复用已存 id"""
+        csv_path = create_full_csv(tmp_path)
+
+        result = full_access_flow(
+            chat, agent, str(csv_path),
+            upload_msg="接入华能阿拉善1#风机",
+            plan_msg="生成接入方案，并转发到中心侧",
+            confirm=True,
+            tmp_path=tmp_path,
+        )
+        time.sleep(3)
+
+        config = self._load_config(agent, result)
+        ids_before = self._collect_instance_ids(config)
+        assert "hnals_wt1" in ids_before, (
+            f"Precondition: 'hnals_wt1' should exist. Got ids: {ids_before}"
+        )
+
+        # 请求修改已有设备 → 方案/确认文本应列出已有 id，而非新建
+        with chat.send("将 1#风机的 IP 改为 192.168.110.5") as stream:
+            modify_text = stream.text_content()
+
+        assert len(modify_text) > 0, "Modify request should produce a response"
+        assert "hnals_wt1" in modify_text, (
+            f"Plan should list the existing id 'hnals_wt1' for modify. "
+            f"Got: {modify_text[:500]}"
+        )
+        modify_signals = ["修改", "调整", "变更", "更新", "加点", "删除"]
+        has_modify_signal = any(kw in modify_text for kw in modify_signals)
+        assert has_modify_signal, (
+            f"Plan should describe the operation on the existing device. "
+            f"Got: {modify_text[:500]}"
+        )
+
+        # 确认执行
+        with chat.send("确认修改") as stream:
+            confirm_text = stream.text_content()
+        assert len(confirm_text) > 0
+        time.sleep(3)
+
+        # 复用已存 id：不新建实例，id 集合不变
+        config_after = self._load_config(agent, result)
+        ids_after = self._collect_instance_ids(config_after)
+        assert set(ids_after) == set(ids_before), (
+            f"Modify should reuse existing ids, not create new ones. "
+            f"Before: {ids_before}, After: {ids_after}"
+        )

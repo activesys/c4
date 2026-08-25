@@ -9,11 +9,15 @@
       { "condition": "device.protocol == 'modbus'", "description": "Modbus 协议设备数据采集" }
     ]
   }],
+  "point_fields": [
+    { "name": "addr", "type": "integer", "description": "寄存器地址" },
+    { "name": "uid",  "type": "integer", "description": "单元标识符" },
+    { "name": "fun",  "type": "integer", "description": "功能码" },
+    { "name": "type", "type": "integer", "description": "数据类型" },
+    { "name": "swap", "type": "integer", "description": "字节交换" }
+  ],
   "config_schema": {
-    "required": ["id", "ip", "port"],
     "fields": {
-      "id":         { "type": "string",  "source": "plan",    "default": null,  "description": "实例唯一标识" },
-      "name":       { "type": "string",  "source": "plan",    "default": null,  "description": "实例名称" },
       "ip":         { "type": "string",  "source": "plan",    "default": null,  "description": "设备 IP 地址" },
       "port":       { "type": "integer", "source": "plan",    "default": 502,   "description": "Modbus 端口（默认 502）" },
       "t0":         { "type": "integer", "source": "default", "default": 30,    "description": "连接超时（秒）" },

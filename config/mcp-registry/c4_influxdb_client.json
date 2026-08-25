@@ -9,11 +9,13 @@
       { "condition": "target.role == 'store'", "description": "数据入库场景（写入 InfluxDB 时序数据库）" }
     ]
   }],
+  "point_fields": [
+    { "name": "measurement", "type": "string", "description": "measurement 名（表名）" },
+    { "name": "field",       "type": "string", "description": "field 名（字段名）" },
+    { "name": "type",        "type": "string", "description": "数据类型（如 float/int/string）" }
+  ],
   "config_schema": {
-    "required": ["id", "url", "token", "org", "bucket"],
     "fields": {
-      "id":         { "type": "string",  "source": "plan",    "default": null,  "description": "实例唯一标识" },
-      "name":       { "type": "string",  "source": "plan",    "default": null,  "description": "实例名称" },
       "url":        { "type": "string",  "source": "plan",    "default": null,  "description": "InfluxDB 写入端点 URL（如 http://172.16.109.12:8086）" },
       "token":      { "type": "string",  "source": "plan",    "default": null,  "description": "认证 token（必填，空字符串视为缺失；1.x 未启用认证时填任意非空值）" },
       "org":        { "type": "string",  "source": "plan",    "default": null,  "description": "组织名（必填，空字符串视为缺失；1.x 时填任意非空值，被忽略）" },

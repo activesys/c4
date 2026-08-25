@@ -9,11 +9,11 @@
       { "condition": "target.role == 'forward'", "description": "数据转发场景（作为 ASFP2 客户端）" }
     ]
   }],
+  "point_fields": [
+    { "name": "addr", "type": "integer", "description": "转发地址（目标服务器点地址）" }
+  ],
   "config_schema": {
-    "required": ["id", "ip", "port"],
     "fields": {
-      "id":         { "type": "string",  "source": "plan",    "default": null,  "description": "实例唯一标识" },
-      "name":       { "type": "string",  "source": "plan",    "default": null,  "description": "实例名称" },
       "ip":         { "type": "string",  "source": "plan",    "default": null,  "description": "目标服务器 IP" },
       "port":       { "type": "integer", "source": "plan",    "default": null,  "description": "目标服务器端口" },
       "t0":         { "type": "integer", "source": "default", "default": 30,    "description": "连接超时（秒）" },

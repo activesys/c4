@@ -18,6 +18,10 @@ import {
     McpServiceRegistry,
 } from "./registry/registry.js";
 import {
+    load_abbr_registry,
+    save_abbr_registry,
+} from "./registry/abbr_registry.js";
+import {
     execute_stop_and_start,
     type McpServiceClient,
     type ShmManagerClient,
@@ -27,14 +31,16 @@ import {
     type MCPClientHandle,
 } from "./executor/executor.js";
 import { MultiServerMCPClient } from "@langchain/mcp-adapters";
+import { translateError } from "./mcp/tools.js";
 import { createC4Agent } from "./super_worker/super_worker.js";
 import type {
     AgentConfig,
     SystemConfig,
     MCPInstanceConfig,
+    AgentPhase,
     AgentStateSummary as TypesAgentStateSummary,
 } from "./types/index.js";
-import type { C4Agent, AgentStateProvider } from "./server/types.js";
+import type { C4Agent, AgentStateProvider, AgentStateWriter } from "./server/types.js";
 import { z } from "zod";
 import type { StructuredTool } from "@langchain/core/tools";
 
@@ -68,6 +74,10 @@ const AgentConfigSchema: z.ZodType<AgentConfig> = z.object({
         level: z.string(),
         dir: z.string(),
     }),
+    site: z.object({
+        name: z.string(),
+        abbr: z.string(),
+    }).optional(),
 });
 
 // ── Agent State Tracker ───────────────────────────────────
@@ -78,20 +88,20 @@ const AgentConfigSchema: z.ZodType<AgentConfig> = z.object({
  * The actual AgentState is managed by LangGraph and written by SuperWorker
  * at key flow points (§3.1).
  */
-class AgentStateTracker implements AgentStateProvider {
-    private _phase: string = "idle";
+class AgentStateTracker implements AgentStateProvider, AgentStateWriter {
+    private _phase: AgentPhase = "idle";
     private _hasAccessPlan: boolean = false;
     private _lastError: string | null = null;
 
     getState(): TypesAgentStateSummary {
         return {
-            phase: this._phase as TypesAgentStateSummary["phase"],
+            phase: this._phase,
             hasAccessPlan: this._hasAccessPlan,
             lastError: this._lastError,
         };
     }
 
-    setPhase(phase: string): void {
+    setPhase(phase: AgentPhase): void {
         this._phase = phase;
     }
 
@@ -182,6 +192,7 @@ async function runStartupRecovery(
     mcpManager: C4McpManager,
     registry: McpServiceRegistry,
     logger: Logger,
+    stateTracker: AgentStateWriter,
 ): Promise<void> {
     const configPath = config.shm_manager.config_path;
 
@@ -314,12 +325,12 @@ async function runStartupRecovery(
     if (result.success) {
         logger.info(`启动恢复: Stop-Start 成功，${result.started_services.length} 个服务已启动`);
     } else {
-        logger.warn(`启动恢复: Stop-Start 失败: ${result.abort_reason ?? "未知原因"}`);
-        if (result.failed_services.length > 0) {
-            for (const f of result.failed_services) {
-                logger.error(`启动恢复: 服务 ${f.service_type} 启动失败: ${f.error}`);
-            }
+        const reason = result.abort_reason ?? "未知原因";
+        logger.warn(`启动恢复: Stop-Start 失败: ${reason}`);
+        for (const f of result.failed_services) {
+            logger.error(`启动恢复: 服务 ${f.service_type} 启动失败: ${f.error}`);
         }
+        stateTracker.setError(translateError(reason));
     }
 }
 
@@ -495,7 +506,10 @@ async function main(): Promise<void> {
         process.exit(1);
     }
 
-    // ── Step 6: Create C4 Agent ──
+    // ── Step 6: Create Agent State Tracker ──
+    const stateTracker = new AgentStateTracker();
+
+    // ── Step 7: Create C4 Agent ──
     let agent: C4Agent;
     try {
         agent = await createC4Agent({
@@ -503,7 +517,10 @@ async function main(): Promise<void> {
             registry,
             mcpManager,
             configPath: config.shm_manager.config_path,
+            agentConfigPath: configPath,
             instanceId: config.instance_id,
+            site: config.site ?? null,
+            state: stateTracker,
         });
         logger.info("SuperWorker Agent 已创建");
     } catch (err: unknown) {
@@ -511,9 +528,6 @@ async function main(): Promise<void> {
         logger.error(`FATAL: 无法创建 SuperWorker: ${msg}`);
         process.exit(1);
     }
-
-    // ── Step 7: Create Agent State Tracker ──
-    const stateTracker = new AgentStateTracker();
 
     // ── Step 8: Create and start Express server ──
     const app = createApp({
@@ -534,7 +548,37 @@ async function main(): Promise<void> {
     // Unconditional Stop-Start if /etc/c4/config.json exists (§3.2.3).
     // This runs after the server is listening so the agent is responsive
     // even during recovery.
-    await runStartupRecovery(config, mcpManager, registry, logger);
+    await runStartupRecovery(config, mcpManager, registry, logger, stateTracker);
+
+    // ── Step 10: Load / rebuild abbr registry ──
+    // 记忆库是可重建派生数据：丢失/损坏/entries 为空时从 config.json 重建（agent.md §3.2.1.3a）
+    const abbr_registry_path = path.join(
+        path.dirname(config.shm_manager.config_path),
+        "abbr_registry.json",
+    );
+    try {
+        let data_config: SystemConfig | undefined;
+        if (existsSync(config.shm_manager.config_path)) {
+            try {
+                const raw = await readFile(config.shm_manager.config_path, "utf-8");
+                data_config = JSON.parse(raw) as SystemConfig;
+            } catch {
+                data_config = undefined;
+            }
+        }
+        const abbr = await load_abbr_registry(
+            abbr_registry_path,
+            data_config,
+            config.site ?? null,
+        );
+        if (abbr.entries.length > 0 || existsSync(abbr_registry_path)) {
+            await save_abbr_registry(abbr, abbr_registry_path);
+        }
+        logger.info(`abbr 记忆库已加载（entries: ${abbr.entries.length}）`);
+    } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.warn(`abbr 记忆库加载失败: ${msg}`);
+    }
 
     // ── Graceful Shutdown ──
     const shutdown = async (signal: string) => {

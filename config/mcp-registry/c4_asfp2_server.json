@@ -9,11 +9,11 @@
       { "condition": "device.role == 'receiver'", "description": "数据接收场景（作为 ASFP2 服务端）" }
     ]
   }],
+  "point_fields": [
+    { "name": "addr", "type": "integer", "description": "接收点地址" }
+  ],
   "config_schema": {
-    "required": ["id", "port"],
     "fields": {
-      "id":   { "type": "string",  "source": "plan",    "default": null, "description": "实例唯一标识" },
-      "name": { "type": "string",  "source": "plan",    "default": null, "description": "实例名称" },
       "ip":   { "type": "string",  "source": "default", "default": "0.0.0.0", "description": "绑定 IP（默认所有网卡）" },
       "port": { "type": "integer", "source": "plan",    "default": null, "description": "监听端口" }
     }

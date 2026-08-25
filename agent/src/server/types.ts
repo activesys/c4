@@ -2,6 +2,8 @@
 // Defines the contract between Express routes and the Agent instance.
 // The actual SuperWorker implementation lives in super_worker/super_worker.ts.
 
+import type { AgentPhase } from "../types/index.js";
+
 // ── Agent Invoke Input ────────────────────────────────────
 export interface AgentInvokeInput {
   messages: Array<{ role: string; content: string }>;
@@ -30,7 +32,7 @@ export interface C4Agent {
 
 // ── Agent State (for GET /api/state) ──────────────────────
 export interface AgentStateSummary {
-  phase: string;
+  phase: AgentPhase;
   hasAccessPlan: boolean;
   lastError: string | null;
 }
@@ -39,4 +41,12 @@ export interface AgentStateSummary {
 export interface AgentStateProvider {
   /** Return a summary of the current agent state for the UI dashboard. */
   getState(): AgentStateSummary;
+}
+
+// ── Agent State Writer ────────────────────────────────────
+/** SuperWorker 在接入流程各阶段写入状态的接口（agent.md §3.2.1.7）。 */
+export interface AgentStateWriter {
+  setPhase(phase: AgentPhase): void;
+  setAccessPlan(exists: boolean): void;
+  setError(error: string | null): void;
 }

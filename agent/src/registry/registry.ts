@@ -5,9 +5,31 @@
 
 import { loadRegistryFiles, type RegistryEntryValidated } from "./loader.js";
 import type {
+  PointField,
   RegistryEntry,
   RegistryL1Summary,
 } from "./types.js";
+
+// ── L1 摘要扩展类型（agent.md §3.3.0）──
+// RegistryL1Summary 只含基础字段（service_type/display_name/role/protocols），
+// 此处扩展 point_fields 与 config_schema 的 source=plan 字段摘要。
+
+/** config_schema 中 source=plan 字段的 L1 摘要（供 info-gatherer 判断必填/可选）。 */
+export interface L1PlanFieldSummary {
+    name: string;
+    type: string;
+    /** default === null → 必填；有默认值 → 可选 */
+    required: boolean;
+    /** 默认值（required 时为 null） */
+    default: unknown;
+    description: string;
+}
+
+/** 完整 L1 服务摘要 = 基础摘要 + point_fields + source=plan 字段摘要。 */
+export interface ServiceCatalogEntry extends RegistryL1Summary {
+    point_fields: PointField[];
+    plan_fields: L1PlanFieldSummary[];
+}
 
 // ── 内置错误翻译（agent.md §3.4）──
 const BUILTIN_ERROR_TRANSLATIONS: Record<string, string> = {
@@ -123,7 +145,7 @@ export class McpServiceRegistry {
   /**
    * L1 摘要数组 — 返回结构化摘要，供需要编程式处理的调用者使用。
    */
-  getServiceCatalogEntries(): RegistryL1Summary[] {
+  getServiceCatalogEntries(): ServiceCatalogEntry[] {
     return this._buildL1Summaries();
   }
 
@@ -165,9 +187,10 @@ export class McpServiceRegistry {
   // ── 内部方法 ──
 
   /**
-   * 构建 L1 摘要列表（不含 config_schema、binary_path、error_mappings）。
+   * 构建 L1 摘要列表（含 point_fields 与 config_schema source=plan 字段摘要；
+   * 不含 config_schema 全量、binary_path、error_mappings）。
    */
-  private _buildL1Summaries(): RegistryL1Summary[] {
+  private _buildL1Summaries(): ServiceCatalogEntry[] {
     return this._entries.map((entry) => ({
       service_type: entry.service_type,
       display_name: entry.display_name,
@@ -180,6 +203,20 @@ export class McpServiceRegistry {
           description: r.description,
         })),
       })),
+      point_fields: entry.point_fields.map((f) => ({
+        name: f.name,
+        type: f.type,
+        description: f.description,
+      })),
+      plan_fields: Object.entries(entry.config_schema.fields)
+        .filter(([, field]) => field.source === "plan")
+        .map(([name, field]) => ({
+          name,
+          type: field.type,
+          required: field.default === null,
+          default: field.default,
+          description: field.description,
+        })),
     }));
   }
 
@@ -192,6 +229,7 @@ export class McpServiceRegistry {
       display_name: entry.display_name,
       role: entry.role,
       protocols: entry.protocols,
+      point_fields: entry.point_fields,
       config_schema: entry.config_schema,
       binary_path: entry.binary_path,
       error_mappings: entry.error_mappings,
@@ -207,7 +245,7 @@ export class McpServiceRegistry {
  * @param summaries - L1 摘要数组
  * @returns 格式化的 Markdown 字符串
  */
-export function formatServiceCatalog(summaries: RegistryL1Summary[]): string {
+export function formatServiceCatalog(summaries: ServiceCatalogEntry[]): string {
   if (summaries.length === 0) {
     return "暂无可用服务。";
   }
@@ -222,20 +260,37 @@ export function formatServiceCatalog(summaries: RegistryL1Summary[]): string {
 
     if (s.protocols.length === 0) {
       lines.push("  (无协议信息)");
-      continue;
-    }
+    } else {
+      for (const proto of s.protocols) {
+        lines.push(`  协议: \`${proto.protocol}\` — ${proto.description}`);
 
-    for (const proto of s.protocols) {
-      lines.push(`  协议: \`${proto.protocol}\` — ${proto.description}`);
-
-      if (proto.selection_rules.length > 0) {
-        for (const rule of proto.selection_rules) {
-          lines.push(
-            `    规则: \`${rule.condition}\` → ${rule.description}`
-          );
+        if (proto.selection_rules.length > 0) {
+          for (const rule of proto.selection_rules) {
+            lines.push(
+              `    规则: \`${rule.condition}\` → ${rule.description}`
+            );
+          }
         }
       }
     }
+
+    if (s.point_fields.length > 0) {
+      lines.push("  点表字段:");
+      for (const f of s.point_fields) {
+        lines.push(`    ${f.name} (${f.type}) — ${f.description}`);
+      }
+    }
+
+    if (s.plan_fields.length > 0) {
+      lines.push("  实例字段 (source=plan):");
+      for (const f of s.plan_fields) {
+        const req = f.required
+          ? "必填"
+          : `可选，默认 ${String(f.default)}`;
+        lines.push(`    ${f.name} (${f.type}, ${req}) — ${f.description}`);
+      }
+    }
+
     lines.push("");
   }
 

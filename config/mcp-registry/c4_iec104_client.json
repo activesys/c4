@@ -9,11 +9,11 @@
       { "condition": "device.protocol == 'iec104'", "description": "IEC104 协议设备数据采集" }
     ]
   }],
+  "point_fields": [
+    { "name": "addr", "type": "integer", "description": "信息对象地址（IOA）" }
+  ],
   "config_schema": {
-    "required": ["id", "ip", "port"],
     "fields": {
-      "id":         { "type": "string",  "source": "plan",    "default": null,  "description": "实例唯一标识" },
-      "name":       { "type": "string",  "source": "plan",    "default": null,  "description": "实例名称" },
       "ip":         { "type": "string",  "source": "plan",    "default": null,  "description": "远动装置 IP 地址" },
       "port":       { "type": "integer", "source": "plan",    "default": 2404,  "description": "IEC104 端口（默认 2404）" },
       "k":          { "type": "integer", "source": "default", "default": 12,    "description": "发送窗口大小（未确认 I 帧最大数）" },

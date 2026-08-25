@@ -173,6 +173,9 @@ SuperWorker (createAgent)
 │  ├──────────────────────────────────────────────────────┤   │
 │  │ query_registry                                        │   │
 │  │ 按 service_type 查询 RegistryEntry (config_schema)    │   │
+│  ├──────────────────────────────────────────────────────┤   │
+│  │ query_abbr_registry                                   │   │
+│  │ 检索 abbr 记忆库，判断目标设备是否已接入              │   │
 │  └──────────────────────────────────────────────────────┘   │
 │                                                               │
 │  ┌──────────────────────────────────────────────────────┐   │
@@ -775,11 +778,11 @@ points 的 `id` 字段直接使用点表中的点名称（如 `windspeed`、`tem
 必须「首次提取后固化 + 后续检索确认」。
 
 **记忆库（abbr registry）**：agent 内部状态，持久化于 `~/.local/c4/abbr_registry.json`
-（非 MCP 配置，MCP 服务不读取）：
+（非 MCP 配置，MCP 服务不读取）。**site 存于 `agent.json`（权威配置，启动必读），
+entries 存于 `abbr_registry.json`**：
 
 ```json
 {
-  "site": { "name": "华能阿拉善", "abbr": "hnals" },
   "entries": [
     {
       "id": "hnals_wt1",
@@ -793,12 +796,21 @@ points 的 `id` 字段直接使用点表中的点名称（如 `windspeed`、`tem
 }
 ```
 
+`agent.json` 中的 site 字段（场站单例信息）：
+
+```json
+{
+  "site": { "name": "华能阿拉善", "abbr": "hnals" }
+}
+```
+
 - `id`：稳定实例 id（主键），由 `{site_abbr}_{abbr}` 生成，**固化后永不改变**
 - `name` / `description`：设备名称 + 首次接入时的原始描述（用于后续检索匹配）
 - `service_type` / `role`：所属服务类型与角色（重建时从 config.json 顶层 key + Registry 反推）
 
 **site 获取机制**（一个 C4 实例 = 一个场站的一台接入服务器，site 是单例）：
-- **首次启动**：C4 询问当前场站信息（名称 + 缩写），用户提供后记录到 `site` 字段，之后固化不再重新提取
+- **首次接入**：C4 询问当前场站信息（名称 + 缩写），用户提供后记录到 `agent.json` 的 `site` 字段，
+  之后固化不再重新提取
 - **后续接入的场站归属校验**：
   - 用户资料**无场站信息** → 默认就是当前场站的资料
   - 用户资料**出现场站信息** → 可能多个场站共用一份点表，需提醒用户确认场站归属
@@ -810,6 +822,7 @@ points 的 `id` 字段直接使用点表中的点名称（如 `windspeed`、`tem
    （add / modify / delete），再从用户描述提取目标标识、生成候选 abbr（`wt1`），写入 deviceInfo.abbr——
    此 abbr 仅是**候选**，不作最终依据。
 2. **检索记忆库**（info-gatherer，生成算法的一部分）：生成候选时**必须查记忆库**——复用历史 + 避免冲突。
+   检索由 info-gatherer 通过只读工具 `query_abbr_registry` 执行（返回 entries + 描述匹配结果 + 判定标签 `decision`）。
    查库结果**结合操作意图**解释：
    - 命中 `active` 记录 → 候选 id = 已存 `id`（复用历史）
    - 无命中 + `add` → 视为新设备，用候选 abbr
@@ -839,9 +852,10 @@ points 的 `id` 字段直接使用点表中的点名称（如 `windspeed`、`tem
 - 删除后，该 abbr 立即空闲，可被新设备复用（无冲突，因为旧设备已从 config.json 移除）。
 
 **记忆库重建**（abbr_registry.json 丢失/损坏时）：
-- `site` 丢失 → 重新询问用户（site 是单例，问一次即可重新固化）
 - `entries` 丢失 → 从 config.json 重建：`id` 取自 `instance.id`，`name` 取自 `instance.name`，
-  `abbr` 由 `id` 反推（去掉 `{site_abbr}_` 前缀），`description` 退化为 `name`
+  `abbr` 由 `id` 反推（去掉 `{site_abbr}_` 前缀，`site_abbr` 取自 `agent.json` 的 `site.abbr`），
+  `description` 退化为 `name`
+- `site` 存于 `agent.json`（权威配置），不随 abbr_registry.json 丢失/损坏而丢失，无需重建
 - 因此 abbr_registry 是可重建的派生数据，config.json 是权威数据源，双源**完全一致、无任何丢失**
 
 > **为什么需要这套机制**：LLM 文本提取天然非确定，记忆库 + 确认把「非确定的提取」变成
@@ -1500,6 +1514,7 @@ c4/agent/                              # Agent 系统
 │   │   └── tools/
 │   │       ├── output_plan_steps.ts   # 结构化输出
 │   │       ├── query_registry.ts      # 查询 Registry
+│   │       ├── query_abbr_registry.ts # 检索 abbr 记忆库
 │   │       └── info_gatherer_tools.ts  # 文档解析工具（csv/xlsx/txt parser）
 │   ├── registry/
 │   │   ├── registry.ts               # McpServiceRegistry（单例）

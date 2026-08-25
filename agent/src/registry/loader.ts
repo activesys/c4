@@ -31,8 +31,15 @@ const RegistryConfigSchemaFieldMap = z.record(z.string(), RegistryFieldSchema);
 
 // ── RegistryConfigSchemaSchema ──
 const RegistryConfigSchemaSchema = z.object({
-  required: z.array(z.string()),
+  required: z.array(z.string()).optional(),
   fields: RegistryConfigSchemaFieldMap,
+});
+
+// ── PointFieldSchema：point_fields 中每个字段的定义 ──
+const PointFieldSchema = z.object({
+  name: z.string(),
+  type: z.string(),
+  description: z.string(),
 });
 
 // ── RegistryEntrySchema：Registry JSON 的 Zod 校验 ──
@@ -41,6 +48,7 @@ const RegistryEntrySchema = z.object({
   display_name: z.string(),
   role: z.enum(["writer", "reader"]),
   protocols: z.array(RegistryProtocolSchema),
+  point_fields: z.array(PointFieldSchema),
   config_schema: RegistryConfigSchemaSchema,
   binary_path: z.string(),
   error_mappings: z.record(z.string(), z.string()),

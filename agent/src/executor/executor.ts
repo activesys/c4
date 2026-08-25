@@ -8,10 +8,28 @@ import { MultiServerMCPClient } from "@langchain/mcp-adapters";
 import type {
     MCPInstanceConfig,
     RegistryEntry,
+    ServicePoint,
     ServiceStep,
     SystemConfig,
 } from "../types/index.js";
 import { McpServiceRegistry } from "../registry/registry.js";
+
+// ── Point 匹配辅助 ────────────────────────────────────────
+// ServicePoint 是判别联合（WriterPoint.id / ReaderPoint.key），
+// 合并/匹配逻辑统一按「匹配键」（reader 用 key，writer 用 id）处理。
+
+function point_match_key(pt: ServicePoint): string {
+    const rec = pt as unknown as Record<string, unknown>;
+    const key = rec["key"];
+    const id = rec["id"];
+    if (typeof key === "string" && key.length > 0) {
+        return key;
+    }
+    if (typeof id === "string" && id.length > 0) {
+        return id;
+    }
+    return "";
+}
 
 // ── MCP Client Interfaces ─────────────────────────────────
 
@@ -242,15 +260,18 @@ async function handle_add(
     for (const existing of instances) {
         if (existing.id === instance_id) {
             for (const pt of step.points) {
+                const match_key = point_match_key(pt);
                 const existing_idx = existing.points.findIndex(
-                    (p) => p.id === pt.id || (pt.key !== undefined && p.key === pt.key),
+                    (p) => point_match_key(p) === match_key,
                 );
                 if (existing_idx >= 0) {
+                    const existing_rec = existing.points[existing_idx] as unknown as Record<string, unknown>;
+                    const pt_rec = pt as unknown as Record<string, unknown>;
                     existing.points[existing_idx] = {
-                        ...existing.points[existing_idx],
-                        ...pt,
-                        shm_id: existing.points[existing_idx].shm_id,
-                    };
+                        ...existing_rec,
+                        ...pt_rec,
+                        shm_id: existing_rec["shm_id"],
+                    } as unknown as ServicePoint;
                 } else {
                     existing.points.push({ ...pt, shm_id: pt.shm_id ?? 0 });
                 }
@@ -262,20 +283,25 @@ async function handle_add(
         }
     }
 
-    // 检查 points 的 id 不重复（在本次 step 内）
+    // 检查 points 的 id 不重复（在本次 step 内，仅 writer 点有 id）
     const point_ids = new Set<string>();
     for (const pt of step.points) {
-        if (!/^[a-zA-Z][a-zA-Z0-9_.]*$/.test(pt.id)) {
+        const rec = pt as unknown as Record<string, unknown>;
+        const id = rec["id"];
+        if (typeof id !== "string" || id.length === 0) {
+            continue;
+        }
+        if (!/^[a-zA-Z][a-zA-Z0-9_.]*$/.test(id)) {
             throw new Error(
-                `point.id "${pt.id}" 包含非法字符，仅允许字母开头`,
+                `point.id "${id}" 包含非法字符，仅允许字母开头`,
             );
         }
-        if (point_ids.has(pt.id)) {
+        if (point_ids.has(id)) {
             throw new Error(
-                `point.id "${pt.id}" 在 ${step.service_type}.${instance_id} 中重复`,
+                `point.id "${id}" 在 ${step.service_type}.${instance_id} 中重复`,
             );
         }
-        point_ids.add(pt.id);
+        point_ids.add(id);
     }
 
     // 构建实例配置：合并 instance 字段 + points
@@ -359,27 +385,30 @@ function handle_modify(
         target.name = step.instance["name"] as string;
     }
 
-    // points: 按 point.id 匹配——同名更新，新 point 追加
-    if (step.points.length > 0) {
+    // points: 按匹配键（writer 用 id，reader 用 key）匹配——同名更新，新 point 追加
+    if (Array.isArray(step.points) && step.points.length > 0) {
         if (!Array.isArray(target.points)) {
             target.points = [];
         }
         for (const step_pt of step.points) {
+            const match_key = point_match_key(step_pt);
             const existing_idx = target.points.findIndex(
-                (p) => p.id === step_pt.id,
+                (p) => point_match_key(p) === match_key,
             );
             if (existing_idx >= 0) {
                 // 更新已有 point 的字段（保留 shm_id）
+                const existing_rec = target.points[existing_idx] as unknown as Record<string, unknown>;
+                const pt_rec = step_pt as unknown as Record<string, unknown>;
                 target.points[existing_idx] = {
-                    ...target.points[existing_idx],
-                    ...step_pt,
-                    shm_id: target.points[existing_idx].shm_id,
-                };
+                    ...existing_rec,
+                    ...pt_rec,
+                    shm_id: existing_rec["shm_id"],
+                } as unknown as ServicePoint;
             } else {
                 // 新 point 追加，shm_id = 0
                 target.points.push({ ...step_pt, shm_id: step_pt.shm_id ?? 0 });
                 warnings.push(
-                    `modify: ${step.service_type}.${instance_id} 新增 point "${step_pt.id}"`,
+                    `modify: ${step.service_type}.${instance_id} 新增 point "${match_key}"`,
                 );
             }
         }
@@ -706,8 +735,26 @@ async function callToolViaMultiClient(
     const tools = await multiClient.getTools(serverName);
     const tool = tools.find(t => t.name === toolName);
     if (!tool) throw new Error(`tool not found: ${toolName}`);
-    const result = await tool.invoke(args);
-    return typeof result === "string" ? result : JSON.stringify(result);
+    try {
+        const result = await tool.invoke(args);
+        return typeof result === "string" ? result : JSON.stringify(result);
+    } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        const error_text = extract_mcp_tool_error_text(message);
+        if (error_text !== null) {
+            return error_text;
+        }
+        throw err;
+    }
+}
+
+function extract_mcp_tool_error_text(message: string): string | null {
+    const marker = "returned an error: ";
+    const idx = message.indexOf(marker);
+    if (idx < 0) {
+        return null;
+    }
+    return message.slice(idx + marker.length);
 }
 
 export class McpServiceClientAdapter implements McpServiceClient {
@@ -728,7 +775,12 @@ export class McpServiceClientAdapter implements McpServiceClient {
     }
 
     async stop(): Promise<string> {
-        return callToolViaMultiClient(this._multiClient, this.service_type, "stop", {});
+        try {
+            return await callToolViaMultiClient(this._multiClient, this.service_type, "stop", {});
+        } catch (err) {
+            void err;
+            return "success";
+        }
     }
 
     async start(): Promise<string> {

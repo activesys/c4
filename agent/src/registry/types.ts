@@ -2,6 +2,7 @@
 // 所有类型定义在 ../types/index.ts，本文件仅作 barrel 重导出
 
 export type {
+  PointField,
   RegistryEntry,
   RegistryL1Summary,
   RegistryProtocol,

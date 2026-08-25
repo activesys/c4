@@ -120,7 +120,7 @@ export const outputAccessPlanTool = tool(
             "生成结构化接入方案 (AccessPlan)。" +
             "在获得设备信息后，结合 service_catalog 选择匹配的服务类型，" +
             "推断场站名称和缩写，组织设备清单和转发目标。" +
-            "site.abbr 用于生成 instance.id，如 hnals_1_scada（hnals=场站缩写, 1=设备编号, scada=角色）。" +
+            "site.abbr 用于生成 instance.id，如 hnals_wt1（hnals=场站缩写, wt1=采集目标标识）。" +
             "调用时机：用户要求生成方案时。",
         schema: accessPlanArgSchema,
     },

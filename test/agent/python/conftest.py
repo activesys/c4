@@ -6,8 +6,9 @@ C4 Agent 功能测试公共基础设施 — conftest.py
   - AgentHandle: Agent 进程 + HTTP API 封装
   - SSEEventStream: HTTP SSE 流客户端
   - ChatHelper: 对话辅助（send / send_with_file / confirm）
-  - Fixtures: agent_binary, shm_manager_binary, registry_dir, agent, chat
-  - Helpers: write_agent_json, write_config_json, corrupt_config_json, write_config_bak
+  - Fixtures: agent_binary, shm_manager_binary, registry_dir, agent, chat, abbr_registry
+  - Helpers: write_agent_json, write_config_json, corrupt_config_json, write_config_bak,
+    write_abbr_registry
   - pytest markers: llm (L2 tests)
 
 设计依据: c4/test/agent/README.md §2.2-2.3
@@ -454,6 +455,68 @@ def write_config_bak(config_dir: Path, content: dict) -> None:
     bak_path.write_text(json.dumps(content, indent=2, ensure_ascii=False))
 
 
+# abbr 记忆库内容（agent.md §3.2.1.3a）
+_ABBR_SITE = {"name": "华能阿拉善", "abbr": "hnals"}
+_ABBR_ENTRIES = [
+    {
+        "id": "hnals_wt1",
+        "name": "1#风机",
+        "abbr": "wt1",
+        "service_type": "c4_modbus_client",
+        "role": "writer",
+        "description": "采集 1#风机的数据",
+    }
+]
+
+
+def write_abbr_registry(config_dir: Path, mode: str = "normal") -> Path:
+    """
+    在 config_dir 下写 abbr_registry.json（entries）+ 管理 agent.json 的 site（agent.md §3.2.1.3a）。
+
+    site 存于 agent.json（权威配置），entries 存于 abbr_registry.json。
+
+    mode ∈ {normal, entries_missing, site_missing, corrupted}:
+      - normal:         agent.json 有 site + entries 正常
+      - entries_missing: agent.json 有 site + 空 entries
+      - site_missing:   agent.json 无 site + entries 正常
+      - corrupted:      agent.json 有 site + 截断的非法 JSON
+
+    返回 abbr_registry.json 路径。
+    """
+    config_dir.mkdir(parents=True, exist_ok=True)
+    registry_path = config_dir / "abbr_registry.json"
+
+    # 管理 agent.json 的 site 字段
+    agent_path = config_dir / "agent.json"
+    agent_cfg: dict = {}
+    if agent_path.exists():
+        agent_cfg = json.loads(agent_path.read_text(encoding="utf-8"))
+    if mode == "site_missing":
+        agent_cfg.pop("site", None)
+    else:
+        agent_cfg["site"] = _ABBR_SITE
+    agent_path.write_text(
+        json.dumps(agent_cfg, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+
+    if mode == "normal":
+        content: dict = {"entries": _ABBR_ENTRIES}
+    elif mode == "entries_missing":
+        content = {"entries": []}
+    elif mode == "site_missing":
+        content = {"entries": _ABBR_ENTRIES}
+    elif mode == "corrupted":
+        raw = json.dumps({"entries": _ABBR_ENTRIES}, indent=2, ensure_ascii=False)
+        # 截断为非法 JSON 文本
+        registry_path.write_text(raw[: len(raw) // 2])
+        return registry_path
+    else:
+        raise ValueError(f"unknown abbr_registry mode: {mode!r}")
+
+    registry_path.write_text(json.dumps(content, indent=2, ensure_ascii=False))
+    return registry_path
+
+
 # ──────────────────────────────────────────────
 #  AgentHandle
 # ──────────────────────────────────────────────
@@ -847,15 +910,17 @@ def agent(
         pass
 
     # Step 1: SIGTERM → 等待 10s
-    if process.poll() is None:
-        process.terminate()
+    # 注意：使用 handle.process 而非局部 process — 测试内 kill()+restart()
+    # 会替换 handle.process，teardown 必须清理最新进程，避免泄漏重启后的 Agent。
+    if handle.process.poll() is None:
+        handle.process.terminate()
         try:
-            process.wait(timeout=10)
+            handle.process.wait(timeout=10)
         except subprocess.TimeoutExpired:
             # Step 2: SIGKILL
-            process.kill()
+            handle.process.kill()
             try:
-                process.wait(timeout=5)
+                handle.process.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 pass
 
@@ -877,6 +942,21 @@ def chat(agent: AgentHandle) -> ChatHelper:
                 assert "你好" in stream.text_content()
     """
     return ChatHelper(agent)
+
+
+@pytest.fixture(scope="function")
+def abbr_registry(agent: AgentHandle) -> Callable[..., Path]:
+    """
+    Function 级 abbr 记忆库制备器，绑定 agent.config_dir。
+
+    用法:
+        abbr_registry()               # normal（agent.json 有 site + entries）
+        abbr_registry("corrupted")    # 截断的非法 JSON
+    """
+    def _write(mode: str = "normal") -> Path:
+        return write_abbr_registry(agent.config_dir, mode)
+
+    return _write
 
 
 # ──────────────────────────────────────────────

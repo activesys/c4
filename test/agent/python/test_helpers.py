@@ -51,6 +51,25 @@ def retry_llm(max_attempts: int = 3, delay: float = 2.0):
                     last_exception = e
                     if attempt < max_attempts:
                         time.sleep(delay * attempt)  # 递增退避
+                        # 重置状态：清空对话历史 + 持久化文件（config/abbr_registry），
+                        # 避免重试时历史与文件残留导致 LLM 命中旧记录而困惑
+                        for a in args:
+                            if hasattr(a, "_history"):
+                                a._history = []
+                            config_dir = getattr(a, "config_dir", None)
+                            if isinstance(config_dir, Path):
+                                for name in (
+                                    "config.json",
+                                    "abbr_registry.json",
+                                    "config.json.bak",
+                                    "config.json.tmp",
+                                ):
+                                    p = config_dir / name
+                                    if p.exists():
+                                        try:
+                                            p.unlink()
+                                        except OSError:
+                                            pass
                         continue
                     raise
             # unreachable 原因：最后一次循环总会 raise 或 return
@@ -107,6 +126,15 @@ CSV_POINTS = [
     "name,addr,uid,fun,type,swap",
     "windspeed,1000,1,3,10,2",
     "temperature,1002,1,3,10,2",
+]
+
+# 协议歧义点表 — 字段不含任何协议特征列（无 uid/fun/type/swap，无 protocol 列），
+# 用于 §4.3.7/4.3.8：仅凭点表字段无法唯一确定协议。
+AMBIGUOUS_POINTS = [
+    "name,addr,data_type",
+    "windspeed,1000,uint16",
+    "temperature,1002,uint16",
+    "power,1004,uint16",
 ]
 
 # ASFP2 数据点表 — 接收端设备 + 转发
@@ -198,6 +226,20 @@ def create_simple_csv(target_dir: Path, filename: str = "simple_points.csv") -> 
     """
     filepath = target_dir / filename
     filepath.write_text("\n".join(CSV_POINTS), encoding="utf-8")
+    return filepath
+
+
+def create_ambiguous_csv(
+    target_dir: Path, filename: str = "ambiguous_points.csv"
+) -> Path:
+    """
+    创建协议歧义点表 CSV — 字段不含任何协议特征列（无 uid/fun/type/swap，无 protocol）。
+
+    用于 README §4.3.7/4.3.8：仅凭点表字段无法唯一确定协议。
+    返回: 文件路径
+    """
+    filepath = target_dir / filename
+    filepath.write_text("\n".join(AMBIGUOUS_POINTS), encoding="utf-8")
     return filepath
 
 
@@ -537,12 +579,12 @@ def full_access_flow(
 
     参数:
         chat: ChatHelper 实例
-        agent: AgentHandle 实例
+        agent: AgentHandle 实例（config.json 产物从其 config_dir 读取）
         file_path: 点表文件路径
         upload_msg: 上传时的消息
         plan_msg: 方案生成消息
         confirm: 是否确认方案
-        tmp_path: 测试临时目录（用于读取产物）
+        tmp_path: 历史参数，已废弃（保留兼容），产物路径统一取自 agent.config_dir
 
     返回:
         {
@@ -589,14 +631,13 @@ def full_access_flow(
             result["confirm_text"] = stream.text_content()
         chat.record_response(result["confirm_text"])
 
-    # Step 4: 读取 config.json 产物
-    if tmp_path:
-        config_path = tmp_path / "etc_c4" / "config.json"
-        if config_path.exists():
-            try:
-                result["config_json"] = json.loads(config_path.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, OSError):
-                pass
+    # Step 4: 读取 config.json 产物（与 conftest agent fixture 的 config_dir 一致）
+    config_path = agent.config_dir / "config.json"
+    if config_path.exists():
+        try:
+            result["config_json"] = json.loads(config_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            pass
 
     return result
 
@@ -638,4 +679,50 @@ def delete_device(chat: Any, agent: Any, device_name: str) -> None:
         ]
     }
     with chat.send(f"确认删除\n\n{json.dumps(changes, ensure_ascii=False)}") as s:
+        s.text_content()
+
+
+def modify_device(
+    chat: Any,
+    agent: Any,
+    device_name: str,
+    field: str,
+    value: Any,
+) -> None:
+    """
+    确定性修改设备：从 config.json 读取该设备实例的 instance.id，嵌入 modify changes JSON。
+
+    避免依赖 LLM 将设备名映射为 instance.id（多轮长上下文中易出错，可能误生成 add）。
+    """
+    config_path = agent.config_dir / "config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+
+    service_type: Optional[str] = None
+    instance_id: Optional[str] = None
+    for st, instances in config.items():
+        if st == "c4_shm_manager" or not isinstance(instances, list):
+            continue
+        for inst in instances:
+            name = str(inst.get("name", ""))
+            if device_name in name or name in device_name:
+                service_type = st
+                instance_id = inst.get("id")
+                break
+        if instance_id:
+            break
+    assert instance_id, f"未在 config 中找到设备 {device_name} 的实例"
+
+    with chat.send(f"修改 {device_name} 的 {field} 为 {value}") as s:
+        s.text_content()
+
+    changes = {
+        "changes": [
+            {
+                "action": "modify",
+                "service_type": service_type,
+                "instance": {"id": instance_id, field: value},
+            }
+        ]
+    }
+    with chat.send(f"确认修改\n\n{json.dumps(changes, ensure_ascii=False)}") as s:
         s.text_content()
