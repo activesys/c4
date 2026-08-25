@@ -434,13 +434,13 @@ pytest                # 全跑（L2 在无 API key 时自动 skip）
 | 4.6.4.8 | entries 丢失 → 从 config.json 重建 | 仅删 `abbr_registry.json` 的 `entries`（site 存于 agent.json，不受影响）→ 重启 → modify 已有设备 | 从 config.json 重建 entries：`id`/`name` 恢复，`abbr` 由 id 反推（去 `{site_abbr}_` 前缀），`description` 退化为 name；modify 仍复用正确 id |
 | 4.6.4.9 | site 缺失 → 重新询问 | 仅删 `agent.json` 的 `site`（保留 `entries`）→ 重启 → 触发接入 | Agent 重新询问场站（名称+缩写），用户提供后写入 agent.json 的 site；entries 保留不重建 |
 | 4.6.4.10 | site 首次询问固化 | 首次启动（agent.json 无 `site`，无 `abbr_registry.json`，无 config.json）→ 发起接入 | Agent 询问场站名称+缩写 → 用户提供后写入 `agent.json` 的 `site` 字段 → 之后固化不再重新提取 |
-| 4.6.4.11 | 场站归属校验（三态） | 已有 site=华能阿拉善，分别上传：① 无场站信息的点表 ② 含场站信息（归属不明，可能多场站共用）的点表 ③ 明确标注其他场站的点表 | ① 默认当前场站 ② 提醒用户确认场站归属 ③ 提醒「该资料不属于当前场站」 |
+| 4.6.4.11 | 场站归属校验（三态） | 已有 site=华能阿拉善，分别上传：① 无场站信息的点表 ② 含场站信息（归属不明，可能多场站共用）的点表 ③ 明确标注其他场站的点表 | ① 默认当前场站 ② 提醒用户确认场站归属（`site_ambiguous`）③ 提醒「该资料不属于当前场站」（`site_mismatch`）；②③ 由 `query_abbr_registry` 工具在 add 时确定性校验 |
 | 4.6.4.12 | 记忆库损坏 JSON 恢复 | 将 `abbr_registry.json` 截断为损坏 JSON → 重启 → 触发接入 | 仅 entries 丢失（site 在 agent.json 保留）：从 config.json 重建 entries，`abbr` 用 agent.json 的 `site_abbr` 反推 |
 
 > **断言面**：`abbr_registry.json` 文件内容（确定性副作用）+ config.json 的 `instance.id` 稳定性。
 > abbr 提取是 LLM 非确定性操作，故 4.6.4.4 断言「id 不同且不覆盖旧实例」，而非精确 abbr 值。
 > 记忆库**写入/删除**（固化，agent.md §3.2.1.3a step4）由 SuperWorker 确定性代码执行，**检索/读取**（step2）
-> 由 info-gatherer 通过 `query_abbr_registry` 工具执行（确定性检索，返回判定标签 decision）；
+> 由 info-gatherer 通过 `query_abbr_registry` 工具执行（确定性检索，返回判定标签 decision；add 意图下先做场站归属确定性校验，返回 `site_mismatch`/`site_ambiguous`）；
 > 固化与 entries 重建可通过预构造 abbr_registry.json + config.json 绕过 LLM 做 L1 级精确断言。
 
 ### 4.7 非技术语言约束

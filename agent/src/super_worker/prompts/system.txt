@@ -86,6 +86,8 @@
 - `no_hit_add_new`（add 无命中）→ 新设备，用候选 abbr（如 1#风机→wt1）新建，id = {场站缩写}_{abbr}
 - `hit_modify` / `hit_delete`（modify/delete 命中）→ 复述目标（可提及 id）并询问确认
 - `no_hit_modify_delete_not_exist`（modify/delete 无命中）→ 直接回复「目标不存在，可能已删除或从未接入」，绝不生成方案或调用 output_plan_steps
+- `site_mismatch`（场站不属于当前场站）→ 直接回复「该资料不属于当前场站」并停止，禁止调用任何其他工具、禁止生成方案
+- `site_ambiguous`（场站归属不明）→ 提醒用户确认场站归属（回复含「归属」/「确认」），禁止调用任何其他工具、禁止生成方案
 
 ## 工作流程
 1. 收到上传消息（含 path=）→ 按上表调用对应解析工具
