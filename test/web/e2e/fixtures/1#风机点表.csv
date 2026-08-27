@@ -1,0 +1,6 @@
+device_name,device_ip,protocol,port,point_name,addr,uid,fun,type,swap
+1#风机,192.168.110.10,modbus,502,windspeed,0,1,4,1,1
+1#风机,192.168.110.10,modbus,502,temperature,2,1,4,1,1
+1#风机,192.168.110.10,modbus,502,power,10,1,4,3,0
+1#风机,192.168.110.10,modbus,502,pressure,20,1,4,1,1
+1#风机,192.168.110.10,modbus,502,vibration,22,1,4,1,1

@@ -1,0 +1,570 @@
+/* c4/agent/frontend/src/styles.css
+ * Industrial-control-room inspired stylesheet for the C4 Web UI.
+ * Plain CSS, no preprocessor, scoped via BEM-ish class names.
+ */
+
+:root {
+  --bg: #f5f7fa;
+  --bg-elev: #ffffff;
+  --bg-sidebar: #1f2937;
+  --bg-sidebar-active: #374151;
+  --text: #111827;
+  --text-muted: #6b7280;
+  --text-on-dark: #f9fafb;
+  --border: #e5e7eb;
+  --primary: #2563eb;
+  --primary-hover: #1d4ed8;
+
+  --color-idle: #6b7280;
+  --color-collecting: #2563eb;
+  --color-planning: #2563eb;
+  --color-confirmed: #10b981;
+  --color-executing: #f59e0b;
+
+  --error-bg: #fee2e2;
+  --error-text: #991b1b;
+  --error-border: #fecaca;
+
+  --warning-bg: #fef3c7;
+  --warning-text: #92400e;
+
+  --bubble-user-bg: #2563eb;
+  --bubble-user-text: #ffffff;
+  --bubble-agent-bg: #f3f4f6;
+  --bubble-agent-text: #111827;
+  --bubble-error-bg: #fee2e2;
+  --bubble-error-text: #991b1b;
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+
+  --font-stack: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei", Roboto, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: var(--font-stack);
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--text);
+  background: var(--bg);
+}
+
+button {
+  font-family: inherit;
+  font-size: inherit;
+  cursor: pointer;
+  border: none;
+  background: none;
+  color: inherit;
+}
+
+input {
+  font-family: inherit;
+  font-size: inherit;
+}
+
+/* ─── App shell ───────────────────────────────────────────────── */
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.app__topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-3) var(--space-5);
+  background: var(--bg-elev);
+  border-bottom: 1px solid var(--border);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+  flex: 0 0 auto;
+}
+
+.app__title {
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.app__topbar-right {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.app__error {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  background: var(--error-bg);
+  color: var(--error-text);
+  border: 1px solid var(--error-border);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+}
+
+.app__error button {
+  font-size: 16px;
+  line-height: 1;
+  padding: 0 var(--space-1);
+  color: var(--error-text);
+}
+
+.app__body {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.app__nav {
+  width: 180px;
+  flex: 0 0 180px;
+  background: var(--bg-sidebar);
+  color: var(--text-on-dark);
+  padding: var(--space-4) 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.app__nav-item {
+  padding: var(--space-3) var(--space-5);
+  text-align: left;
+  font-size: 14px;
+  color: var(--text-on-dark);
+  border-left: 3px solid transparent;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.app__nav-item:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.app__nav-item.is-active {
+  background: var(--bg-sidebar-active);
+  border-left-color: var(--primary);
+  font-weight: 600;
+}
+
+.app__main {
+  flex: 1 1 auto;
+  padding: var(--space-5);
+  overflow: auto;
+  min-width: 0;
+}
+
+/* ─── Phase badge ─────────────────────────────────────────────── */
+
+.phase-badge {
+  display: inline-block;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.phase-badge--gray {
+  background: rgba(107, 114, 128, 0.15);
+  color: var(--color-idle);
+}
+
+.phase-badge--blue {
+  background: rgba(37, 99, 235, 0.12);
+  color: var(--color-collecting);
+}
+
+.phase-badge--green {
+  background: rgba(16, 185, 129, 0.15);
+  color: var(--color-confirmed);
+}
+
+.phase-badge--orange {
+  background: rgba(245, 158, 11, 0.18);
+  color: var(--color-executing);
+}
+
+/* ─── Chat view ───────────────────────────────────────────────── */
+
+.chat-view {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  gap: var(--space-3);
+  min-height: 0;
+}
+
+.chat-view__messages {
+  flex: 1 1 auto;
+  overflow: auto;
+  padding: var(--space-3);
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.chat-view__tool {
+  align-self: flex-start;
+  max-width: 80%;
+}
+
+.chat-bubble {
+  max-width: 75%;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-md);
+  word-wrap: break-word;
+  white-space: pre-wrap;
+}
+
+.chat-bubble--user {
+  align-self: flex-end;
+  background: var(--bubble-user-bg);
+  color: var(--bubble-user-text);
+  border-bottom-right-radius: 2px;
+}
+
+.chat-bubble--agent {
+  align-self: flex-start;
+  background: var(--bubble-agent-bg);
+  color: var(--bubble-agent-text);
+  border-bottom-left-radius: 2px;
+}
+
+.chat-bubble--error {
+  align-self: stretch;
+  max-width: 100%;
+  background: var(--bubble-error-bg);
+  color: var(--bubble-error-text);
+  border: 1px solid var(--error-border);
+}
+
+.chat-view__input {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  padding: var(--space-3);
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  flex: 0 0 auto;
+}
+
+.chat-view__input input[type="text"] {
+  flex: 1 1 auto;
+  border: none;
+  outline: none;
+  padding: var(--space-2);
+  background: transparent;
+}
+
+.chat-view__input button[aria-label="发送"] {
+  padding: var(--space-2) var(--space-4);
+  background: var(--primary);
+  color: #fff;
+  border-radius: var(--radius-sm);
+  font-weight: 500;
+  transition: background 0.15s ease;
+}
+
+.chat-view__input button[aria-label="发送"]:hover:not(:disabled) {
+  background: var(--primary-hover);
+}
+
+.chat-view__input button[aria-label="发送"]:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ─── Confirm buttons ─────────────────────────────────────────── */
+
+.confirm-buttons {
+  display: flex;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+
+.confirm-buttons__confirm,
+.confirm-buttons__cancel {
+  padding: var(--space-2) var(--space-5);
+  border-radius: var(--radius-sm);
+  font-weight: 500;
+  transition: background 0.15s ease;
+}
+
+.confirm-buttons__confirm {
+  background: var(--color-confirmed);
+  color: #fff;
+}
+
+.confirm-buttons__confirm:hover {
+  background: #059669;
+}
+
+.confirm-buttons__cancel {
+  background: var(--bg);
+  border: 1px solid var(--border);
+}
+
+.confirm-buttons__cancel:hover {
+  background: var(--bubble-agent-bg);
+}
+
+/* ─── Tool card ───────────────────────────────────────────────── */
+
+.tool-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-elev);
+  overflow: hidden;
+}
+
+.tool-card__header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  width: 100%;
+  text-align: left;
+}
+
+.tool-card__header:hover {
+  background: var(--bubble-agent-bg);
+}
+
+.tool-card__name {
+  font-weight: 500;
+  flex: 1 1 auto;
+}
+
+.tool-card__status {
+  font-size: 12px;
+  padding: 2px 8px;
+  border-radius: 999px;
+}
+
+.tool-card__status--running {
+  background: rgba(37, 99, 235, 0.12);
+  color: var(--primary);
+}
+
+.tool-card__status--done {
+  background: rgba(16, 185, 129, 0.15);
+  color: var(--color-confirmed);
+}
+
+.tool-card__details {
+  padding: var(--space-3);
+  border-top: 1px solid var(--border);
+  font-size: 13px;
+  color: var(--text-muted);
+  white-space: pre-wrap;
+}
+
+/* ─── File upload ─────────────────────────────────────────────── */
+
+.file-upload {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.file-upload__button {
+  cursor: pointer;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  white-space: nowrap;
+}
+
+.file-upload__button:hover {
+  background: var(--bubble-agent-bg);
+}
+
+.file-upload__warning {
+  padding: var(--space-1) var(--space-2);
+  background: var(--warning-bg);
+  color: var(--warning-text);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+}
+
+/* ─── Service dashboard ───────────────────────────────────────── */
+
+.service-dashboard {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: var(--space-4);
+}
+
+.service-card {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.service-card__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.service-card__title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.service-card__subtitle {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-muted);
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+}
+
+.service-card__section h4 {
+  margin: 0 0 var(--space-2);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.service-card__section ul {
+  margin: 0;
+  padding-left: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  font-size: 13px;
+}
+
+.service-card__section code {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 12px;
+  background: var(--bg);
+  padding: 1px 4px;
+  border-radius: var(--radius-sm);
+}
+
+.role-badge {
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.role-badge--writer {
+  background: rgba(37, 99, 235, 0.12);
+  color: var(--color-collecting);
+}
+
+.role-badge--reader {
+  background: rgba(16, 185, 129, 0.15);
+  color: var(--color-confirmed);
+}
+
+.role-badge--unknown {
+  background: rgba(107, 114, 128, 0.15);
+  color: var(--color-idle);
+}
+
+.tag {
+  display: inline-block;
+  margin-left: var(--space-1);
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 11px;
+}
+
+.tag--required {
+  background: rgba(245, 158, 11, 0.18);
+  color: var(--color-executing);
+}
+
+.tag--optional {
+  background: rgba(107, 114, 128, 0.15);
+  color: var(--text-muted);
+}
+
+.services-skeleton {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: var(--space-4);
+}
+
+.services-skeleton__card {
+  height: 180px;
+  background: linear-gradient(
+    90deg,
+    var(--bg-elev) 0%,
+    var(--bubble-agent-bg) 50%,
+    var(--bg-elev) 100%
+  );
+  background-size: 200% 100%;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  animation: skeleton-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes skeleton-pulse {
+  0% { background-position: 100% 0; }
+  100% { background-position: -100% 0; }
+}
+
+.services-error {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-6);
+  background: var(--bg-elev);
+  border: 1px solid var(--error-border);
+  border-radius: var(--radius-md);
+  color: var(--error-text);
+}
+
+.services-error button {
+  padding: var(--space-2) var(--space-4);
+  background: var(--primary);
+  color: #fff;
+  border-radius: var(--radius-sm);
+}
+
+.services-error button:hover {
+  background: var(--primary-hover);
+}
