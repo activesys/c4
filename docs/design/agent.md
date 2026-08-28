@@ -1203,7 +1203,7 @@ Agent 启动
 ### 3.3 MCP Service Registry（C4_FUN_00017）
 
 全局单例，所有子代理通过 `queryRegistryTool` 查询。Agent 启动时扫描 `agent.json` 中
-`mcp_registry.path` 配置的目录（默认 `~/.local/c4/mcp-registry/`）。
+`mcp_registry.path` 配置的目录（默认 `/usr/local/etc/c4/mcp-registry/`）。
 
 #### 3.3.0 双层注入设计
 
@@ -1288,7 +1288,7 @@ Registry JSON 是服务包的一部分，与服务代码同仓库。Agent 不生
 | 交付物 | 生成者 | 部署位置 | 用途 |
 |--------|--------|---------|------|
 | MCP 服务二进制 | MCP 服务开发者编译 | `/usr/local/bin/` | Agent spawn 子进程 |
-| Registry JSON | MCP 服务开发者编写 | `~/.local/c4/mcp-registry/` | 注册表加载元数据 |
+| Registry JSON | MCP 服务开发者编写 | `/usr/local/etc/c4/mcp-registry/` | 注册表加载元数据 |
 
 JSON 中的 `binary_path` 字段指向二进制部署位置，是两者之间的关联键。
 
@@ -1301,7 +1301,7 @@ JSON 中的 `binary_path` 字段指向二进制部署位置，是两者之间的
          ▼
 2. 打包交付
    c4_modbus_client  → /usr/local/bin/c4_modbus_client        (二进制)
-   registry JSON      → ~/.local/c4/mcp-registry/c4_modbus_client.json
+   registry JSON      → /usr/local/etc/c4/mcp-registry/c4_modbus_client.json
          │
          ▼
 3. 重启 Agent
@@ -1326,11 +1326,11 @@ flowchart LR
 
     subgraph Deploy["部署"]
         Bin["→ /usr/local/bin/"]
-        Json["→ ~/.local/c4/mcp-registry/"]
+        Json["→ /usr/local/etc/c4/mcp-registry/"]
     end
 
     subgraph Agent["Agent 系统"]
-        Scan["loadFromDirectory()<br/>扫描 ~/.local/c4/mcp-registry/<br/>构建注册表 + 合并 error_mappings"]
+        Scan["loadFromDirectory()<br/>扫描 /usr/local/etc/c4/mcp-registry/<br/>构建注册表 + 合并 error_mappings"]
         Prompt["注入子代理<br/>系统提示"]
         Scan --> Prompt
     end
@@ -1574,7 +1574,7 @@ Agent 启动时读取 `~/.local/c4/agent.json`（固定位置，`~` 为运行 C4
 
   // ========== MCP Service Registry ==========
   "mcp_registry": {
-    "path": "~/.local/c4/mcp-registry"
+    "path": "/usr/local/etc/c4/mcp-registry"
   },
 
   // ========== 常驻基础设施 ==========
@@ -1618,31 +1618,34 @@ Agent 启动时读取 `~/.local/c4/agent.json`（固定位置，`~` 为运行 C4
 ### 5.2 运行时目录结构
 
 Agent 部署后的运行时目录布局。`~/.local/c4/agent.json` 为固定位置（`~` 为运行 C4 的
-专用账户主目录），其余路径可由 `agent.json` 中各配置域覆盖。所有配置、状态与日志
-均位于 `~/.local/c4/` 下，Agent 与 MCP 服务以非 root 账户运行，无需 root 权限。
+专用账户主目录），其余路径可由 `agent.json` 中各配置域覆盖。除 MCP 注册表外，配置、
+状态与日志均位于 `~/.local/c4/` 下；MCP 注册表位于 `/usr/local/etc/c4/mcp-registry/`
+（随包安装、root 所有、只读）。Agent 与 MCP 服务以非 root 账户运行，无需 root 权限。
 MCP 服务二进制路径不由 agent.json 统一指定——各 MCP 服务通过其 Registry JSON 中的
 `binary_path` 字段声明自身二进制位置（如 `/usr/local/bin/c4_modbus_client`）。
-二进制由安装脚本在部署阶段以 root 一次性安装，运行时以非 root 账户执行。
+二进制与注册表由安装脚本在部署阶段以 root 一次性安装，运行时以非 root 账户执行。
 `~/.local/c4/` 目录及目录下的配置文件由 Agent 首次启动时创建，具体创建方法后续补充。
 
-> **⚠️ 待解决冲突**：`agent.json` 含 `instance_id`、`model.api_key_env` 等 Agent 无法自行生成的配置项，`mcp-registry/` 由 MCP 服务开发者提供——这两类配置与「由 Agent 首次启动时创建」的表述存在冲突。须在后续补充「具体创建方法」时一并解决，明确 `agent.json` 与 `mcp-registry/` 由谁、以何权限、在何时生成或预置。
+> **⚠️ 待解决冲突**：`agent.json` 含 `instance_id`、`model.api_key_env` 等 Agent 无法自行生成的配置项，与「由 Agent 首次启动时创建」的表述存在冲突；`mcp-registry/` 已明确由安装包以 root 预置于 `/usr/local/etc/c4/mcp-registry/`（只读，Agent 不创建）。须在后续补充「具体创建方法」时一并解决 `agent.json` 由谁、以何权限、在何时生成或预置。
 
 ```
 ~/.local/c4/                          # C4 专用账户数据目录（配置 + 状态 + 日志）
 ├── agent.json                    # Agent 自身配置
 ├── config.json                   # 数据路径 MCP 服务配置（Agent 生成/修改）
 ├── config.json.bak               # config.json 备份（每次修改前自动生成，崩溃恢复用）
-├── mcp-registry/                 # MCP 服务注册文件
-│   ├── c4_modbus_client.json       ← MCP 服务开发者提供
-│   ├── c4_iec104_client.json
-│   ├── c4_iec101_client.json
-│   ├── c4_asfp2_server.json
-│   ├── c4_asfp2_client.json
-│   └── c4_influxdb_client.json
 ├── state/                        # 对话状态持久化
 │   └── (LangGraph checkpoint 文件)
 └── log/                          # Agent 日志
     └── c4-agent.log
+
+/usr/local/etc/c4/                # C4 系统级只读配置（随包安装，root 所有）
+└── mcp-registry/                 # MCP 服务注册文件（随包分发，Agent 只读扫描）
+    ├── c4_modbus_client.json       ← 随包提供
+    ├── c4_iec104_client.json
+    ├── c4_iec101_client.json
+    ├── c4_asfp2_server.json
+    ├── c4_asfp2_client.json
+    └── c4_influxdb_client.json
 
 /usr/local/bin/                   # Go MCP 服务二进制（安装脚本以 root 安装，一次性）
 ├── c4_shm_manager                  ← C4 项目编译
@@ -1659,7 +1662,7 @@ MCP 服务二进制路径不由 agent.json 统一指定——各 MCP 服务通�
 | `~/.local/c4/` | — | 所有配置文件 | 运行账户（写入），Agent（读取） |
 | `~/.local/c4/agent.json` | 固定位置 | Agent 自身运行时配置 | 运行账户（写入），Agent 启动时读取 |
 | `~/.local/c4/config.json` | `agent.json → shm_manager.config_path` | 数据路径 MCP 服务配置 | Agent（写入），MCP 服务（读取） |
-| `~/.local/c4/mcp-registry/` | `agent.json → mcp_registry.path` | MCP 服务注册 JSON | MCP 服务开发者（放入），Agent 启动时扫描 |
+| `/usr/local/etc/c4/mcp-registry/` | `agent.json → mcp_registry.path` | MCP 服务注册 JSON | 安装包（root 预置），Agent 只读扫描 |
 | `/usr/local/bin/`（等） | Registry JSON `→ binary_path` | MCP 服务 Go 二进制 | 安装脚本（root 安装，一次性），Agent spawn 子进程 |
 | `~/.local/c4/state/` | `agent.json → state.path` | LangGraph 对话状态 | Agent（读写），用于跨重启保活 |
 | `~/.local/c4/log/` | `agent.json → logging.dir` | 结构化运行日志 | Agent（写入），运维人员（查看） |

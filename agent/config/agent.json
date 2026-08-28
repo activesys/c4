@@ -1,5 +1,5 @@
 {
-  "instance_id": "c4_default",
+  "instance_id": "c4",
   "model": {
     "provider": "deepseek",
     "name": "deepseek-chat",
@@ -8,23 +8,27 @@
     "api_key_env": "DEEPSEEK_API_KEY"
   },
   "server": {
-    "host": "0.0.0.0",
+    "host": "127.0.0.1",
     "port": 3000,
     "cors_origin": "*"
   },
   "mcp_registry": {
-    "path": "~/.local/c4/mcp-registry"
+    "path": "/usr/local/etc/c4/mcp-registry"
   },
   "shm_manager": {
     "binary": "/usr/local/bin/c4_shm_manager",
     "config_path": "~/.local/c4/config.json"
   },
   "state": {
-    "backend": "filesystem",
+    "backend": "memory",
     "path": "~/.local/c4/state"
   },
   "logging": {
     "level": "info",
-    "dir": "~/.local/c4/log"
+    "dir": "~/.local/c4/logs"
+  },
+  "site": {
+    "name": "华能阿拉善",
+    "abbr": "hnals"
   }
 }
