@@ -74,6 +74,9 @@ const AgentConfigSchema: z.ZodType<AgentConfig> = z.object({
         level: z.string(),
         dir: z.string(),
     }),
+    frontend: z.object({
+        dir: z.string(),
+    }).optional(),
     site: z.object({
         name: z.string(),
         abbr: z.string(),
@@ -410,6 +413,9 @@ async function main(): Promise<void> {
     config.shm_manager.config_path = expandHome(config.shm_manager.config_path);
     config.state.path = expandHome(config.state.path);
     config.logging.dir = expandHome(config.logging.dir);
+    if (config.frontend) {
+        config.frontend.dir = expandHome(config.frontend.dir);
+    }
 
     // Apply logging level from config
     logger = new Logger(config.logging.level);
@@ -534,6 +540,7 @@ async function main(): Promise<void> {
         agent,
         stateProvider: stateTracker,
         corsOrigin: config.server.cors_origin,
+        frontendDir: config.frontend?.dir,
     });
 
     const { host, port } = config.server;

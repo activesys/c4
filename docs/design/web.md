@@ -389,7 +389,7 @@ interface StateResponse {
 ```
 c4/agent/frontend/                      # React SPA（待实现）
 ├── package.json                        # react, react-dom, typescript, vite
-├── vite.config.ts                      # proxy: /api → http://localhost:3000
+├── vite.config.ts                      # proxy: /api → http://localhost:9988
 └── src/
     ├── main.tsx                        # 入口
     ├── App.tsx                         # SPA 布局 + 侧边导航 + 顶栏

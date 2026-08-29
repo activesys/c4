@@ -7,6 +7,8 @@ import express, {
     type Response,
     type NextFunction,
 } from "express";
+import { existsSync } from "node:fs";
+import * as path from "node:path";
 import type { C4Agent, AgentStateProvider } from "./types.js";
 import { createChatRouter } from "./routes/chat.js";
 import { createUploadRouter } from "./routes/upload.js";
@@ -29,6 +31,8 @@ export interface AppOptions {
     servicesPath?: string;
     /** Mount path for state router. Default: "/api/state" */
     statePath?: string;
+    /** Absolute path to the web frontend static dir; served when set and existing (design §4.3 / §5.1) */
+    frontendDir?: string;
 }
 
 // ── CORS Middleware ───────────────────────────────────────
@@ -88,6 +92,7 @@ export function createApp(options: AppOptions): express.Application {
         uploadPath = "/api/upload",
         servicesPath = "/api/services",
         statePath = "/api/state",
+        frontendDir,
     } = options;
 
     // 1. CORS — Express v5: no `cors` npm package needed
@@ -104,6 +109,18 @@ export function createApp(options: AppOptions): express.Application {
     app.use(uploadPath, createUploadRouter(agent));
     app.use(servicesPath, createServicesRouter());
     app.use(statePath, createStateRouter(stateProvider));
+
+    // 4. Static frontend hosting (optional; design §4.3 / §5.1)
+    if (frontendDir && existsSync(frontendDir)) {
+        app.use(express.static(frontendDir));
+        app.use((req, res, next) => {
+            if (req.method === "GET" && !req.path.startsWith("/api/")) {
+                res.sendFile(path.join(frontendDir, "index.html"));
+            } else {
+                next();
+            }
+        });
+    }
 
     return app;
 }

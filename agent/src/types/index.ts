@@ -137,6 +137,7 @@ export interface AgentConfig {
     };
     state: { backend: string; path: string };
     logging: { level: string; dir: string };
+    frontend?: { dir: string };
     site?: { name: string; abbr: string };
 }
 

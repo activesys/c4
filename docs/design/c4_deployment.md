@@ -410,12 +410,13 @@ journalctl -u c4-agent -n 200
   "instance_id": "c4",
   "model": { "provider": "deepseek", "name": "deepseek-chat",
              "temperature": 0, "max_tokens": 4096, "api_key_env": "DEEPSEEK_API_KEY" },
-  "server": { "host": "127.0.0.1", "port": 3000, "cors_origin": "*" },
+  "server": { "host": "0.0.0.0", "port": 9988, "cors_origin": "*" },
   "mcp_registry": { "path": "/usr/local/etc/c4/mcp-registry" },
   "shm_manager": { "binary": "/usr/local/bin/c4_shm_manager",
                    "config_path": "~/.local/c4/config.json" },
   "state": { "backend": "memory", "path": "~/.local/c4/state" },   // 字段已定义但未使用（状态现为内存态，见 §10）
   "logging": { "level": "info", "dir": "~/.local/c4/logs" },       // dir 已定义但未落盘（现为 console/journald，见 §10）
+  "frontend": { "dir": "/usr/local/lib/c4/frontend" },
   "site": { "name": "华能阿拉善", "abbr": "hnals" }   // 可选，场站单例
 }
 ```
@@ -452,8 +453,8 @@ journalctl -u c4-agent -n 200
 | 二进制可执行且静态 | `ldd /usr/local/bin/c4_shm_manager` | `not a dynamic executable` |
 | 二进制版本 | `c4_shm_manager --version` | 输出版本号（若支持） |
 | Node 可运行 Agent | `node /usr/local/lib/c4/agent/dist/index.js --help` | 不报语法/模块错误 |
-| 前端资源可访问 | `curl http://127.0.0.1:3000/` | 返回 `index.html` |
-| Agent 就绪 | `curl http://127.0.0.1:3000/api/services` | HTTP 200 |
+| 前端资源可访问 | `curl http://127.0.0.1:9988/` | 返回 `index.html` |
+| Agent 就绪 | `curl http://127.0.0.1:9988/api/services` | HTTP 200 |
 | 共享内存 | `ls /dev/shm/` | 出现 `{instance_id}` 文件 |
 | 服务自启 | `systemctl enable c4-agent && reboot` | 重启后 Agent 自动恢复 |
 

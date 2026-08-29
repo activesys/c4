@@ -1568,7 +1568,7 @@ Agent 启动时读取 `~/.local/c4/agent.json`（固定位置，`~` 为运行 C4
   // ========== Express 服务端 ==========
   "server": {
     "host": "0.0.0.0",
-    "port": 3000,
+    "port": 9988,
     "cors_origin": "*"
   },
 
@@ -1593,6 +1593,11 @@ Agent 启动时读取 `~/.local/c4/agent.json`（固定位置，`~` 为运行 C4
   "logging": {
     "level": "info",
     "dir": "~/.local/c4/log"
+  },
+
+  // ========== Web 前端静态托管 ==========
+  "frontend": {
+    "dir": "/usr/local/lib/c4/frontend"
   }
 }
 ```
@@ -1614,6 +1619,7 @@ Agent 启动时读取 `~/.local/c4/agent.json`（固定位置，`~` 为运行 C4
 | `state.path` | string | filesystem 后端的存储目录 |
 | `logging.level` | string | 日志级别：`"debug"` / `"info"` / `"warn"` / `"error"` |
 | `logging.dir` | string | 日志文件输出目录（默认 `~/.local/c4/log`） |
+| `frontend.dir` | string | Web 前端静态资源目录（Express 托管，缺省则不托管） |
 
 ### 5.2 运行时目录结构
 

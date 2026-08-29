@@ -8,8 +8,8 @@
     "api_key_env": "DEEPSEEK_API_KEY"
   },
   "server": {
-    "host": "127.0.0.1",
-    "port": 3000,
+    "host": "0.0.0.0",
+    "port": 9988,
     "cors_origin": "*"
   },
   "mcp_registry": {
@@ -26,6 +26,9 @@
   "logging": {
     "level": "info",
     "dir": "~/.local/c4/logs"
+  },
+  "frontend": {
+    "dir": "/usr/local/lib/c4/frontend"
   },
   "site": {
     "name": "华能阿拉善",
