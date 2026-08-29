@@ -1,0 +1,20 @@
+[Unit]
+Description=C4 Agent
+After=network.target
+
+[Service]
+User=c4
+Group=c4
+ExecStart=/usr/local/lib/c4/agent/node/bin/node /usr/local/lib/c4/agent/dist/index.js --config-dir /home/c4/.local/c4
+Restart=on-failure
+RestartSec=5
+EnvironmentFile=/usr/local/etc/c4/agent.env
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+ReadWritePaths=/home/c4/.local/c4 /dev/shm
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

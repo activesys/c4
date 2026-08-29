@@ -1,0 +1,85 @@
+# c4.spec — C4 RPM 打包（标准 spec，供 RHEL 构建主机 rpmbuild -bb 使用）。
+#
+# 构建主机需具备 rpmbuild（rpm-build 包）。build.sh 会：
+#   1. 将 out/staging 整包树打成 Source0 压缩包；
+#   2. 以 @VERSION@ 渲染本模板；
+#   3. 运行 rpmbuild -bb 产出 RPM。
+#
+# 产物被重命名为 c4-<version>.x86_64.rpm（见 build.sh）。
+
+Name:           c4
+Version:        @VERSION@
+Release:        1
+Summary:        C4 AI agent (MCP service cluster + Node.js agent + web frontend)
+License:        MIT
+BuildArch:      x86_64
+Requires:       glibc >= 2.28
+Requires:       libstdc++ >= 6.0.25
+Source0:        c4-%{version}.tar.gz
+
+%description
+C4 is an AI agent for industrial data servers. It bundles a cluster of six
+MCP services exchanging data over POSIX shared memory, a Node.js agent with
+its own bundled Node.js runtime (no target-side Node required), and a static
+web frontend.
+
+%prep
+# 无源码编译步骤：Source0 已是预构建的整包目录树（package root）。
+
+%install
+rm -rf %{buildroot}
+mkdir -p %{buildroot}
+tar -xzf %{SOURCE0} -C %{buildroot}
+
+%files
+/usr/local/bin/c4_shm_manager
+/usr/local/bin/c4_modbus_client
+/usr/local/bin/c4_iec104_client
+/usr/local/bin/c4_asfp2_client
+/usr/local/bin/c4_asfp2_server
+/usr/local/bin/c4_influxdb_client
+/usr/local/lib/c4/agent/node/bin/node
+/usr/local/lib/c4/agent/dist
+/usr/local/lib/c4/agent/node_modules
+/usr/local/lib/c4/agent/src/super_worker/prompts/system.txt
+/usr/local/lib/c4/frontend
+/usr/local/lib/c4/scripts/install.sh
+/usr/local/etc/c4/mcp-registry
+/usr/local/etc/c4/agent.env.example
+/etc/systemd/system/c4-agent.service
+
+%post
+# 与 scripts/postinst.sh 一致（幂等）
+if ! getent passwd c4 >/dev/null 2>&1; then
+    useradd --system --home-dir /home/c4 --create-home \
+        --shell /usr/sbin/nologin c4
+fi
+install -d -o c4 -g c4 -m 700 /home/c4/.local/c4
+install -d -o c4 -g c4 -m 700 \
+    /home/c4/.local/c4/state \
+    /home/c4/.local/c4/logs
+chown -R root:c4 /usr/local/etc/c4
+if [ ! -f /usr/local/etc/c4/agent.env ]; then
+    if [ -f /usr/local/etc/c4/agent.env.example ]; then
+        cp /usr/local/etc/c4/agent.env.example /usr/local/etc/c4/agent.env
+    else
+        : > /usr/local/etc/c4/agent.env
+    fi
+fi
+chmod 640 /usr/local/etc/c4/agent.env
+systemctl daemon-reload || true
+
+%preun
+# 与 scripts/prerm.sh 一致（停止并禁用，容忍失败）
+if [ $1 -eq 0 ]; then
+    systemctl stop c4-agent 2>/dev/null || true
+    systemctl disable c4-agent 2>/dev/null || true
+fi
+
+%postun
+# 与 scripts/postrm.sh 一致：rpm 无原生 purge，默认一律保留账户与数据
+exit 0
+
+%changelog
+* Sat Aug 29 2026 ACTIVESYS <activesys@sina.com> - 1.0.0-1
+- Initial C4 packaging

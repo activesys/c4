@@ -1,0 +1,11 @@
+Package: c4
+Version: @VERSION@
+Architecture: amd64
+Maintainer: ACTIVESYS <activesys@sina.com>
+Section: utils
+Priority: optional
+Depends: libc6 (>= 2.28), libstdc++6 (>= 6.0.25)
+Description: C4 AI agent (MCP service cluster + Node.js agent + web frontend)
+ C4 is an AI agent for industrial data servers. It bundles a cluster of six
+ MCP services exchanging data over POSIX shared memory, a Node.js agent
+ (with its own bundled Node.js runtime), and a static web frontend.
