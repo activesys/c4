@@ -8,7 +8,7 @@
 // History truncation is applied inside useChatStream.send, so by the time
 // the POST leaves the browser the body is already bounded to N rounds.
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useChatStream, type ChatBubble } from "@frontend/hooks/useChatStream";
 import { matchConfirmPhrase } from "@frontend/hooks/useConfirmDetect";
 import { ConfirmButtons } from "./ConfirmButtons";
@@ -23,6 +23,13 @@ export function ChatView(): JSX.Element {
   const [uploadMessage, setUploadMessage] = useState(
     "请解析此文件中的设备信息",
   );
+  const listRef = useRef<HTMLDivElement | null>(null);
+
+  // 新消息/工具卡片/流式内容更新时自动滚动到底部
+  useEffect(() => {
+    const el = listRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [messages, toolCards]);
 
   const confirmVisible = useMemo(
     () => matchConfirmPhrase(assistantText),
@@ -91,7 +98,7 @@ export function ChatView(): JSX.Element {
 
   return (
     <div className="chat-view" data-testid="chat-view">
-      <div className="chat-view__messages" data-testid="message-list">
+      <div className="chat-view__messages" data-testid="message-list" ref={listRef}>
         {messages.map((m: ChatBubble) => (
           <Bubble key={m.id} bubble={m} />
         ))}

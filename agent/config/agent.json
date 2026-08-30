@@ -25,7 +25,8 @@
   },
   "logging": {
     "level": "info",
-    "dir": "~/.local/c4/logs"
+    "dir": "/var/log/c4/agent",
+    "agent_level": "debug"
   },
   "frontend": {
     "dir": "/usr/local/lib/c4/frontend"

@@ -13,14 +13,14 @@ export interface WriterPoint {
     id: string;                   // Writer 点标识：采集点名（global key = {instance.id}.{point.id}）
     key?: never;                  // Writer 点无 key
     shm_id: number;               // 固定为 0，由 c4_shm_manager 分配后回填
-    [field: string]: unknown;     // 业务字段由 point_fields 声明（Writer / Reader 统一）
+    [field: string]: unknown;     // 业务字段由 point_schema.fields 声明（Writer / Reader 统一）
 }
 
 export interface ReaderPoint {
     id?: never;                   // Reader 点无 id
     key: string;                  // Reader 点标识：引用 Writer 点（值 = {writer_instance_id}.{point_id}）
     shm_id: number;               // 固定为 0，由 c4_shm_manager 分配后回填
-    [field: string]: unknown;     // 业务字段由 point_fields 声明（Writer / Reader 统一）
+    [field: string]: unknown;     // 业务字段由 point_schema.fields 声明（Writer / Reader 统一）
 }
 
 // ── Service Step ─────────────────────────────────────────
@@ -33,11 +33,11 @@ export interface ServiceStep {
 
 // ── AccessPlan ───────────────────────────────────────────
 // 实例 plan 字段直接平铺在 device/forward_target 上（不做语义分类），
-// 由 registry 的 config_schema.source=plan 声明；点业务字段由 point_fields 声明
+// 由 registry 的 config_schema.source=plan 声明；点业务字段由 point_schema.fields 声明
 
 export interface DevicePoint {
-    name: string;                 // 点名称（对应 point.id）
-    [field: string]: unknown;     // 协议特有字段由 point_fields 声明（如 Modbus: addr/uid/fun/type/swap）
+    name: string;                 // 点名称（对应 point.id；空字符串视为无点名，由身份字段生成）
+    [field: string]: unknown;     // 协议特有字段由 point_schema.fields 声明（如 Modbus: addr/uid/fun/type/swap）
 }
 
 export interface DeviceSpec {
@@ -52,7 +52,7 @@ export interface ForwardTargetSpec {
     name: string;                 // 目标名称（中文显示）
     abbr: string;                 // 转发目标标识（最终 id 以记忆库为准）
     protocol: string;             // 转发协议
-    [field: string]: unknown;     // 实例 plan 字段 + 目标级字段（measurement 等，由 point_fields 声明）
+    [field: string]: unknown;     // 实例 plan 字段 + 目标级字段（measurement 等，由 point_schema.fields 声明）
 }
 
 export interface AccessPlan {
@@ -90,12 +90,18 @@ export interface PointField {
     description: string;  // 字段描述
 }
 
+/** 点表 schema（agent.md §3.3）：fields = 业务字段声明；identity_fields = 身份字段（Writer 必填，Reader 不填） */
+export interface PointSchema {
+    fields: PointField[];        // 点表业务字段声明（全部必须提供、无默认值）
+    identity_fields?: string[];  // 能唯一标识一个点的字段子集（按字段名声明，顺序即生成点名拼接顺序）
+}
+
 export interface RegistryEntry {
     service_type: string;
     display_name: string;
     role: "writer" | "reader";
     protocols: RegistryProtocol[];
-    point_fields: PointField[];   // 点表业务字段声明（全部必须提供、无默认值）
+    point_schema: PointSchema;    // 点表 schema（fields + identity_fields）
     config_schema: {
         fields: Record<string, {
             type: string;
@@ -105,6 +111,7 @@ export interface RegistryEntry {
         }>;
     };
     binary_path: string;
+    prompt_hints?: string[];      // 服务使用提示（可选，随 L1 注入系统提示）
     error_mappings: Record<string, string>;
 }
 
@@ -136,7 +143,7 @@ export interface AgentConfig {
         config_path: string;
     };
     state: { backend: string; path: string };
-    logging: { level: string; dir: string };
+    logging: { level: string; dir: string; agent_level?: string };
     frontend?: { dir: string };
     site?: { name: string; abbr: string };
 }

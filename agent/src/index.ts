@@ -33,6 +33,7 @@ import {
 import { MultiServerMCPClient } from "@langchain/mcp-adapters";
 import { translateError } from "./mcp/tools.js";
 import { createC4Agent } from "./super_worker/super_worker.js";
+import { AgentLogger, type AgentLogLevel } from "./logging/agent_logger.js";
 import type {
     AgentConfig,
     SystemConfig,
@@ -73,6 +74,7 @@ const AgentConfigSchema: z.ZodType<AgentConfig> = z.object({
     logging: z.object({
         level: z.string(),
         dir: z.string(),
+        agent_level: z.string().optional(),
     }),
     frontend: z.object({
         dir: z.string(),
@@ -424,6 +426,12 @@ async function main(): Promise<void> {
         `server=${config.server.host}:${config.server.port}`,
     );
 
+    // Agent 运行日志（第二层：结构化 NDJSON → logging.dir）
+    const agentLogger = new AgentLogger(
+        config.logging.dir,
+        (config.logging.agent_level ?? "debug") as AgentLogLevel,
+    );
+
     // ── Step 1.5: Config.json recovery (§3.2.3 step 2) ──
     const dataConfigPath = config.shm_manager.config_path;
     if (existsSync(dataConfigPath)) {
@@ -465,7 +473,12 @@ async function main(): Promise<void> {
     const registryPath = config.mcp_registry.path;
 
     try {
-        await registry.loadFromDirectory(registryPath);
+        const warnings = await registry.loadFromDirectory(registryPath);
+        if (warnings.length > 0) {
+            logger.warn(
+                `Registry 跳过 ${warnings.length} 个不合法文件:\n${warnings.join("\n")}`
+            );
+        }
         logger.info(
             `Registry 加载完成: ${registry.entryCount} 个服务 ` +
             `(路径: ${registryPath})`,
@@ -527,6 +540,7 @@ async function main(): Promise<void> {
             instanceId: config.instance_id,
             site: config.site ?? null,
             state: stateTracker,
+            agentLogger,
         });
         logger.info("SuperWorker Agent 已创建");
     } catch (err: unknown) {
@@ -597,6 +611,7 @@ async function main(): Promise<void> {
             const msg = err instanceof Error ? err.message : String(err);
             logger.error(`关闭 MCP manager 时出错: ${msg}`);
         }
+        agentLogger.close();
         process.exit(0);
     };
 

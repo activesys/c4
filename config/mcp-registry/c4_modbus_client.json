@@ -2,32 +2,114 @@
   "service_type": "c4_modbus_client",
   "display_name": "Modbus 数据采集",
   "role": "writer",
-  "protocols": [{
-    "protocol": "modbus",
-    "description": "Modbus TCP 数据采集客户端，从工业设备读取数据后写入共享内存",
-    "selection_rules": [
-      { "condition": "device.protocol == 'modbus'", "description": "Modbus 协议设备数据采集" }
-    ]
-  }],
-  "point_fields": [
-    { "name": "addr", "type": "integer", "description": "寄存器地址" },
-    { "name": "uid",  "type": "integer", "description": "单元标识符" },
-    { "name": "fun",  "type": "integer", "description": "功能码" },
-    { "name": "type", "type": "integer", "description": "数据类型" },
-    { "name": "swap", "type": "integer", "description": "字节交换" }
+  "protocols": [
+    {
+      "protocol": "modbus",
+      "description": "Modbus TCP 数据采集客户端，从工业设备读取数据后写入共享内存",
+      "selection_rules": [
+        {
+          "condition": "device.protocol == 'modbus'",
+          "description": "Modbus 协议设备数据采集"
+        }
+      ]
+    }
   ],
+  "point_schema": {
+    "fields": [
+      {
+        "name": "addr",
+        "type": "integer",
+        "description": "寄存器地址"
+      },
+      {
+        "name": "uid",
+        "type": "integer",
+        "description": "单元标识符"
+      },
+      {
+        "name": "fun",
+        "type": "integer",
+        "description": "功能码"
+      },
+      {
+        "name": "type",
+        "type": "integer",
+        "description": "数据类型"
+      },
+      {
+        "name": "swap",
+        "type": "integer",
+        "description": "字节交换（必填，0 表示不交换）"
+      }
+    ],
+    "identity_fields": [
+      "uid",
+      "fun",
+      "addr"
+    ]
+  },
   "config_schema": {
     "fields": {
-      "ip":         { "type": "string",  "source": "plan",    "default": null,  "description": "设备 IP 地址" },
-      "port":       { "type": "integer", "source": "plan",    "default": 502,   "description": "Modbus 端口（默认 502）" },
-      "t0":         { "type": "integer", "source": "default", "default": 30,    "description": "连接超时（秒）" },
-      "t1":         { "type": "integer", "source": "default", "default": 10,    "description": "请求/响应超时（秒）" },
-      "retries":    { "type": "integer", "source": "default", "default": 10,    "description": "失败重试次数" },
-      "coils_quantity_max":     { "type": "integer", "source": "default", "default": 2000, "description": "单次请求最大线圈/离散输入数量" },
-      "registers_quantity_max": { "type": "integer", "source": "default", "default": 125,  "description": "单次请求最大寄存器数量" },
-      "hton_register": { "type": "integer", "source": "default", "default": 1,   "description": "是否将每个 16 位寄存器的网络序格式转换为本机序格式（1=转换，0=不转换）" },
-      "hton_total":  { "type": "integer", "source": "default", "default": 0,     "description": "保留字段（始终为 0）" },
-      "timer":       { "type": "integer", "source": "default", "default": 1000,  "description": "采集周期（毫秒）" }
+      "ip": {
+        "type": "string",
+        "source": "plan",
+        "default": null,
+        "description": "设备 IP 地址"
+      },
+      "port": {
+        "type": "integer",
+        "source": "plan",
+        "default": 502,
+        "description": "Modbus 端口（默认 502）"
+      },
+      "t0": {
+        "type": "integer",
+        "source": "default",
+        "default": 30,
+        "description": "连接超时（秒）"
+      },
+      "t1": {
+        "type": "integer",
+        "source": "default",
+        "default": 10,
+        "description": "请求/响应超时（秒）"
+      },
+      "retries": {
+        "type": "integer",
+        "source": "default",
+        "default": 10,
+        "description": "失败重试次数"
+      },
+      "coils_quantity_max": {
+        "type": "integer",
+        "source": "default",
+        "default": 2000,
+        "description": "单次请求最大线圈/离散输入数量"
+      },
+      "registers_quantity_max": {
+        "type": "integer",
+        "source": "default",
+        "default": 125,
+        "description": "单次请求最大寄存器数量"
+      },
+      "hton_register": {
+        "type": "integer",
+        "source": "default",
+        "default": 1,
+        "description": "是否将每个 16 位寄存器的网络序格式转换为本机序格式（1=转换，0=不转换）"
+      },
+      "hton_total": {
+        "type": "integer",
+        "source": "default",
+        "default": 0,
+        "description": "保留字段（始终为 0）"
+      },
+      "timer": {
+        "type": "integer",
+        "source": "default",
+        "default": 1000,
+        "description": "采集周期（毫秒）"
+      }
     }
   },
   "binary_path": "/usr/local/bin/c4_modbus_client",
@@ -40,5 +122,9 @@
     "SHM_ID_NOT_ASSIGNED": "数据点未分配通道，请重新生成接入方案",
     "INVALID_POINT": "数据点配置无效，请检查功能码/地址/数据类型",
     "CONNECT_FAILED": "设备连接失败，请检查设备 IP 和端口"
-  }
+  },
+  "prompt_hints": [
+    "本服务为 Modbus TCP 数据采集端（客户端），ip 为设备地址，接入前必须确认；port 未指定时使用 Modbus 标准端口 502",
+    "uid（单元标识符）、fun（功能码）、addr（寄存器地址）、type（数据类型）、swap（字节交换）为每个点的必要字段，缺一不可；swap=0 表示不交换"
+  ]
 }

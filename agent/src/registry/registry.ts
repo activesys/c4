@@ -12,7 +12,7 @@ import type {
 
 // ── L1 摘要扩展类型（agent.md §3.3.0）──
 // RegistryL1Summary 只含基础字段（service_type/display_name/role/protocols），
-// 此处扩展 point_fields 与 config_schema 的 source=plan 字段摘要。
+// 此处扩展 point_schema 与 config_schema 的 source=plan 字段摘要。
 
 /** config_schema 中 source=plan 字段的 L1 摘要（供 info-gatherer 判断必填/可选）。 */
 export interface L1PlanFieldSummary {
@@ -25,10 +25,17 @@ export interface L1PlanFieldSummary {
     description: string;
 }
 
-/** 完整 L1 服务摘要 = 基础摘要 + point_fields + source=plan 字段摘要。 */
+/** L1 摘要中的 point_schema（fields + Writer 身份字段）。 */
+export interface L1PointSchema {
+    fields: PointField[];
+    identity_fields?: string[];
+}
+
+/** 完整 L1 服务摘要 = 基础摘要 + point_schema + source=plan 字段摘要 + 服务使用提示。 */
 export interface ServiceCatalogEntry extends RegistryL1Summary {
-    point_fields: PointField[];
+    point_schema: L1PointSchema;
     plan_fields: L1PlanFieldSummary[];
+    prompt_hints: string[];
 }
 
 // ── 内置错误翻译（agent.md §3.4）──
@@ -83,11 +90,14 @@ export class McpServiceRegistry {
    * 扫描目录，加载并校验所有 Registry JSON 文件。
    *
    * 幂等：重复调用会重新加载并覆盖之前的内容。
+   * 单个文件不合法时跳过该文件（agent.md §3.1 用例 1.7），
+   * 返回被跳过文件的警告信息。
    *
    * @param dirPath - Registry JSON 文件所在目录路径
+   * @returns 被跳过文件的警告信息数组
    */
-  async loadFromDirectory(dirPath: string): Promise<void> {
-    const entries = await loadRegistryFiles(dirPath);
+  async loadFromDirectory(dirPath: string): Promise<string[]> {
+    const { entries, warnings } = await loadRegistryFiles(dirPath);
 
     this._entries = entries;
 
@@ -103,6 +113,7 @@ export class McpServiceRegistry {
     }
 
     this._loaded = true;
+    return warnings;
   }
 
   /**
@@ -187,9 +198,9 @@ export class McpServiceRegistry {
   // ── 内部方法 ──
 
   /**
-   * 构建 L1 摘要列表（含 point_fields 与 config_schema source=plan 字段摘要；
-   * 不含 config_schema 全量、binary_path、error_mappings）。
-   */
+    * 构建 L1 摘要列表（含 point_schema 与 config_schema source=plan 字段摘要；
+    * 不含 config_schema 全量、binary_path、error_mappings）。
+    */
   private _buildL1Summaries(): ServiceCatalogEntry[] {
     return this._entries.map((entry) => ({
       service_type: entry.service_type,
@@ -203,11 +214,16 @@ export class McpServiceRegistry {
           description: r.description,
         })),
       })),
-      point_fields: entry.point_fields.map((f) => ({
-        name: f.name,
-        type: f.type,
-        description: f.description,
-      })),
+      point_schema: {
+        fields: entry.point_schema.fields.map((f) => ({
+          name: f.name,
+          type: f.type,
+          description: f.description,
+        })),
+        identity_fields: entry.point_schema.identity_fields
+          ? [...entry.point_schema.identity_fields]
+          : undefined,
+      },
       plan_fields: Object.entries(entry.config_schema.fields)
         .filter(([, field]) => field.source === "plan")
         .map(([name, field]) => ({
@@ -217,21 +233,23 @@ export class McpServiceRegistry {
           default: field.default,
           description: field.description,
         })),
+      prompt_hints: entry.prompt_hints ? [...entry.prompt_hints] : [],
     }));
   }
 
   /**
-   * 将内部校验类型转换为外部 RegistryEntry 接口。
-   */
+    * 将内部校验类型转换为外部 RegistryEntry 接口。
+    */
   private _toRegistryEntry(entry: RegistryEntryValidated): RegistryEntry {
     return {
       service_type: entry.service_type,
       display_name: entry.display_name,
       role: entry.role,
       protocols: entry.protocols,
-      point_fields: entry.point_fields,
+      point_schema: entry.point_schema,
       config_schema: entry.config_schema,
       binary_path: entry.binary_path,
+      prompt_hints: entry.prompt_hints ? [...entry.prompt_hints] : undefined,
       error_mappings: entry.error_mappings,
     };
   }
@@ -274,11 +292,17 @@ export function formatServiceCatalog(summaries: ServiceCatalogEntry[]): string {
       }
     }
 
-    if (s.point_fields.length > 0) {
+    if (s.point_schema.fields.length > 0) {
       lines.push("  点表字段:");
-      for (const f of s.point_fields) {
+      for (const f of s.point_schema.fields) {
         lines.push(`    ${f.name} (${f.type}) — ${f.description}`);
       }
+    }
+
+    if (s.point_schema.identity_fields && s.point_schema.identity_fields.length > 0) {
+      lines.push(
+        `  身份字段: ${s.point_schema.identity_fields.join(" + ")}（唯一标识一个点；无点名时按此生成点名）`,
+      );
     }
 
     if (s.plan_fields.length > 0) {
@@ -288,6 +312,13 @@ export function formatServiceCatalog(summaries: ServiceCatalogEntry[]): string {
           ? "必填"
           : `可选，默认 ${String(f.default)}`;
         lines.push(`    ${f.name} (${f.type}, ${req}) — ${f.description}`);
+      }
+    }
+
+    if (s.prompt_hints.length > 0) {
+      lines.push("  使用提示:");
+      for (const h of s.prompt_hints) {
+        lines.push(`  - ${h}`);
       }
     }
 

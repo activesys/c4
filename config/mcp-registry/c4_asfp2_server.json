@@ -2,20 +2,44 @@
   "service_type": "c4_asfp2_server",
   "display_name": "ASFP2 数据接收",
   "role": "writer",
-  "protocols": [{
-    "protocol": "asfp2",
-    "description": "ASFP2 协议接收服务端，接收远端推送的实时数据并写入共享内存",
-    "selection_rules": [
-      { "condition": "device.role == 'receiver'", "description": "数据接收场景（作为 ASFP2 服务端）" }
-    ]
-  }],
-  "point_fields": [
-    { "name": "addr", "type": "integer", "description": "接收点地址" }
+  "protocols": [
+    {
+      "protocol": "asfp2",
+      "description": "ASFP2 协议接收服务端，接收远端推送的实时数据并写入共享内存",
+      "selection_rules": [
+        {
+          "condition": "device.role == 'receiver'",
+          "description": "数据接收场景（作为 ASFP2 服务端）"
+        }
+      ]
+    }
   ],
+  "point_schema": {
+    "fields": [
+      {
+        "name": "addr",
+        "type": "integer",
+        "description": "接收点地址"
+      }
+    ],
+    "identity_fields": [
+      "addr"
+    ]
+  },
   "config_schema": {
     "fields": {
-      "ip":   { "type": "string",  "source": "default", "default": "0.0.0.0", "description": "绑定 IP（默认所有网卡）" },
-      "port": { "type": "integer", "source": "plan",    "default": null, "description": "监听端口" }
+      "ip": {
+        "type": "string",
+        "source": "default",
+        "default": "0.0.0.0",
+        "description": "绑定 IP（默认所有网卡）"
+      },
+      "port": {
+        "type": "integer",
+        "source": "plan",
+        "default": 9000,
+        "description": "监听端口，默认 9000；新实例自动选择空闲端口（避开同服务已有实例与系统已监听端口），已接入实例端口不变"
+      }
     }
   },
   "binary_path": "/usr/local/bin/c4_asfp2_server",
@@ -27,6 +51,12 @@
     "PORT_CONFLICT": "端口已被占用，请检查端口配置",
     "SHM_CORRUPTED": "数据存储异常，请联系管理员检查共享内存状态",
     "SHM_OPEN_FAILED": "无法访问数据存储，请检查共享内存配置",
-    "SHM_ID_NOT_ASSIGNED": "数据点未分配通道，请重新生成接入方案"
-  }
+    "SHM_ID_NOT_ASSIGNED": "数据点未分配通道，请重新生成接入方案",
+    "PORT_BIND_FAILED": "端口被其他应用占用，服务无法启动，请更换端口后重试"
+  },
+  "prompt_hints": [
+    "本服务为 ASFP2 数据接收端（服务端），等待第三方推送连接；ip 为本机绑定地址，默认 0.0.0.0（所有网卡）",
+    "数据接收监听端口未指定时自动选择空闲端口：从默认 9000 起，跳过本服务已有实例占用的端口和操作系统中已被监听的端口；已接入实例的端口在加点/修改时保持不变",
+    "每个数据点以 addr（转发地址）为身份字段，无点名时系统按 addr 生成点名"
+  ]
 }

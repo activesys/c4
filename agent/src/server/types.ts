@@ -7,6 +7,8 @@ import type { AgentPhase } from "../types/index.js";
 // ── Agent Invoke Input ────────────────────────────────────
 export interface AgentInvokeInput {
   messages: Array<{ role: string; content: string }>;
+  /** 会话 ID（用于运行日志关联；由 chat 路由生成并传入） */
+  conversationId?: string;
 }
 
 // ── Agent Stream Events ───────────────────────────────────

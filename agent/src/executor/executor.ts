@@ -236,6 +236,75 @@ export async function merge_config_from_steps(
     return { success: true, config, warnings };
 }
 
+// ── 标识符校验（§3.2.1.3b）────────────────────────────────
+// 不含点号：global key 以 `.` 作为分隔符（{instance.id}.{point.id}）
+export const IDENTIFIER_RE = /^[a-zA-Z][a-zA-Z0-9_]*$/;
+export const MAX_IDENTIFIER_LENGTH = 1024;
+
+export function identifier_error(value: string, label: string): string | null {
+    if (!IDENTIFIER_RE.test(value)) {
+        return `${label} "${value}" 包含非法字符，仅允许字母开头`;
+    }
+    if (value.length > MAX_IDENTIFIER_LENGTH) {
+        return `${label} "${value}" 太长（超过 ${MAX_IDENTIFIER_LENGTH} 字节），请保证在 1K 以内`;
+    }
+    return null;
+}
+
+function validate_identifier(value: string, label: string): void {
+    const err = identifier_error(value, label);
+    if (err) {
+        throw new Error(err);
+    }
+}
+
+// ── 身份字段与点名生成（§3.2.1.3b）────────────────────────
+
+export function sanitize_identifier(text: string): string {
+    return text.replace(/[^a-zA-Z0-9_]/g, "_").toLowerCase();
+}
+
+/** 身份字段组合键（如 "uid=1, fun=3, addr=1000"）；任一身份字段缺值 → null */
+export function identity_field_key(
+    rec: Record<string, unknown>,
+    identity_fields: string[],
+): string | null {
+    const parts: string[] = [];
+    for (const f of identity_fields) {
+        const v = rec[f];
+        if (v === undefined || v === null || v === "") {
+            return null;
+        }
+        parts.push(`${f}=${String(v)}`);
+    }
+    return parts.join(", ");
+}
+
+/** 生成名 = `p_` + 身份字段值（先 sanitize_identifier）按 identity_fields 顺序用 `_` 连接 */
+export function generate_point_id(
+    rec: Record<string, unknown>,
+    identity_fields: string[],
+): string {
+    return "p_" + identity_fields
+        .map((f) => sanitize_identifier(String(rec[f] ?? "")))
+        .join("_");
+}
+
+/** 点重复报告（§3.2.1.3b 报告口径）：仅展示冲突项，二选一——提供新点表 / 结束本次接入任务 */
+export function point_duplicate_error(
+    context: string,
+    conflicts: Array<{ identity: string; id: string }>,
+): string {
+    const items = conflicts
+        .map((c) => `  - ${c.identity}（点名 ${c.id}）`)
+        .join("\n");
+    return (
+        `点重复：${context} 中以下点的身份字段组合重复，这是点表的问题，未写入任何变更。\n` +
+        `冲突的点：\n${items}\n` +
+        `请选择：提供修正后的新点表（已收集的实例参数无需重复提供），或结束本次接入任务。`
+    );
+}
+
 // ── handle_add ────────────────────────────────────────────
 
 async function handle_add(
@@ -249,11 +318,7 @@ async function handle_add(
     if (!instance_id || typeof instance_id !== "string") {
         throw new Error(`add 操作缺少 instance.id: ${step.service_type}`);
     }
-    if (!/^[a-zA-Z][a-zA-Z0-9_.]*$/.test(instance_id)) {
-        throw new Error(
-            `instance.id "${instance_id}" 包含非法字符，仅允许字母开头`
-        );
-    }
+    validate_identifier(instance_id, "instance.id");
 
     // 检查 instance.id 是否与现有冲突：若已存在同名实例（如追加设备时转发目标已存在），
     // 合并 points（追加新 point、更新已有 point），而非报错。
@@ -291,17 +356,41 @@ async function handle_add(
         if (typeof id !== "string" || id.length === 0) {
             continue;
         }
-        if (!/^[a-zA-Z][a-zA-Z0-9_.]*$/.test(id)) {
-            throw new Error(
-                `point.id "${id}" 包含非法字符，仅允许字母开头`,
-            );
-        }
+        validate_identifier(id, "point.id");
         if (point_ids.has(id)) {
             throw new Error(
                 `point.id "${id}" 在 ${step.service_type}.${instance_id} 中重复`,
             );
         }
         point_ids.add(id);
+    }
+
+    // 点重复（§3.2.1.3b 硬约束 3，最终防线）：identity_fields 组合在本次 step 内不重复
+    const entry = registry?.get_entry(step.service_type);
+    const identity_fields = entry?.point_schema.identity_fields;
+    if (identity_fields && identity_fields.length > 0) {
+        const seen_identity = new Map<string, string>();
+        for (const pt of step.points) {
+            const rec = pt as unknown as Record<string, unknown>;
+            const ikey = identity_field_key(rec, identity_fields);
+            if (ikey === null) {
+                continue;
+            }
+            const this_id = typeof rec["id"] === "string" ? (rec["id"] as string) : "";
+            const prev_id = seen_identity.get(ikey);
+            if (prev_id !== undefined) {
+                throw new Error(
+                    point_duplicate_error(
+                        `${step.service_type}.${instance_id}`,
+                        [
+                            { identity: ikey, id: prev_id },
+                            { identity: ikey, id: this_id },
+                        ],
+                    ),
+                );
+            }
+            seen_identity.set(ikey, this_id);
+        }
     }
 
     // 构建实例配置：合并 instance 字段 + points
@@ -366,6 +455,7 @@ function handle_modify(
     if (!instance_id || typeof instance_id !== "string") {
         throw new Error(`modify 操作缺少 instance.id: ${step.service_type}`);
     }
+    validate_identifier(instance_id, "instance.id");
 
     const target = instances.find((inst) => inst.id === instance_id);
     if (!target) {
@@ -375,8 +465,9 @@ function handle_modify(
     }
 
     // 浅合并 instance 字段（除 id, name, points 外）
+    // 例外：port 不参与覆盖——已接入实例的端口保持原值（监听端口的确定性分配规则，agent.md §3.3）
     for (const [key, value] of Object.entries(step.instance)) {
-        if (key !== "id" && key !== "name" && key !== "points") {
+        if (key !== "id" && key !== "name" && key !== "points" && key !== "port") {
             (target as Record<string, unknown>)[key] = value;
         }
     }
@@ -391,6 +482,11 @@ function handle_modify(
             target.points = [];
         }
         for (const step_pt of step.points) {
+            const rec = step_pt as unknown as Record<string, unknown>;
+            const id = rec["id"];
+            if (typeof id === "string" && id.length > 0) {
+                validate_identifier(id, "point.id");
+            }
             const match_key = point_match_key(step_pt);
             const existing_idx = target.points.findIndex(
                 (p) => point_match_key(p) === match_key,

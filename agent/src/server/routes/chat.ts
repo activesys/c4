@@ -119,7 +119,7 @@ export function createChatRouter(agent: C4Agent): Router {
 
         // 使用 promise chain 而非 async/for-await，规避 Express v5 在 async
         // handler 返回 pending Promise 时关闭连接的问题。
-        const stream = agent.invoke({ messages });
+        const stream = agent.invoke({ messages, conversationId });
 
         function processNext(
             result: IteratorResult<AgentStreamEvent>,

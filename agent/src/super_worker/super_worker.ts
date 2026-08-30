@@ -27,6 +27,7 @@ import {
 } from "../registry/abbr_registry.js";
 import type { C4Agent, AgentStateWriter } from "../server/types.js";
 import type { ServiceStep, SystemConfig } from "../types/index.js";
+import type { AgentLogger } from "../logging/agent_logger.js";
 
 // ── 类型 ──────────────────────────────────────────────────
 
@@ -39,6 +40,7 @@ export interface SuperWorkerConfig {
     instanceId: string;
     site?: { name: string; abbr: string } | null;
     state?: AgentStateWriter;
+    agentLogger?: AgentLogger;
 }
 
 // ── 系统提示 ──────────────────────────────────────────────
@@ -63,9 +65,25 @@ function loadSystemPrompt(
     const currentSite = site
         ? `${site.name}（缩写 ${site.abbr}）`
         : "（未设置）";
+    // 场站规则按绑定状态条件渲染（agent.md §3.2.1.3：归属校验确定性执行，不依赖 LLM 自选分支）
+    const siteRules = site
+        ? [
+            `- **场站归属（已绑定：${site.name}，缩写 ${site.abbr}）——硬性要求，必须先于 output_device_info 执行**：`,
+            `  - 本实例与场站「${site.name}」永久绑定：**禁止以任何理由向用户询问场站名称或缩写**，即使消息中没有场站信息，也直接按当前场站处理。`,
+            `  - 用户消息未提及其他场站名称 → 一律默认属于当前场站，直接继续解析，不做任何场站确认询问。`,
+            `  - 消息中设备名带场站前缀且前缀与「${site.name}」一致 → 继续处理。`,
+            `  - 消息明确出现其他场站名称（不同地名，如「华能大青山」）或「场站名称：其他场站」→ 回复「该资料不属于当前场站（当前场站：${site.name}）」并停止，不调用任何工具。`,
+        ].join("\n")
+        : [
+            `- **场站归属（首次接入，硬性要求，必须先于 output_device_info 执行）**：`,
+            `  - 当前场站未设置：**必须先询问「请提供场站名称（如：场站名称：华能阿拉善）」**——只询问场站名称，**不要询问缩写**（缩写由你按拼音首字母自动生成，如 华能阿拉善→hnals、开鲁→kl），不要调用 output_device_info。`,
+            `  - 用户提供场站名称后 → 生成缩写并回复「场站：{名称}（缩写 {缩写}）」记住它，后续接入默认使用该场站、不再重复询问，然后继续解析点表或输出设备信息。`,
+        ].join("\n");
+    // 使用函数形式替换，避免 site/目录内容中的 $ 序列被解释为替换模式
     return template
-        .replace("{{ service_catalog }}", catalog)
-        .replace("{{ current_site }}", currentSite);
+        .replaceAll("{{ service_catalog }}", () => catalog)
+        .replaceAll("{{ current_site }}", () => currentSite)
+        .replaceAll("{{ site_rules }}", () => siteRules);
 }
 
 // ── SuperWorker 工厂 ──────────────────────────────────────
@@ -84,7 +102,7 @@ export async function createSuperWorker(
         txtParserTool,
         outputDeviceInfoTool,
         outputAccessPlanTool,
-        createOutputPlanStepsTool(registry, config.site),
+        createOutputPlanStepsTool(registry, config.site, config.configPath),
         createQueryRegistryTool(registry),
         createQueryAbbrRegistryTool({
             configPath: config.configPath,
@@ -208,6 +226,8 @@ export async function createC4Agent(
 
     return {
         invoke: async function* (input) {
+            const conversation = input.conversationId ?? "unknown";
+            const log = config.agentLogger;
             let planSteps: ServiceStep[] | null = null;
             let planDeviceInfo: Record<string, unknown> | null = null;
             let planAccessPlan: Record<string, unknown> | null = null;
@@ -216,26 +236,39 @@ export async function createC4Agent(
             try {
                 if (input.messages.length > 0) {
                     const last = input.messages[input.messages.length - 1];
+                    log?.user_input(conversation, last.role, String(last.content));
                     const lastContent = last.content as string;
                     // 否定/拒绝词优先判断，避免 "取消，不执行..." 中的 "执行" 被误判为确认
                     const isReject = /取消|拒绝|放弃|停止|算了|不执行|不要执行|不确认/.test(lastContent);
-                    if (last.role === "user" && !isReject && !config.site) {
-                        const siteMatch = lastContent.match(
-                            /场站名称[:：]\s*([^,，]+)[,，]?\s*缩写[:：]\s*(\S+)/,
+                    if (last.role === "user" && !isReject) {
+                        const siteNameMatch = lastContent.match(
+                            /场站名称[:：]\s*([^,，\n]+)/,
                         );
-                        if (siteMatch) {
-                            config.site = { name: siteMatch[1].trim(), abbr: siteMatch[2].trim() };
-                            persist_site_to_agent_config(config.agentConfigPath, config.site);
+                        if (config.site && siteNameMatch) {
+                            const provided = siteNameMatch[1].trim();
+                            if (provided !== config.site.name) {
+                                yield {
+                                    type: "text" as const,
+                                    content: `该资料不属于当前场站（当前场站：${config.site.name}）`,
+                                };
+                                return;
+                            }
+                        } else if (!config.site && siteNameMatch) {
+                            const abbrMatch = lastContent.match(/缩写[:：]\s*(\S+)/);
+                            if (abbrMatch) {
+                                config.site = { name: siteNameMatch[1].trim(), abbr: abbrMatch[1].trim() };
+                                persist_site_to_agent_config(config.agentConfigPath, config.site);
+                                yield {
+                                    type: "text" as const,
+                                    content: `已记录场站：${config.site.name}（缩写 ${config.site.abbr}）`,
+                                };
+                                return;
+                            }
+                            // 仅提供场站名称（无缩写）→ 交由 LLM 生成缩写并确认（按 site_rules 首次接入分支）
+                        } else if (!config.site && /华能|风电场|电场|场站/.test(lastContent)) {
                             yield {
                                 type: "text" as const,
-                                content: `已记录场站：${config.site.name}（缩写 ${config.site.abbr}）`,
-                            };
-                            return;
-                        }
-                        if (/华能|风电场|电场|场站/.test(lastContent)) {
-                            yield {
-                                type: "text" as const,
-                                content: "请提供场站名称和缩写（如：场站名称：华能阿拉善，缩写：hnals）",
+                                content: "请提供场站名称（如：场站名称：华能阿拉善）",
                             };
                             return;
                         }
@@ -244,6 +277,7 @@ export async function createC4Agent(
                         confirmOriginalContent = lastContent;
                         isConfirm = true;
                         config.state?.setPhase("confirmed");
+                        log?.phase(conversation, "confirmed");
                         // 先同步 accessPlan 的 site 到 config.site（首次接入时 config.site 还是 null，
                         // 供「确定性生成」兜底与 output_plan_steps 的 fallback 使用权威 site）
                         if (accessPlan && !config.site) {
@@ -286,6 +320,8 @@ export async function createC4Agent(
                 while (misses <= MAX_MISSES) {
                     let hasToolCall = false;
 
+                    log?.llm_call(conversation, misses + 1, input.messages);
+
                     const stream = await (agent as any).streamEvents(
                         { messages: input.messages },
                         { version: "v3", configurable: { recursion_limit: 50 } },
@@ -303,23 +339,34 @@ export async function createC4Agent(
                                 if (call.name === "output_access_plan" && r?.success) {
                                     accessPlan = r;
                                     config.state?.setPhase("planning");
+                                    log?.phase(conversation, "planning");
                                     config.state?.setAccessPlan(true);
                                 }
                                 if (call.name === "output_device_info" && r?.success && Array.isArray(r?.devices)) {
                                     deviceInfo = r;
                                     config.state?.setPhase("collecting");
+                                    log?.phase(conversation, "collecting");
                                 }
-                                toolResults.push({ name: call.name, result: typeof out === "string" ? out : JSON.stringify(out) });
+                                const resultStr = typeof out === "string" ? out : JSON.stringify(out);
+                                toolResults.push({ name: call.name, result: resultStr });
+                                log?.tool_result(conversation, call.name, resultStr);
                             } catch { /* ignore */ }
                         }
                     })();
 
                     for await (const msg of stream.messages) {
+                        const textParts: string[] = [];
                         for await (const token of msg.text) {
+                            textParts.push(token);
                             yield { type: "text" as const, content: token };
                         }
+                        if (textParts.length > 0) {
+                            log?.llm_text(conversation, textParts.join(""));
+                        }
                         for await (const tc of msg.toolCalls) {
+                            const tcArgs = (tc as unknown as { args?: unknown }).args ?? {};
                             yield { type: "tool_call" as const, name: tc.name, args: {} };
+                            log?.tool_call(conversation, tc.name, tcArgs);
                             hasToolCall = true;
                         }
                     }
@@ -397,8 +444,14 @@ export async function createC4Agent(
 
                 if (planSteps && planSteps.length > 0) {
                     config.state?.setPhase("executing");
+                    log?.phase(conversation, "executing");
                     try {
                         const mr = await merge_config_from_steps(planSteps, config.configPath, config.registry as any);
+                        log?.memory(conversation, "config_merge", {
+                            success: mr.success,
+                            error: mr.error ?? null,
+                            warnings: mr.warnings,
+                        });
                         if (mr.success) {
                             yield { type: "text" as const, content: "接入方案已执行，配置已写入。" };
 
@@ -409,6 +462,15 @@ export async function createC4Agent(
                                 config.configPath,
                                 config.registry as any,
                             );
+                            log?.memory(conversation, "stop_start", {
+                                success: ssr.success,
+                                started_services: ssr.started_services,
+                                failed_services: ssr.failed_services.map((f) => ({
+                                    service_type: f.service_type,
+                                    error: f.error,
+                                })),
+                                abort_reason: ssr.abort_reason ?? null,
+                            });
                             if (!(ssr.abort_reason && /配置类错误/.test(ssr.abort_reason))) {
                                 await persist_abbr_registry(
                                     planSteps,
@@ -416,6 +478,9 @@ export async function createC4Agent(
                                     planAccessPlan,
                                     config,
                                 );
+                                log?.memory(conversation, "abbr_persist", {
+                                    plan_steps: planSteps.length,
+                                });
                             }
                             if (ssr.success) {
                                 yield {
@@ -423,6 +488,7 @@ export async function createC4Agent(
                                     content: `服务已重启: ${ssr.started_services.join(", ")}`,
                                 };
                             } else if (ssr.abort_reason) {
+                                log?.error(conversation, ssr.abort_reason);
                                 yield {
                                     type: "error" as const,
                                     message: ssr.abort_reason,
@@ -430,32 +496,43 @@ export async function createC4Agent(
                             }
                             if (ssr.failed_services.length > 0) {
                                 const names = ssr.failed_services.map((f) => f.service_type).join(", ");
+                                const details = ssr.failed_services
+                                    .map((f) => `${f.service_type}: ${f.error}`)
+                                    .join("; ");
+                                log?.error(conversation, `部分服务启动失败: ${details}`);
                                 yield {
                                     type: "error" as const,
                                     message: `部分服务启动失败: ${names}`,
                                 };
                             }
                             config.state?.setPhase("idle");
+                            log?.phase(conversation, "idle");
                             config.state?.setAccessPlan(false);
                         } else {
+                            log?.error(conversation, `执行问题: ${mr.error ?? "未知"}`);
                             yield { type: "text" as const, content: `执行问题: ${mr.error ?? "未知"}` };
                             config.state?.setError(mr.error ?? "未知");
                         }
                     } catch (ex: unknown) {
+                        const exMsg = ex instanceof Error ? ex.message : String(ex);
+                        log?.error(conversation, `自动执行失败: ${exMsg}`);
                         yield {
                             type: "error" as const,
-                            message: `自动执行失败: ${ex instanceof Error ? ex.message : String(ex)}`,
+                            message: `自动执行失败: ${exMsg}`,
                         };
-                        config.state?.setError(ex instanceof Error ? ex.message : String(ex));
+                        config.state?.setError(exMsg);
                     }
                 }
+                log?.done(conversation);
                 yield { type: "done" as const };
             } catch (err: unknown) {
+                const errMsg = err instanceof Error ? err.message : String(err);
+                log?.error(conversation, errMsg);
                 yield {
                     type: "error" as const,
-                    message: err instanceof Error ? err.message : String(err),
+                    message: errMsg,
                 };
-                config.state?.setError(err instanceof Error ? err.message : String(err));
+                config.state?.setError(errMsg);
             }
         },
     };

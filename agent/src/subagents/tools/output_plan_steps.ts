@@ -4,7 +4,17 @@
 
 import { tool } from "langchain";
 import { z } from "zod";
+import { readFileSync } from "node:fs";
 import type { McpServiceRegistry } from "../../registry/registry.js";
+import {
+    IDENTIFIER_RE,
+    MAX_IDENTIFIER_LENGTH,
+    generate_point_id,
+    identifier_error,
+    identity_field_key,
+    point_duplicate_error,
+    sanitize_identifier,
+} from "../../executor/executor.js";
 import type {
     PointField,
     RegistryEntry,
@@ -14,16 +24,16 @@ import type {
 
 // ── Schema（LLM 提供的输入，宽松骨架）─────────────────────
 // 实例 plan 字段（ip/port/url/token 等）与点业务字段（addr/uid/fun/type/swap 等）
-// 一律 .passthrough() 放行，具体字段名由 registry 的 config_schema/point_fields 声明。
+// 一律 .passthrough() 放行，具体字段名由 registry 的 config_schema/point_schema.fields 声明。
 
 const devicePointInputSchema = z.object({
-    name: z.string().describe("数据点名称"),
+    name: z.string().describe("数据点名称（英文标识；无点名传空字符串，系统按身份字段自动生成）"),
 }).passthrough();
 
 const deviceInputSchema = z.object({
     name: z.string().describe("设备名称"),
     abbr: z.string().describe("采集目标标识（候选，info-gatherer 提取）"),
-    protocol: z.string().describe("通信协议，如 modbus_tcp"),
+    protocol: z.string().describe("通信协议，如 modbus"),
     points: z.array(devicePointInputSchema).describe("数据点列表"),
 }).passthrough();
 
@@ -31,6 +41,12 @@ const forwardTargetInputSchema = z.object({
     name: z.string().describe("转发目标名称"),
     abbr: z.string().describe("转发目标标识（候选，info-gatherer 提取）"),
     protocol: z.string().describe("转发协议，如 asfp2"),
+    points: z.array(devicePointInputSchema).optional().describe(
+        "转发点业务字段（必要项）：按采集点顺序与采集点一一对应；" +
+        "每个元素必须包含该服务 point_schema.fields 声明的全部业务字段" +
+        "（如 ASFP2 转发的 addr 转发地址、InfluxDB 的 measurement/field/type）。" +
+        "用户未提供时先询问用户，禁止编造",
+    ),
 }).passthrough();
 
 const changePointSchema = z.object({
@@ -127,10 +143,6 @@ function find_service_type(
     return null;
 }
 
-function sanitize_identifier(text: string): string {
-    return text.replace(/[^a-zA-Z0-9_]/g, "_").toLowerCase();
-}
-
 function flatten_plan_fields(
     raw: Record<string, unknown>,
     skip: string[],
@@ -150,17 +162,119 @@ function fill_default_fields(
 ): void {
     if (!entry?.config_schema) return;
     for (const [field_name, field_def] of Object.entries(entry.config_schema.fields)) {
-        if (field_def.source === "default" && !(field_name in instance)) {
-            instance[field_name] = field_def.default;
+        if (!(field_name in instance)) {
+            if (field_def.source === "default") {
+                instance[field_name] = field_def.default;
+            } else if (
+                field_def.source === "plan" &&
+                field_def.default !== null &&
+                field_def.default !== undefined
+            ) {
+                // 带 default 的 plan 字段（如 asfp2 监听端口默认 9000）：用户未提供时填充默认值
+                instance[field_name] = field_def.default;
+            }
         }
     }
+}
+
+// ── 端口确定性分配（agent.md「监听端口的确定性分配」+ c4_asfp2_server.md §2.2）──
+//   新实例 → 从默认端口起选择空闲端口，占用检查双重：
+//     ① config.json 中同服务已有实例声明的端口；② 操作系统当前 LISTEN 的端口（含外部应用）
+//   已接入实例（同服务同 instance.id 已存在于 config.json）→ 端口保持原值（加点/修改不改端口）
+//   用户显式指定端口 → 原样保留，被占用时由 Start 阶段报错上报
+
+type PortInventory = {
+    byService: Map<string, Set<number>>;
+    byInstance: Map<string, number>;
+    osListen: Set<number>;
+};
+
+function os_listen_ports(): Set<number> {
+    const ports = new Set<number>();
+    for (const file of ["/proc/net/tcp", "/proc/net/tcp6"]) {
+        let content: string;
+        try {
+            content = readFileSync(file, "utf-8");
+        } catch {
+            continue;
+        }
+        for (const line of content.split("\n").slice(1)) {
+            const cols = line.trim().split(/\s+/);
+            if (cols.length < 4 || cols[3] !== "0A") continue;
+            const port_hex = cols[1].split(":")[1];
+            if (port_hex) {
+                const p = parseInt(port_hex, 16);
+                if (Number.isFinite(p)) ports.add(p);
+            }
+        }
+    }
+    return ports;
+}
+
+function read_port_inventory(config_path: string | undefined): PortInventory {
+    const inv: PortInventory = {
+        byService: new Map(),
+        byInstance: new Map(),
+        osListen: os_listen_ports(),
+    };
+    if (!config_path) return inv;
+    let cfg: Record<string, unknown>;
+    try {
+        cfg = JSON.parse(readFileSync(config_path, "utf-8")) as Record<string, unknown>;
+    } catch {
+        return inv;
+    }
+    for (const [svc, instances] of Object.entries(cfg)) {
+        if (!Array.isArray(instances)) continue;
+        const ports = inv.byService.get(svc) ?? new Set<number>();
+        for (const inst of instances) {
+            const rec = inst as Record<string, unknown>;
+            const p = rec?.["port"];
+            if (typeof p !== "number") continue;
+            ports.add(p);
+            const id = rec?.["id"];
+            if (typeof id === "string" && id.length > 0) {
+                inv.byInstance.set(`${svc}/${id}`, p);
+            }
+        }
+        inv.byService.set(svc, ports);
+    }
+    return inv;
+}
+
+/**
+ * 为实例确定端口。
+ * @param had_port - LLM 输入中是否已携带端口（用户/方案显式指定）
+ */
+function assign_port(
+    instance: Record<string, unknown>,
+    svc_type: string,
+    instance_id: string,
+    inv: PortInventory,
+    had_port: boolean,
+): void {
+    const existing = inv.byInstance.get(`${svc_type}/${instance_id}`);
+    if (existing !== undefined) {
+        // 已接入实例：端口保持原值（加点/修改不迁移端口）
+        instance["port"] = existing;
+        return;
+    }
+    if (had_port) return;
+    const port = instance["port"];
+    if (typeof port !== "number") return;
+    const cfg_ports = inv.byService.get(svc_type) ?? new Set<number>();
+    let p = port;
+    while (cfg_ports.has(p) || inv.osListen.has(p)) p++;
+    instance["port"] = p;
+    cfg_ports.add(p);
 }
 
 function generate_steps(
     input: z.infer<typeof planStepsInputSchema>,
     registry: McpServiceRegistry,
     fallback_site_abbr: string,
-): { steps: ServiceStep[]; warnings: string[] } {
+    port_inventory: PortInventory,
+): { steps: ServiceStep[]; warnings: string[]; fatal: string | null } {
     const steps: ServiceStep[] = [];
     const warnings: string[] = [];
     const site_abbr = input.site?.abbr || fallback_site_abbr || "";
@@ -174,19 +288,72 @@ function generate_steps(
             continue;
         }
 
+        const writer_entry = registry.queryRegistry(svc_type);
+        const identity_fields = writer_entry?.point_schema.identity_fields ?? [];
+
         const target_abbr = dev.abbr || sanitize_identifier(dev.name);
         const instance_id = site_abbr
             ? `${site_abbr}_${target_abbr}`
             : target_abbr;
 
-        const points: ServicePoint[] = dev.points.map((p) => {
+        // 点名三态 + 硬约束（§3.2.1.3b）：空字符串视为无点名 → 从身份字段生成；
+        // 格式不符 → 从身份字段重新生成；超长 → 报错；
+        // 点重复（identity_fields 组合重复）→ 按报告口径返回，不产出任何步骤
+        const seen_identity = new Map<string, string>();
+        const points: ServicePoint[] = [];
+
+        for (const p of dev.points) {
             const raw = p as unknown as Record<string, unknown>;
-            const pt: Record<string, unknown> = { id: p.name, shm_id: 0 };
+            const name_raw =
+                typeof raw["name"] === "string" ? (raw["name"] as string).trim() : "";
+
+            let id: string;
+            if (name_raw === "" || (!IDENTIFIER_RE.test(name_raw) && name_raw.length <= MAX_IDENTIFIER_LENGTH)) {
+                if (identity_fields.length === 0) {
+                    return {
+                        steps,
+                        warnings,
+                        fatal: `设备 "${dev.name}" 存在缺少或非法点名的点，且 ${svc_type} 未声明 point_schema.identity_fields，无法生成点名`,
+                    };
+                }
+                id = generate_point_id(raw, identity_fields);
+            } else if (name_raw.length > MAX_IDENTIFIER_LENGTH) {
+                return {
+                    steps,
+                    warnings,
+                    fatal: `设备 "${dev.name}" 的点名太长（超过 ${MAX_IDENTIFIER_LENGTH} 字节），请保证在 1K 以内`,
+                };
+            } else {
+                id = name_raw;
+            }
+
+            if (identity_fields.length > 0) {
+                const ikey = identity_field_key(raw, identity_fields);
+                if (ikey !== null) {
+                    const prev_id = seen_identity.get(ikey);
+                    if (prev_id !== undefined) {
+                        return {
+                            steps,
+                            warnings,
+                            fatal: point_duplicate_error(
+                                `设备 "${dev.name}"`,
+                                [
+                                    { identity: ikey, id: prev_id },
+                                    { identity: ikey, id },
+                                ],
+                            ),
+                        };
+                    }
+                    seen_identity.set(ikey, id);
+                }
+            }
+
+            const pt: Record<string, unknown> = { id, shm_id: 0 };
             for (const [k, v] of Object.entries(raw)) {
                 if (k !== "name") pt[k] = v;
             }
-            return pt as unknown as ServicePoint;
-        });
+            points.push(pt as unknown as ServicePoint);
+        }
 
         const dev_raw = dev as unknown as Record<string, unknown>;
         const instance: Record<string, unknown> = {
@@ -198,7 +365,9 @@ function generate_steps(
             flatten_plan_fields(dev_raw, ["name", "abbr", "protocol", "points"]),
         );
 
+        const had_port = "port" in instance;
         fill_default_fields(instance, registry.queryRegistry(svc_type));
+        assign_port(instance, svc_type, instance_id, port_inventory, had_port);
 
         steps.push({
             action: "add",
@@ -223,25 +392,65 @@ function generate_steps(
                 ? `${site_abbr}_${target_abbr}`
                 : target_abbr;
 
-            const is_influxdb = svc_type === "c4_influxdb_client";
+            const reader_entry = registry.queryRegistry(svc_type);
+            const system_fields = new Set(["key", "shm_id", "id", "name"]);
+            const required_fields = (reader_entry?.point_schema.fields ?? [])
+                .map((f) => f.name)
+                .filter((f) => !system_fields.has(f));
+
             const ft_raw = ft as unknown as Record<string, unknown>;
-            const measurement =
-                typeof ft_raw["measurement"] === "string" && ft_raw["measurement"] !== ""
-                    ? ft_raw["measurement"]
-                    : site_abbr;
+            const ft_points_raw = Array.isArray(ft_raw["points"])
+                ? (ft_raw["points"] as unknown[]).map(
+                      (p) => p as Record<string, unknown>,
+                  )
+                : null;
+
+            const writer_points_total = steps.reduce(
+                (n, s) => n + s.points.length,
+                0,
+            );
+
+            if (required_fields.length > 0) {
+                if (!ft_points_raw) {
+                    return {
+                        steps,
+                        warnings,
+                        fatal: `转发目标 "${ft.name}" 缺少点业务字段（${required_fields.join(", ")}）——这些是必要项，用户尚未提供。请向用户逐项询问后再调用本工具，禁止自行编造`,
+                    };
+                }
+                if (ft_points_raw.length !== writer_points_total) {
+                    return {
+                        steps,
+                        warnings,
+                        fatal: `转发目标 "${ft.name}" 的 points 数量（${ft_points_raw.length}）与采集点数量（${writer_points_total}）不一致，请按采集点顺序逐点提供 ${required_fields.join(", ")}`,
+                    };
+                }
+            }
 
             const reader_points: ServicePoint[] = [];
-            let auto_addr = 3001;
+            let point_index = 0;
             for (const writer_step of steps) {
                 for (const pt of writer_step.points) {
-                    const point_key = `${writer_step.instance.id}.${pt.id}`;
-                    const rp: Record<string, unknown> = { key: point_key, shm_id: 0 };
-                    if (is_influxdb) {
-                        rp["measurement"] = measurement;
-                    } else {
-                        rp["addr"] = auto_addr++;
+                    const rp: Record<string, unknown> = {
+                        key: `${writer_step.instance.id}.${pt.id}`,
+                        shm_id: 0,
+                    };
+                    if (ft_points_raw) {
+                        const src = ft_points_raw[point_index] ?? {};
+                        for (const f of required_fields) {
+                            const v = src[f];
+                            if (v === undefined || v === null || v === "") {
+                                return {
+                                    steps,
+                                    warnings,
+                                    fatal: `转发目标 "${ft.name}" 的第 ${point_index + 1} 个转发点缺少必要字段 "${f}"，请向用户询问后重试，禁止编造`,
+                                };
+                            }
+                            rp[f] = v;
+                        }
                     }
                     reader_points.push(rp as unknown as ServicePoint);
+                    point_index++;
                 }
             }
 
@@ -254,7 +463,9 @@ function generate_steps(
                 flatten_plan_fields(ft_raw, ["name", "abbr", "protocol"]),
             );
 
+            const had_port = "port" in instance;
             fill_default_fields(instance, registry.queryRegistry(svc_type));
+            assign_port(instance, svc_type, forward_instance_id, port_inventory, had_port);
 
             steps.push({
                 action: "add",
@@ -265,7 +476,7 @@ function generate_steps(
         }
     }
 
-    return { steps, warnings };
+    return { steps, warnings, fatal: null };
 }
 
 // ── 运行时强校验（双层校验 ②，agent.md §3.2）─────────────
@@ -281,7 +492,7 @@ function validate_runtime_input(
         const entry = registry.queryRegistry(svc_type);
         if (!entry) continue;
 
-        const point_schema = pointFieldsToZod(entry.point_fields);
+        const point_schema = pointFieldsToZod(entry.point_schema.fields);
         const config_schema = configFieldsToZod(entry.config_schema);
         for (const pt of dev.points) {
             const r = point_schema.safeParse(pt);
@@ -320,11 +531,31 @@ function validate_runtime_input(
 export function createOutputPlanStepsTool(
     registry: McpServiceRegistry,
     site?: { name: string; abbr: string } | null,
+    config_path?: string,
 ) {
     const fallback_site_abbr = site?.abbr ?? "";
     return tool(
         async (input: z.infer<typeof planStepsInputSchema>) => {
             if (input.changes && input.changes.length > 0) {
+                for (const c of input.changes) {
+                    const inst = c.instance as Record<string, unknown>;
+                    const inst_id = inst["id"];
+                    if (typeof inst_id === "string" && inst_id.length > 0) {
+                        const err = identifier_error(inst_id, "instance.id");
+                        if (err) {
+                            return JSON.stringify({ success: false, error: err });
+                        }
+                    }
+                    for (const p of c.points ?? []) {
+                        const pid = (p as unknown as Record<string, unknown>)["id"];
+                        if (typeof pid === "string" && pid.length > 0) {
+                            const err = identifier_error(pid, "point.id");
+                            if (err) {
+                                return JSON.stringify({ success: false, error: err });
+                            }
+                        }
+                    }
+                }
                 const steps: ServiceStep[] = input.changes.map((c) => ({
                     action: c.action,
                     service_type: c.service_type,
@@ -352,7 +583,20 @@ export function createOutputPlanStepsTool(
                 return validation_error;
             }
 
-            const { steps, warnings } = generate_steps(input, registry, fallback_site_abbr);
+            const { steps, warnings, fatal } = generate_steps(
+                input,
+                registry,
+                fallback_site_abbr,
+                read_port_inventory(config_path),
+            );
+
+            if (fatal) {
+                return JSON.stringify({
+                    success: false,
+                    error: fatal,
+                    warnings: warnings.length > 0 ? warnings : undefined,
+                });
+            }
 
             if (steps.length === 0) {
                 return JSON.stringify({

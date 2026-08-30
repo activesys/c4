@@ -7,16 +7,16 @@ const deviceInfoSchema = z.object({
     devices: z.array(z.object({
         name: z.string().describe("设备名称，从对话上下文提取"),
         abbr: z.string().describe("采集目标标识（候选，info-gatherer 从描述提取）"),
-        protocol: z.string().describe("通信协议，如 modbus_tcp"),
+        protocol: z.string().describe("通信协议，如 modbus"),
         points: z.array(z.object({
-            name: z.string().describe("数据点名称"),
-        }).passthrough()).describe("点字段宽松，具体字段由 point_fields 决定"),
+            name: z.string().describe("数据点名称（英文标识；无点名传空字符串，系统按身份字段自动生成）"),
+        }).passthrough()).describe("点字段宽松，具体字段由 point_schema.fields 决定"),
         missing_fields: z.array(z.string()).optional().describe("缺失的字段"),
     }).passthrough()).describe("实例 plan 字段（ip/port、url/token 等）直接平铺"),
     forward_targets: z.array(z.object({
         name: z.string().describe("转发目标名称"),
         abbr: z.string().describe("转发目标标识（候选，info-gatherer 从描述提取）"),
-        protocol: z.string().describe("转发协议，如 iec104"),
+        protocol: z.string().describe("转发协议，如 asfp2"),
         missing_fields: z.array(z.string()).optional().describe("缺失的字段"),
     }).passthrough()).describe("实例 plan 字段（ip/port、url/token 等）+ 目标级字段（measurement）平铺"),
 });

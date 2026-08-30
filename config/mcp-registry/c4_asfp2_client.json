@@ -2,30 +2,101 @@
   "service_type": "c4_asfp2_client",
   "display_name": "ASFP2 数据转发",
   "role": "reader",
-  "protocols": [{
-    "protocol": "asfp2",
-    "description": "ASFP2 协议转发客户端，从共享内存读取数据后推送至远端服务器",
-    "selection_rules": [
-      { "condition": "target.role == 'forward'", "description": "数据转发场景（作为 ASFP2 客户端）" }
-    ]
-  }],
-  "point_fields": [
-    { "name": "addr", "type": "integer", "description": "转发地址（目标服务器点地址）" }
+  "protocols": [
+    {
+      "protocol": "asfp2",
+      "description": "ASFP2 协议转发客户端，从共享内存读取数据后推送至远端服务器",
+      "selection_rules": [
+        {
+          "condition": "target.role == 'forward'",
+          "description": "数据转发场景（作为 ASFP2 客户端）"
+        }
+      ]
+    }
   ],
+  "point_schema": {
+    "fields": [
+      {
+        "name": "addr",
+        "type": "integer",
+        "description": "转发地址（目标服务器点地址）"
+      }
+    ]
+  },
   "config_schema": {
     "fields": {
-      "ip":         { "type": "string",  "source": "plan",    "default": null,  "description": "目标服务器 IP" },
-      "port":       { "type": "integer", "source": "plan",    "default": null,  "description": "目标服务器端口" },
-      "t0":         { "type": "integer", "source": "default", "default": 30,    "description": "连接超时（秒）" },
-      "t1":         { "type": "integer", "source": "default", "default": 20,    "description": "心跳发送间隔（秒）" },
-      "t2":         { "type": "integer", "source": "default", "default": 10,    "description": "心跳应答超时（秒）" },
-      "timer":      { "type": "integer", "source": "default", "default": 100,   "description": "转发周期（毫秒）" },
-      "key_sequence":    { "type": "integer", "source": "default", "default": 1,  "description": "key 是否连续（1=连续）" },
-      "same_data_type":  { "type": "integer", "source": "default", "default": 1,  "description": "同类型压缩（1=开启）" },
-      "same_timestamp":  { "type": "integer", "source": "default", "default": 1,  "description": "同时刻压缩（1=开启）" },
-      "smart":       { "type": "integer", "source": "default", "default": 1,     "description": "时间戳毫秒归零（1=归零）" },
-      "forward_kack":{ "type": "integer", "source": "default", "default": 255,   "description": "正向 KeepAlive Ack 值" },
-      "inverse_keep":{ "type": "integer", "source": "default", "default": 0,     "description": "反向 KeepAlive 值" }
+      "ip": {
+        "type": "string",
+        "source": "plan",
+        "default": null,
+        "description": "目标服务器 IP"
+      },
+      "port": {
+        "type": "integer",
+        "source": "plan",
+        "default": null,
+        "description": "目标服务器端口"
+      },
+      "t0": {
+        "type": "integer",
+        "source": "default",
+        "default": 30,
+        "description": "连接超时（秒）"
+      },
+      "t1": {
+        "type": "integer",
+        "source": "default",
+        "default": 0,
+        "description": "心跳发送间隔（秒）"
+      },
+      "t2": {
+        "type": "integer",
+        "source": "default",
+        "default": 0,
+        "description": "心跳应答超时（秒）"
+      },
+      "timer": {
+        "type": "integer",
+        "source": "default",
+        "default": 100,
+        "description": "转发周期（毫秒）"
+      },
+      "key_sequence": {
+        "type": "integer",
+        "source": "default",
+        "default": 1,
+        "description": "key 是否连续（1=连续）"
+      },
+      "same_data_type": {
+        "type": "integer",
+        "source": "default",
+        "default": 1,
+        "description": "同类型压缩（1=开启）"
+      },
+      "same_timestamp": {
+        "type": "integer",
+        "source": "default",
+        "default": 1,
+        "description": "同时刻压缩（1=开启）"
+      },
+      "smart": {
+        "type": "integer",
+        "source": "default",
+        "default": 1,
+        "description": "时间戳毫秒归零（1=归零）"
+      },
+      "forward_kack": {
+        "type": "integer",
+        "source": "default",
+        "default": 255,
+        "description": "正向 KeepAlive Ack 值"
+      },
+      "inverse_keep": {
+        "type": "integer",
+        "source": "default",
+        "default": 0,
+        "description": "反向 KeepAlive 值"
+      }
     }
   },
   "binary_path": "/usr/local/bin/c4_asfp2_client",
@@ -37,5 +108,10 @@
     "SHM_CORRUPTED": "数据存储异常，请联系管理员检查共享内存状态",
     "SHM_OPEN_FAILED": "无法访问数据存储，请检查共享内存配置",
     "SHM_ID_NOT_ASSIGNED": "数据点未分配通道，请重新生成接入方案"
-  }
+  },
+  "prompt_hints": [
+    "本服务为 ASFP2 数据转发端（客户端），ip/port 为数据接收端（如 II 区服务器）地址，启动时即发起连接，须确认对端已就绪",
+    "仅转发发生变化的点，数据无变化时不发送任何帧（当前不发心跳，t1/t2 预留未启用）",
+    "转发点的 addr 为对端接收地址，是必要项，由用户提供"
+  ]
 }
