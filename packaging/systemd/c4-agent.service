@@ -13,7 +13,7 @@ NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=read-only
 PrivateTmp=true
-ReadWritePaths=/home/c4/.local/c4 /dev/shm
+ReadWritePaths=/home/c4/.local/c4 /dev/shm /var/log/c4
 CapabilityBoundingSet=
 
 [Install]

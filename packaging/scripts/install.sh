@@ -30,6 +30,7 @@ install -d -o "$ACCOUNT" -g "$ACCOUNT" -m 700 "$ACCOUNT_HOME/.local/c4"
 install -d -o "$ACCOUNT" -g "$ACCOUNT" -m 700 \
     "$ACCOUNT_HOME/.local/c4/state" \
     "$ACCOUNT_HOME/.local/c4/logs"
+install -d -o "$ACCOUNT" -g "$ACCOUNT" -m 755 /var/log/c4/agent
 
 # 3. 配置属主 + agent.env（仅当不存在时创建，绝不覆盖已有密钥文件）
 # 注意：必须先创建 agent.env 再 chown，否则新建文件会落到 root:root。
@@ -61,7 +62,7 @@ NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=read-only
 PrivateTmp=true
-ReadWritePaths=$ACCOUNT_HOME/.local/c4 /dev/shm
+ReadWritePaths=$ACCOUNT_HOME/.local/c4 /dev/shm /var/log/c4
 CapabilityBoundingSet=
 
 [Install]

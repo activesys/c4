@@ -58,6 +58,7 @@ install -d -o c4 -g c4 -m 700 /home/c4/.local/c4
 install -d -o c4 -g c4 -m 700 \
     /home/c4/.local/c4/state \
     /home/c4/.local/c4/logs
+install -d -o c4 -g c4 -m 755 /var/log/c4/agent
 chown -R root:c4 /usr/local/etc/c4
 if [ ! -f /usr/local/etc/c4/agent.env ]; then
     if [ -f /usr/local/etc/c4/agent.env.example ]; then
