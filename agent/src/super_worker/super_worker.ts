@@ -12,7 +12,7 @@ import type { C4McpManager } from "../mcp/client.js";
 import { xlsxParserTool, csvParserTool, txtParserTool } from "../subagents/tools/doc_parsers.js";
 import { createOutputPlanStepsTool } from "../subagents/tools/output_plan_steps.js";
 import { outputAccessPlanTool } from "../subagents/tools/output_access_plan.js";
-import { outputDeviceInfoTool } from "../subagents/tools/output_device_info.js";
+import { createOutputDeviceInfoTool } from "../subagents/tools/output_device_info.js";
 import { createQueryRegistryTool } from "../subagents/tools/query_registry.js";
 import { createQueryAbbrRegistryTool } from "../subagents/tools/query_abbr_registry.js";
 import {
@@ -100,7 +100,7 @@ export async function createSuperWorker(
         xlsxParserTool,
         csvParserTool,
         txtParserTool,
-        outputDeviceInfoTool,
+        createOutputDeviceInfoTool(registry),
         outputAccessPlanTool,
         createOutputPlanStepsTool(registry, config.site, config.configPath),
         createQueryRegistryTool(registry),
@@ -223,6 +223,8 @@ export async function createC4Agent(
     // 避免依赖 LLM 从历史重新推导（追加设备/修改/删除场景易出错）。
     let deviceInfo: Record<string, unknown> | null = null;
     let accessPlan: Record<string, unknown> | null = null;
+    // 执行闸门状态（agent.md「执行闸门」）：是否收到过用户确认
+    let userConfirmed = false;
 
     return {
         invoke: async function* (input) {
@@ -276,6 +278,7 @@ export async function createC4Agent(
                     if (last.role === "user" && !isReject && /确认|好的|执行|按方案|开始/.test(lastContent)) {
                         confirmOriginalContent = lastContent;
                         isConfirm = true;
+                        userConfirmed = true;
                         config.state?.setPhase("confirmed");
                         log?.phase(conversation, "confirmed");
                         // 先同步 accessPlan 的 site 到 config.site（首次接入时 config.site 还是 null，
@@ -443,6 +446,17 @@ export async function createC4Agent(
                 }
 
                 if (planSteps && planSteps.length > 0) {
+                    if (!userConfirmed) {
+                        log?.error(conversation, "执行被拒绝: 方案摘要未展示或未经用户确认");
+                        yield {
+                            type: "text" as const,
+                            content: "请先生成接入方案并确认后，我再执行接入。",
+                        };
+                        planSteps = null;
+                    }
+                }
+
+                if (planSteps && planSteps.length > 0) {
                     config.state?.setPhase("executing");
                     log?.phase(conversation, "executing");
                     try {
@@ -523,6 +537,7 @@ export async function createC4Agent(
                         config.state?.setError(exMsg);
                     }
                 }
+                userConfirmed = false;
                 log?.done(conversation);
                 yield { type: "done" as const };
             } catch (err: unknown) {

@@ -122,11 +122,11 @@ function pickPlanFields(
 
 // ── 映射逻辑 ──────────────────────────────────────────────
 
-function normalize_protocol(protocol: string): string {
+export function normalize_protocol(protocol: string): string {
     return protocol.replace(/_tcp$/, "").replace(/^tcp_/, "");
 }
 
-function find_service_type(
+export function find_service_type(
     registry: McpServiceRegistry,
     protocol: string,
     role: "writer" | "reader",
@@ -481,6 +481,20 @@ function generate_steps(
 
 // ── 运行时强校验（双层校验 ②，agent.md §3.2）─────────────
 // 只有通过 registry 驱动强校验的数据才进入 generate_steps → config.json。
+// 错误信息必须带上下文（哪个设备/转发目标、第几个点、缺什么字段）——
+// 模糊的错误会让 LLM 误判出错位置并陷入盲目重试循环。
+
+function zod_issues_to_text(issues: z.ZodIssue[]): string {
+    return issues
+        .map((iss) => {
+            const field = iss.path.join(".") || "(root)";
+            if (iss.code === "invalid_type" && String((iss as { received?: unknown }).received) === "undefined") {
+                return `缺少必要字段 "${field}"`;
+            }
+            return `字段 "${field}" 不合法: ${iss.message}`;
+        })
+        .join("; ");
+}
 
 function validate_runtime_input(
     input: z.infer<typeof planStepsInputSchema>,
@@ -494,17 +508,25 @@ function validate_runtime_input(
 
         const point_schema = pointFieldsToZod(entry.point_schema.fields);
         const config_schema = configFieldsToZod(entry.config_schema);
-        for (const pt of dev.points) {
-            const r = point_schema.safeParse(pt);
+        for (let i = 0; i < dev.points.length; i++) {
+            const r = point_schema.safeParse(dev.points[i]);
             if (!r.success) {
-                return JSON.stringify({ success: false, errors: r.error.issues });
+                return JSON.stringify({
+                    success: false,
+                    error:
+                        `设备 "${dev.name}" 的第 ${i + 1} 个点${zod_issues_to_text(r.error.issues)}` +
+                        `。请从用户点表逐点补齐后重新调用，禁止编造`,
+                });
             }
         }
         const r2 = config_schema.safeParse(
             pickPlanFields(dev as unknown as Record<string, unknown>, entry.config_schema),
         );
         if (!r2.success) {
-            return JSON.stringify({ success: false, errors: r2.error.issues });
+            return JSON.stringify({
+                success: false,
+                error: `设备 "${dev.name}" ${zod_issues_to_text(r2.error.issues)}。请向用户确认后重新调用`,
+            });
         }
     }
 
@@ -519,7 +541,10 @@ function validate_runtime_input(
             pickPlanFields(ft as unknown as Record<string, unknown>, entry.config_schema),
         );
         if (!r.success) {
-            return JSON.stringify({ success: false, errors: r.error.issues });
+            return JSON.stringify({
+                success: false,
+                error: `转发目标 "${ft.name}" ${zod_issues_to_text(r.error.issues)}。请向用户确认后重新调用`,
+            });
         }
     }
 
