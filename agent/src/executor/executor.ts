@@ -465,7 +465,7 @@ function handle_modify(
     }
 
     // 浅合并 instance 字段（除 id, name, points 外）
-    // 例外：port 不参与覆盖——已接入实例的端口保持原值（监听端口的确定性分配规则，agent.md §3.3）
+    // 例外：port 不参与覆盖——已接入实例的端口保持原值（监听端口的必填约束，agent.md §3.3）
     for (const [key, value] of Object.entries(step.instance)) {
         if (key !== "id" && key !== "name" && key !== "points" && key !== "port") {
             (target as Record<string, unknown>)[key] = value;

@@ -21,11 +21,21 @@
 
 import { useMemo } from "react";
 
-/** Literal text sent as a plain chat message when the user clicks 「确认」. */
-export const CONFIRM_KEYWORD = "确认";
+/** Literal text sent as a plain chat message when the user clicks 「确认」.
+ *
+ * Structured envelope: the bracketed prefix is the ONLY confirmation channel
+ * recognized by the backend (super_worker.ts「执行闸门」). Free-typed text is
+ * never treated as confirmation — see agent.md「执行闸门」. Keep the prefix in
+ * sync with the backend constant CONFIRM_BUTTON_PREFIX.
+ */
+export const CONFIRM_KEYWORD = "[C4_BUTTON_CONFIRM] 确认";
 
-/** Literal text sent as a plain chat message when the user clicks 「取消」. */
-export const CANCEL_KEYWORD = "取消，不执行";
+/** Literal text sent as a plain chat message when the user clicks 「取消」.
+ *
+ * Structured envelope mirroring CONFIRM_KEYWORD; keep the prefix in sync with
+ * the backend constant CANCEL_BUTTON_PREFIX.
+ */
+export const CANCEL_KEYWORD = "[C4_BUTTON_CANCEL] 取消，不执行";
 
 /**
  * Phrases that mean "the agent has just presented a plan and is asking for
@@ -47,6 +57,15 @@ const CONFIRM_PHRASES = [
 export function matchConfirmPhrase(accumulatedText: string): boolean {
   if (!accumulatedText) return false;
   return CONFIRM_PHRASES.some((phrase) => accumulatedText.includes(phrase));
+}
+
+/** Friendly label for button-originated messages, or null for plain text.
+ * Rendered in the chat bubble; the raw envelope still travels on the wire.
+ */
+export function buttonDisplayLabel(text: string): string | null {
+  if (text.startsWith(CONFIRM_KEYWORD)) return "确认";
+  if (text.startsWith(CANCEL_KEYWORD)) return "取消，不执行";
+  return null;
 }
 
 /** Hook signature for consumers — kept stable for tests. */

@@ -24,6 +24,7 @@ import {
   type ChatMessage,
 } from "@frontend/api/chat";
 import type { SseEvent } from "@frontend/api/sse";
+import { buttonDisplayLabel } from "@frontend/hooks/useConfirmDetect";
 
 export type ChatStreamStatus =
   | "idle"
@@ -41,6 +42,7 @@ export interface ChatBubble {
   id: string;
   role: "user" | "agent" | "error";
   content: string;
+  display?: string;
 }
 
 export interface UseChatStreamReturn {
@@ -124,13 +126,21 @@ export function useChatStream(): UseChatStreamReturn {
       abortRef.current = controller;
 
       // Add user bubble + placeholder agent bubble.
+      // Button envelopes travel raw on the wire (backend gate needs the
+      // prefix) but render with their friendly label in the bubble.
       const userId = nextId("user");
       const agentId = nextId("agent");
       agentBubbleIdRef.current = agentId;
+      const label = buttonDisplayLabel(message);
 
       setMessages((prev) => [
         ...prev,
-        { id: userId, role: "user", content: message },
+        {
+          id: userId,
+          role: "user",
+          content: message,
+          ...(label ? { display: label } : {}),
+        },
         { id: agentId, role: "agent", content: "" },
       ]);
       setAssistantText("");

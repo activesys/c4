@@ -10,7 +10,7 @@
 //   3.6.3 interrupt event: an `event: interrupt` record does NOT trigger
 //         the confirm/cancel button (only phrase matching does).
 //   3.2.4 confirm button payload: POST {message:"确认", history}
-//   3.2.5 cancel button payload: POST {message:"取消，不执行", history}
+//   3.2.5 cancel button payload: POST {message:"[C4_BUTTON_CANCEL] 取消，不执行", history}
 //   3.1.7 stream-close fallback (no `event: done`): caller resolves anyway.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
@@ -245,7 +245,13 @@ describe("ChatView — confirm/cancel button payloads (web.md §3.2.4, §3.2.5, 
     await waitFor(() => {
       expect(confirmBody).not.toBeNull();
     });
-    expect(confirmBody!.message).toBe("确认");
+    expect(confirmBody!.message).toBe("[C4_BUTTON_CONFIRM] 确认");
+    // The user bubble renders the friendly label, never the raw envelope.
+    const userBubbles = screen.getAllByTestId("user-bubble");
+    expect(userBubbles[userBubbles.length - 1].textContent).toBe("确认");
+    expect(userBubbles[userBubbles.length - 1].textContent).not.toContain(
+      "C4_BUTTON",
+    );
     // The confirm post must NOT carry resume/interruptId (§3.1.3 不依赖).
     expect(confirmBody!.resume).toBeUndefined();
     expect(confirmBody!.interruptId).toBeUndefined();
@@ -253,7 +259,7 @@ describe("ChatView — confirm/cancel button payloads (web.md §3.2.4, §3.2.5, 
     expect(Array.isArray(confirmBody!.history)).toBe(true);
   });
 
-  it("3.2.5 clicking 取消 posts { message:'取消，不执行', history } (NO resume/interruptId)", async () => {
+  it("3.2.5 clicking 取消 posts { message:'[C4_BUTTON_CANCEL] 取消，不执行', history } (NO resume/interruptId)", async () => {
     const firstResponse = streamResponse([
       `:ok\n\n`,
       `data: {"type":"text","content":"请确认是否按方案执行","conversationId":"c1"}\n\n`,
@@ -288,7 +294,7 @@ describe("ChatView — confirm/cancel button payloads (web.md §3.2.4, §3.2.5, 
     await waitFor(() => {
       expect(cancelBody).not.toBeNull();
     });
-    expect(cancelBody!.message).toBe("取消，不执行");
+    expect(cancelBody!.message).toBe("[C4_BUTTON_CANCEL] 取消，不执行");
     expect(cancelBody!.resume).toBeUndefined();
     expect(cancelBody!.interruptId).toBeUndefined();
     expect(Array.isArray(cancelBody!.history)).toBe(true);

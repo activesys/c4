@@ -4,9 +4,10 @@
 // matchConfirmPhrase operates on the *accumulated* agent bubble text (not
 // individual tokens). It must match full phrase patterns, never bare keywords.
 //
-// Backend regex (informational, NOT used here):
-//   /确认|好的|执行|按方案|开始/                → confirm
-//   /取消|拒绝|放弃|停止|算了|不执行|不要执行|不确认/  → reject (defensive)
+// Button payloads are structured envelopes (web.md §3.1.3): the bracketed
+// prefix is the ONLY confirmation channel recognized by the backend
+// (super_worker.ts「执行闸门」). Free-typed text is never treated as
+// confirmation.
 //
 // Frontend must NOT match the bare keywords — the design (web.md §3.1.3) says
 // words like 执行/好的/开始 appear in normal sentences and would cause false
@@ -21,6 +22,7 @@ import {
   matchConfirmPhrase,
   CONFIRM_KEYWORD,
   CANCEL_KEYWORD,
+  buttonDisplayLabel,
 } from "@frontend/hooks/useConfirmDetect";
 
 describe("matchConfirmPhrase — full-phrase matching (web.md §3.1.3)", () => {
@@ -49,12 +51,35 @@ describe("matchConfirmPhrase — full-phrase matching (web.md §3.1.3)", () => {
 });
 
 describe("useConfirmDetect — exported constants (web.md §3.1.3)", () => {
-  it("CONFIRM_KEYWORD is the literal string '确认'", () => {
-    expect(CONFIRM_KEYWORD).toBe("确认");
+  it("CONFIRM_KEYWORD carries the structured button envelope prefix", () => {
+    expect(CONFIRM_KEYWORD).toBe("[C4_BUTTON_CONFIRM] 确认");
+    expect(CONFIRM_KEYWORD.startsWith("[C4_BUTTON_CONFIRM]")).toBe(true);
   });
 
-  it("CANCEL_KEYWORD is the literal string '取消，不执行'", () => {
-    expect(CANCEL_KEYWORD).toBe("取消，不执行");
+  it("CANCEL_KEYWORD carries the structured cancel envelope prefix", () => {
+    expect(CANCEL_KEYWORD).toBe("[C4_BUTTON_CANCEL] 取消，不执行");
+    expect(CANCEL_KEYWORD.startsWith("[C4_BUTTON_CANCEL]")).toBe(true);
+  });
+
+  it("free-typed text never equals the structured button payload (web.md §3.1.3 唯一通道)", () => {
+    expect("确认").not.toBe(CONFIRM_KEYWORD);
+    expect("从一万开始").not.toContain("[C4_BUTTON_CONFIRM]");
+  });
+});
+
+describe("buttonDisplayLabel — bubble display mapping (web.md §3.1.3)", () => {
+  it("maps the confirm envelope to its friendly label", () => {
+    expect(buttonDisplayLabel(CONFIRM_KEYWORD)).toBe("确认");
+  });
+
+  it("maps the cancel envelope to its friendly label", () => {
+    expect(buttonDisplayLabel(CANCEL_KEYWORD)).toBe("取消，不执行");
+  });
+
+  it("returns null for free-typed text (raw content renders as-is)", () => {
+    expect(buttonDisplayLabel("确认")).toBeNull();
+    expect(buttonDisplayLabel("从一万开始")).toBeNull();
+    expect(buttonDisplayLabel("")).toBeNull();
   });
 });
 

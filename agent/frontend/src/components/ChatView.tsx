@@ -10,7 +10,11 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useChatStream, type ChatBubble } from "@frontend/hooks/useChatStream";
-import { matchConfirmPhrase } from "@frontend/hooks/useConfirmDetect";
+import {
+  CONFIRM_KEYWORD,
+  CANCEL_KEYWORD,
+  matchConfirmPhrase,
+} from "@frontend/hooks/useConfirmDetect";
 import { ConfirmButtons } from "./ConfirmButtons";
 import { ToolCallCard } from "./ToolCallCard";
 import { FileUpload } from "./FileUpload";
@@ -58,10 +62,10 @@ export function ChatView(): JSX.Element {
   };
 
   const handleConfirm = () => {
-    void send("确认", history);
+    void send(CONFIRM_KEYWORD, history);
   };
   const handleCancel = () => {
-    void send("取消，不执行", history);
+    void send(CANCEL_KEYWORD, history);
   };
 
   const handleFileUpload = async (file: File) => {
@@ -167,7 +171,7 @@ function Bubble({ bubble }: { bubble: ChatBubble }): JSX.Element {
       }
       className={cls}
     >
-      {bubble.content}
+      {bubble.display ?? bubble.content}
     </div>
   );
 }

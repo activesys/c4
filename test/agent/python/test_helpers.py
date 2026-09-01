@@ -621,7 +621,7 @@ def full_access_flow(
 
     # Step 3: 确认 — 嵌入设备 JSON
     if confirm:
-        confirm_message = "确认，按方案执行" if result["interrupt_id"] else "确认"
+        confirm_message = "[C4_BUTTON_CONFIRM] 确认"
         device_json = result.get("upload_json")
         if device_json:
             confirm_with_context = f"{confirm_message}\n\n{json.dumps(device_json)}"

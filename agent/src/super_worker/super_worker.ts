@@ -223,6 +223,9 @@ export async function createC4Agent(
     // 避免依赖 LLM 从历史重新推导（追加设备/修改/删除场景易出错）。
     let deviceInfo: Record<string, unknown> | null = null;
     let accessPlan: Record<string, unknown> | null = null;
+    // 用户显式指定的数据接收端口——确定性捕获自用户消息（同场站名解析机制），
+    // 确认轮注入，防止 LLM 重试时回退 registry 默认端口
+    let userPort: string | null = null;
     // 执行闸门状态（agent.md「执行闸门」）：是否收到过用户确认
     let userConfirmed = false;
 
@@ -240,6 +243,16 @@ export async function createC4Agent(
                     const last = input.messages[input.messages.length - 1];
                     log?.user_input(conversation, last.role, String(last.content));
                     const lastContent = last.content as string;
+                    // 确定性捕获用户显式指定的接收端口（如「接收端口使用7867」），
+                    // 供确认轮注入——LLM 从提示词默认值回退的教训见 func_test_case 用例 5
+                    if (last.role === "user") {
+                        const portMatch = lastContent.match(
+                            /(?:接收|监听)?端口[^0-9]{0,6}([0-9]{4,5})/,
+                        );
+                        if (portMatch) {
+                            userPort = portMatch[1];
+                        }
+                    }
                     // 否定/拒绝词优先判断，避免 "取消，不执行..." 中的 "执行" 被误判为确认
                     const isReject = /取消|拒绝|放弃|停止|算了|不执行|不要执行|不确认/.test(lastContent);
                     if (last.role === "user" && !isReject) {
@@ -275,7 +288,14 @@ export async function createC4Agent(
                             return;
                         }
                     }
-                    if (last.role === "user" && !isReject && /确认|好的|执行|按方案|开始/.test(lastContent)) {
+                    // 按钮确认是唯一确认通道：仅前端确认按钮发送的结构化消息
+                    // （前缀 [C4_BUTTON_CONFIRM]，见 frontend useConfirmDetect.ts）置位
+                    // userConfirmed；自由文本中的确认词不构成确认
+                    if (
+                        last.role === "user" &&
+                        !isReject &&
+                        lastContent.startsWith("[C4_BUTTON_CONFIRM]")
+                    ) {
                         confirmOriginalContent = lastContent;
                         isConfirm = true;
                         userConfirmed = true;
@@ -299,6 +319,11 @@ export async function createC4Agent(
                         const extra = [];
                         if (deviceInfo) extra.push(`设备信息: ${JSON.stringify(deviceInfo)}`);
                         if (accessPlan) extra.push(`接入方案: ${JSON.stringify(accessPlan)}`);
+                        if (userPort) {
+                            extra.push(
+                                `用户指定的数据接收端口: ${userPort}（必须原样使用，禁止改为默认端口）`,
+                            );
+                        }
                         const siteHint = config.site
                             ? `（site 必须原样使用 ${JSON.stringify(config.site)}）`
                             : "";
@@ -447,10 +472,11 @@ export async function createC4Agent(
 
                 if (planSteps && planSteps.length > 0) {
                     if (!userConfirmed) {
-                        log?.error(conversation, "执行被拒绝: 方案摘要未展示或未经用户确认");
+                        log?.error(conversation, "执行被拒绝: 未收到确认按钮消息");
                         yield {
                             type: "text" as const,
-                            content: "请先生成接入方案并确认后，我再执行接入。",
+                            content:
+                                "请点击「确认」按钮完成确认后，我再执行接入（文字回复不作为确认依据）。",
                         };
                         planSteps = null;
                     }
@@ -538,6 +564,7 @@ export async function createC4Agent(
                     }
                 }
                 userConfirmed = false;
+                userPort = null;
                 log?.done(conversation);
                 yield { type: "done" as const };
             } catch (err: unknown) {

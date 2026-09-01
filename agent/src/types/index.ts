@@ -103,10 +103,11 @@ export interface RegistryEntry {
     protocols: RegistryProtocol[];
     point_schema: PointSchema;    // 点表 schema（fields + identity_fields）
     config_schema: {
+        required?: string[];          // 必填实例配置字段（如 port）；缺失时 Agent 必须询问用户
         fields: Record<string, {
             type: string;
             source: "plan" | "default";
-            default: unknown;
+            default?: unknown;
             description: string;
         }>;
     };

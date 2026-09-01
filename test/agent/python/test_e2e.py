@@ -264,7 +264,7 @@ class TestE2EModifyAppend:
         with chat.send("将 1#风机 windspeed 的寄存器地址从 1000 改为 1002") as s:
             s.text_content()
 
-        with chat.send("确认修改") as s:
+        with chat.send("[C4_BUTTON_CONFIRM] 确认修改") as s:
             s.text_content()
         time.sleep(5)
 
@@ -284,7 +284,7 @@ class TestE2EModifyAppend:
         with chat.send("给 1#风机增加一个风向采集点，寄存器地址 1010") as s:
             s.text_content()
 
-        with chat.send("确认执行") as s:
+        with chat.send("[C4_BUTTON_CONFIRM] 确认执行") as s:
             s.text_content()
         time.sleep(5)
 
@@ -433,7 +433,7 @@ class TestE2EASFP2:
                 "name": "中心侧", "protocol": "asfp2",
                 "connection": {"ip": "127.0.0.1", "port": FWD_PORT},
             }]
-            confirm_msg = f"确认\n\n{_json.dumps(devices)}"
+            confirm_msg = f"[C4_BUTTON_CONFIRM] 确认\n\n{_json.dumps(devices)}"
             with chat.send(confirm_msg) as stream:
                 stream.text_content()
             time.sleep(5)

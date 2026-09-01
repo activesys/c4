@@ -9,7 +9,7 @@ import { z } from "zod";
 const RegistryFieldSchema = z.object({
   type: z.string(),
   source: z.enum(["plan", "default"]),
-  default: z.unknown().nullable(),
+  default: z.unknown().nullable().optional(),
   description: z.string(),
 });
 

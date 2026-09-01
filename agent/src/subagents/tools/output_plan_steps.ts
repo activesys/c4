@@ -165,23 +165,36 @@ function fill_default_fields(
         if (!(field_name in instance)) {
             if (field_def.source === "default") {
                 instance[field_name] = field_def.default;
-            } else if (
-                field_def.source === "plan" &&
-                field_def.default !== null &&
-                field_def.default !== undefined
-            ) {
-                // 带 default 的 plan 字段（如 asfp2 监听端口默认 9000）：用户未提供时填充默认值
-                instance[field_name] = field_def.default;
             }
+            // source=plan 字段不填默认值：端口类字段为必填项，缺失由
+            // validate_required_plan_fields 拦截并要求询问用户
         }
     }
 }
 
-// ── 端口确定性分配（agent.md「监听端口的确定性分配」+ c4_asfp2_server.md §2.2）──
-//   新实例 → 从默认端口起选择空闲端口，占用检查双重：
-//     ① config.json 中同服务已有实例声明的端口；② 操作系统当前 LISTEN 的端口（含外部应用）
+/** 校验实例必填 plan 字段（config_schema.required，如 asfp2 监听端口 port）。
+ * 缺失 → 返回 fatal（要求向用户询问），禁止使用默认值或自动选择。
+ */
+function validate_required_plan_fields(
+    instance: Record<string, unknown>,
+    entry: RegistryEntry | null,
+    label: string,
+): string | null {
+    for (const f of entry?.config_schema.required ?? []) {
+        const v = instance[f];
+        if (v === undefined || v === null || v === "") {
+            const desc = entry?.config_schema.fields[f]?.description ?? f;
+            return `实例 "${label}" 缺少必填配置 "${f}"——${desc}。请向用户询问后再调用本工具，禁止编造或使用默认值`;
+        }
+    }
+    return null;
+}
+
+// ── 端口确定性分配（agent.md「监听端口的必填约束」+ c4_asfp2_server.md §2.2）──
+//   端口为必填项（registry config_schema.required 声明），必须由用户显式指定：
 //   已接入实例（同服务同 instance.id 已存在于 config.json）→ 端口保持原值（加点/修改不改端口）
 //   用户显式指定端口 → 原样保留，被占用时由 Start 阶段报错上报
+//   缺失 → validate_required_plan_fields 拦截（fatal，要求询问用户），不再自动选择空闲端口
 
 type PortInventory = {
     byService: Map<string, Set<number>>;
@@ -243,30 +256,20 @@ function read_port_inventory(config_path: string | undefined): PortInventory {
 }
 
 /**
- * 为实例确定端口。
- * @param had_port - LLM 输入中是否已携带端口（用户/方案显式指定）
+ * 为实例确定端口：已接入实例保持原值；用户显式指定的端口原样保留。
+ * 端口为必填项，不再自动顺延选择空闲端口；缺失由 validate_required_plan_fields 拦截。
  */
 function assign_port(
     instance: Record<string, unknown>,
     svc_type: string,
     instance_id: string,
     inv: PortInventory,
-    had_port: boolean,
 ): void {
     const existing = inv.byInstance.get(`${svc_type}/${instance_id}`);
     if (existing !== undefined) {
         // 已接入实例：端口保持原值（加点/修改不迁移端口）
         instance["port"] = existing;
-        return;
     }
-    if (had_port) return;
-    const port = instance["port"];
-    if (typeof port !== "number") return;
-    const cfg_ports = inv.byService.get(svc_type) ?? new Set<number>();
-    let p = port;
-    while (cfg_ports.has(p) || inv.osListen.has(p)) p++;
-    instance["port"] = p;
-    cfg_ports.add(p);
 }
 
 function generate_steps(
@@ -365,9 +368,16 @@ function generate_steps(
             flatten_plan_fields(dev_raw, ["name", "abbr", "protocol", "points"]),
         );
 
-        const had_port = "port" in instance;
         fill_default_fields(instance, registry.queryRegistry(svc_type));
-        assign_port(instance, svc_type, instance_id, port_inventory, had_port);
+        assign_port(instance, svc_type, instance_id, port_inventory);
+        const writer_fatal = validate_required_plan_fields(
+            instance,
+            registry.queryRegistry(svc_type),
+            dev.name,
+        );
+        if (writer_fatal) {
+            return { steps, warnings, fatal: writer_fatal };
+        }
 
         steps.push({
             action: "add",
@@ -463,9 +473,16 @@ function generate_steps(
                 flatten_plan_fields(ft_raw, ["name", "abbr", "protocol"]),
             );
 
-            const had_port = "port" in instance;
             fill_default_fields(instance, registry.queryRegistry(svc_type));
-            assign_port(instance, svc_type, forward_instance_id, port_inventory, had_port);
+            assign_port(instance, svc_type, forward_instance_id, port_inventory);
+            const reader_fatal = validate_required_plan_fields(
+                instance,
+                registry.queryRegistry(svc_type),
+                ft.name,
+            );
+            if (reader_fatal) {
+                return { steps, warnings, fatal: reader_fatal };
+            }
 
             steps.push({
                 action: "add",
