@@ -44,6 +44,12 @@ step() { echo "[cleanup] $*"; }
 step "停止 $SERVICE"
 systemctl stop "$SERVICE" || true
 
+# Agent 经 Stop-Start 拉起的 MCP 服务进程不随 agent 退出，
+# 残留会破坏「首次启动」语义（startup 测试 / 复测环境），一并清理
+step "清理残留 MCP 服务进程"
+pkill -f '/usr/local/bin/c4_' 2>/dev/null || true
+sleep 1
+
 # ── 2. 读取 instance_id（共享内存名）────────────────────────
 INSTANCE_ID="c4_main"
 if [ -f "$AGENT_JSON" ]; then
