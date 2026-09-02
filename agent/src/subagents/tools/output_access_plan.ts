@@ -3,6 +3,8 @@
 
 import { tool } from "langchain";
 import { z } from "zod";
+import type { McpServiceRegistry } from "../../registry/registry.js";
+import { find_service_type, normalize_protocol } from "./output_plan_steps.js";
 
 // ── Schema ─────────────────────────────────────────────────
 
@@ -17,6 +19,7 @@ const devicePointSchema = z.object({
 
 const deviceSpecSchema = z.object({
     name: z.string().describe("设备名称"),
+    abbr: z.string().optional().describe("采集目标标识（候选，从 deviceInfo.abbr 原样复制，如 wt1；用于生成 instance.id 与记忆库一致）"),
     seq: z.number().describe("设备编号（从1开始）"),
     protocol: z.string().describe("通信协议，如 modbus_tcp, iec104"),
     connection: z.object({
@@ -28,11 +31,12 @@ const deviceSpecSchema = z.object({
 
 const forwardTargetSchema = z.object({
     name: z.string().describe("转发目标名称，如 中心侧数据库"),
+    abbr: z.string().optional().describe("转发目标标识（候选，从 deviceInfo.forward_targets 的 abbr 原样复制，如 center）"),
     protocol: z.string().describe("转发协议，如 asfp2, influxdb"),
     connection: z.object({
         ip: z.string().optional().describe("目标 IP（asfp2 等 TCP 协议用）"),
         port: z.number().optional().describe("目标端口（asfp2 等 TCP 协议用）"),
-        url: z.string().optional().describe("InfluxDB 写入端点 URL（influxdb 用，如 http://172.16.109.12:8086）"),
+        url: z.string().optional().describe("InfluxDB 写入端点 URL（influxdb 用，必须由用户提供）"),
         token: z.string().optional().describe("InfluxDB 认证 token（influxdb 用）"),
         org: z.string().optional().describe("InfluxDB 组织名（influxdb 用）"),
         bucket: z.string().optional().describe("InfluxDB bucket 名（influxdb 用）"),
@@ -90,38 +94,85 @@ function validate_access_plan(plan: Record<string, unknown>): { valid: boolean; 
 
 // ── 工具 ──────────────────────────────────────────────────
 
-export const outputAccessPlanTool = tool(
-    async (input: z.infer<typeof accessPlanArgSchema>) => {
-        const vr = validate_access_plan(input as unknown as Record<string, unknown>);
-
-        if (!vr.valid) {
-            return JSON.stringify({
-                success: false,
-                errors: vr.errors,
-                hint: "请根据 errors 修正后重试。site.abbr 仅允许 [a-zA-Z_]+。",
-            });
+// registry 必填项前置校验（agent.md「必填项用户提供原则」第一层防线）：
+// 实例字段无 default 键 = 必填，缺失/为空时在「生成方案」阶段即拦截，要求向用户逐项询问
+function validate_required_config(
+    registry: McpServiceRegistry,
+    role: "writer" | "reader",
+    items: Array<Record<string, unknown>>,
+    label: string,
+): string[] {
+    const errors: string[] = [];
+    for (const item of items) {
+        const svc = find_service_type(
+            registry,
+            normalize_protocol(String(item.protocol ?? "")),
+            role,
+        );
+        const entry = svc ? registry.queryRegistry(svc) : null;
+        const conn = (item.connection ?? {}) as Record<string, unknown>;
+        for (const [name, f] of Object.entries(entry?.config_schema.fields ?? {})) {
+            if (f.default !== undefined && f.default !== null) continue;
+            const v = conn[name] ?? item[name];
+            if (v === undefined || v === null || v === "") {
+                errors.push(
+                    `${label} "${item.name}" 缺少必填配置 "${name}"（${f.description ?? name}）。` +
+                    `请向用户询问后再调用本工具，禁止编造或使用默认值`,
+                );
+            }
         }
+    }
+    return errors;
+}
 
-        return JSON.stringify({
-            success: true,
-            site: input.site,
-            devices: input.devices,
-            forward_targets: input.forward_targets || [],
-            summary: {
-                device_count: input.devices.length,
-                total_points: input.devices.reduce((sum, d) => sum + d.points.length, 0),
-                has_forward: (input.forward_targets || []).length > 0,
-            },
-        });
-    },
-    {
-        name: "output_access_plan",
-        description:
-            "生成结构化接入方案 (AccessPlan)。" +
-            "在获得设备信息后，结合 service_catalog 选择匹配的服务类型，" +
-            "推断场站名称和缩写，组织设备清单和转发目标。" +
-            "site.abbr 用于生成 instance.id，如 hnals_wt1（hnals=场站缩写, wt1=采集目标标识）。" +
-            "调用时机：用户要求生成方案时。",
-        schema: accessPlanArgSchema,
-    },
-);
+export function createOutputAccessPlanTool(registry: McpServiceRegistry) {
+    return tool(
+        async (input: z.infer<typeof accessPlanArgSchema>) => {
+            const vr = validate_access_plan(input as unknown as Record<string, unknown>);
+            const requiredErrors = validate_required_config(
+                registry,
+                "writer",
+                input.devices as unknown as Array<Record<string, unknown>>,
+                "设备",
+            ).concat(
+                validate_required_config(
+                    registry,
+                    "reader",
+                    (input.forward_targets ?? []) as unknown as Array<Record<string, unknown>>,
+                    "转发目标",
+                ),
+            );
+            const errors = [...vr.errors, ...requiredErrors];
+
+            if (errors.length > 0) {
+                return JSON.stringify({
+                    success: false,
+                    errors,
+                    hint: "请根据 errors 逐项向用户询问补齐后重试。site.abbr 仅允许 [a-zA-Z_]+。",
+                });
+            }
+
+            return JSON.stringify({
+                success: true,
+                site: input.site,
+                devices: input.devices,
+                forward_targets: input.forward_targets || [],
+                summary: {
+                    device_count: input.devices.length,
+                    total_points: input.devices.reduce((sum, d) => sum + d.points.length, 0),
+                    has_forward: (input.forward_targets || []).length > 0,
+                },
+            });
+        },
+        {
+            name: "output_access_plan",
+            description:
+                "生成结构化接入方案 (AccessPlan)。" +
+                "在获得设备信息后，结合 service_catalog 选择匹配的服务类型，" +
+                "推断场站名称和缩写，组织设备清单和转发目标。" +
+                "site.abbr 用于生成 instance.id，如 hnals_wt1（hnals=场站缩写, wt1=采集目标标识）。" +
+                "调用时机：用户要求生成方案时。",
+            schema: accessPlanArgSchema,
+        },
+    );
+}

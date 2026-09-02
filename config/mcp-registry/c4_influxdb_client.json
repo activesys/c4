@@ -37,67 +37,52 @@
     "fields": {
       "url": {
         "type": "string",
-        "source": "plan",
-        "default": null,
-        "description": "InfluxDB 写入端点 URL（如 http://172.16.109.12:8086）"
+        "description": "InfluxDB 写入端点 URL（如 <用户提供的写入端点 URL>）"
       },
       "token": {
         "type": "string",
-        "source": "plan",
-        "default": null,
         "description": "认证 token（必填，空字符串视为缺失；1.x 未启用认证时填任意非空值）"
       },
       "org": {
         "type": "string",
-        "source": "plan",
-        "default": null,
         "description": "组织名（必填，空字符串视为缺失；1.x 时填任意非空值，被忽略）"
       },
       "bucket": {
         "type": "string",
-        "source": "plan",
-        "default": null,
         "description": "bucket 名（必填，空字符串视为缺失；1.x 时填数据库名）"
       },
       "precision": {
         "type": "string",
-        "source": "default",
         "default": "ms",
         "description": "时间戳精度：ns/us/ms/s（默认 ms）"
       },
       "batch_size": {
         "type": "integer",
-        "source": "default",
         "default": 5000,
         "description": "单次 flush 行数上限（0 或负数视为非法）"
       },
       "flush_interval": {
         "type": "integer",
-        "source": "default",
         "default": 1000,
         "description": "flush 间隔（毫秒，0 禁用时间触发）"
       },
       "timer": {
         "type": "integer",
-        "source": "default",
         "default": 100,
         "description": "共享内存轮询周期（毫秒）"
       },
       "gzip": {
         "type": "integer",
-        "source": "default",
         "default": 1,
         "description": "是否启用 gzip 压缩请求体（1=启用，0=关闭）"
       },
       "t0": {
         "type": "integer",
-        "source": "default",
         "default": 30,
         "description": "HTTP 请求超时（秒）"
       },
       "retries": {
         "type": "integer",
-        "source": "default",
         "default": 3,
         "description": "flush 失败最大重试次数（0 不重试）"
       }

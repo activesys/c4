@@ -241,9 +241,10 @@ sequenceDiagram
 
 若配置中多个实例指定了相同的 `port`，`start` 工具返回 `isError: true` 并携带错误码 `PORT_CONFLICT`。
 
-> **端口被占用（非配置冲突）**：单个实例的 `port` 被系统其他进程占用时，属于运行时事件——该实例的
-> goroutine 在 `net.Listen` 失败后记录日志并停止，**不导致 `start` 返回错误**，也不影响其余实例
-> （见 [c4_architecture.md §3.3.1](c4_architecture.md) 返回时机语义）。
+> **端口被占用（非配置冲突）**：单个实例的 `port` 被系统其他进程占用时，`start` 阶段同步执行
+> `net.Listen` 并**返回错误**（`PORT_BIND_FAILED`），Agent 将该实例计入 failed_services 上报用户；
+> 其余实例不受影响。实例启动后的运行期监听异常仅记录日志（见
+> [c4_architecture.md §3.3.1](c4_architecture.md) 返回时机语义）。
 
 ### 3.3 停止与重启 —— C4_FUN_00058
 

@@ -11,7 +11,9 @@ import type { McpServiceRegistry } from "../registry/registry.js";
 import type { C4McpManager } from "../mcp/client.js";
 import { xlsxParserTool, csvParserTool, txtParserTool } from "../subagents/tools/doc_parsers.js";
 import { createOutputPlanStepsTool } from "../subagents/tools/output_plan_steps.js";
-import { outputAccessPlanTool } from "../subagents/tools/output_access_plan.js";
+import { sanitize_identifier } from "../executor/executor.js";
+import { buildErrorTranslator, translateError } from "../mcp/tools.js";
+import { createOutputAccessPlanTool } from "../subagents/tools/output_access_plan.js";
 import { createOutputDeviceInfoTool } from "../subagents/tools/output_device_info.js";
 import { createQueryRegistryTool } from "../subagents/tools/query_registry.js";
 import { createQueryAbbrRegistryTool } from "../subagents/tools/query_abbr_registry.js";
@@ -101,8 +103,8 @@ export async function createSuperWorker(
         csvParserTool,
         txtParserTool,
         createOutputDeviceInfoTool(registry),
-        outputAccessPlanTool,
-        createOutputPlanStepsTool(registry, config.site, config.configPath),
+        createOutputAccessPlanTool(registry),
+        createOutputPlanStepsTool(registry, config.site),
         createQueryRegistryTool(registry),
         createQueryAbbrRegistryTool({
             configPath: config.configPath,
@@ -214,6 +216,33 @@ function persist_site_to_agent_config(
 
 // ── C4Agent 包装（streamEvents v3）────────────────────────
 
+// output_access_plan 输出（connection 嵌套）→ output_plan_steps 输入（字段平铺）
+function access_plan_to_steps_input(r: Record<string, unknown>): Record<string, unknown> {
+    const out: Record<string, unknown> = {};
+    if (r.site && typeof r.site === "object") {
+        out.site = r.site;
+    }
+    if (Array.isArray(r.devices)) {
+        out.devices = (r.devices as Record<string, unknown>[]).map((d) => ({
+            name: d.name,
+            abbr: d.abbr ?? sanitize_identifier(String(d.name ?? "")),
+            protocol: d.protocol,
+            ...(typeof d.connection === "object" && d.connection !== null ? d.connection : {}),
+            points: Array.isArray(d.points) ? d.points : [],
+        }));
+    }
+    if (Array.isArray(r.forward_targets)) {
+        out.forward_targets = (r.forward_targets as Record<string, unknown>[]).map((t) => ({
+            name: t.name,
+            abbr: t.abbr ?? sanitize_identifier(String(t.name ?? "")),
+            protocol: t.protocol,
+            ...(typeof t.connection === "object" && t.connection !== null ? t.connection : {}),
+            ...(Array.isArray(t.points) && t.points.length > 0 ? { points: t.points } : {}),
+        }));
+    }
+    return out;
+}
+
 export async function createC4Agent(
     config: SuperWorkerConfig,
 ): Promise<C4Agent> {
@@ -244,10 +273,11 @@ export async function createC4Agent(
                     log?.user_input(conversation, last.role, String(last.content));
                     const lastContent = last.content as string;
                     // 确定性捕获用户显式指定的接收端口（如「接收端口使用7867」），
-                    // 供确认轮注入——LLM 从提示词默认值回退的教训见 func_test_case 用例 5
+                    // 供确认轮注入——LLM 从提示词默认值回退的教训见 func_test_case 用例 5。
+                    // 必须带「接收/监听」前缀：裸「端口」会误捕转发端口（如「转发目标端口9999」）
                     if (last.role === "user") {
                         const portMatch = lastContent.match(
-                            /(?:接收|监听)?端口[^0-9]{0,6}([0-9]{4,5})/,
+                            /(?:接收|监听)端口[^0-9]{0,6}([0-9]{4,5})/,
                         );
                         if (portMatch) {
                             userPort = portMatch[1];
@@ -427,36 +457,34 @@ export async function createC4Agent(
                 }
 
                 if (isConfirm) {
-                    let data: any = planAccessPlan || planDeviceInfo;
-                    const pdi_devices = (planDeviceInfo as Record<string, unknown> | null)?.devices as unknown[] | undefined;
-                    if ((!data?.devices || (data.devices as unknown[]).length === 0) && pdi_devices && pdi_devices.length > 0) {
-                        data = { ...(data ?? {}), devices: pdi_devices };
+                    // planDeviceInfo（output_device_info 输出）即 plan_steps 输入形状，优先；
+                    // planAccessPlan（output_access_plan 输出）为 connection 嵌套形状，需适配展开
+                    const pdi = planDeviceInfo as Record<string, unknown> | null;
+                    const pdi_devices = pdi?.devices as unknown[] | undefined;
+                    const adapted =
+                        planAccessPlan && !(pdi_devices && pdi_devices.length > 0)
+                            ? access_plan_to_steps_input(planAccessPlan)
+                            : null;
+                    let data: any = pdi_devices && pdi_devices.length > 0 ? pdi : adapted;
+                    // N1 修复：forward_targets 双源合并——output_device_info 只回显 devices，
+                    // 若确认轮数据缺失转发目标，会导致重生成静默丢弃用户要求的转发。
+                    // ① pdi 的 forward_targets 优先（含 info-gatherer 固化的 abbr 候选）；
+                    // ② 其次 accessPlan 适配出的（已过方案层 registry 必填校验）
+                    if (data && (!Array.isArray(data.forward_targets) || data.forward_targets.length === 0)) {
+                        const pdi_ft = (pdi as Record<string, unknown> | null)?.forward_targets as
+                            | unknown[]
+                            | undefined;
+                        const adapted_ft = adapted?.forward_targets as unknown[] | undefined;
+                        const ft = pdi_ft && pdi_ft.length > 0 ? pdi_ft : adapted_ft;
+                        if (ft && ft.length > 0) {
+                            data = { ...data, forward_targets: ft };
+                        }
                     }
                     if (!data?.devices && confirmOriginalContent) {
                         const jsonMatch = confirmOriginalContent.match(/\{[\s\S]*"devices"[\s\S]*\}/);
                         if (jsonMatch) {
                             try { data = JSON.parse(jsonMatch[0]); } catch { /* ignore */ }
                         }
-                    }
-                    // 转发兜底：历史消息含「转发」但方案缺失 forward_targets 时补中心侧，保证 writer/reader 成对
-                    const historyText = input.messages
-                        .map((m) => (typeof m.content === "string" ? m.content : ""))
-                        .join("\n");
-                    if (
-                        data?.devices &&
-                        Array.isArray(data.devices) &&
-                        data.devices.length > 0 &&
-                        (!data.forward_targets ||
-                            !Array.isArray(data.forward_targets) ||
-                            data.forward_targets.length === 0) &&
-                        /转发/.test(historyText)
-                    ) {
-                        data = {
-                            ...(data ?? {}),
-                            forward_targets: [
-                                { name: "中心侧", abbr: "center", protocol: "asfp2", ip: "172.16.109.11", port: 9999 },
-                            ],
-                        };
                     }
                     if (data?.devices) {
                         try {
@@ -540,9 +568,17 @@ export async function createC4Agent(
                                     .map((f) => `${f.service_type}: ${f.error}`)
                                     .join("; ");
                                 log?.error(conversation, `部分服务启动失败: ${details}`);
+                                const translator = buildErrorTranslator(config.registry);
+                                const reasons = ssr.failed_services
+                                    .map((f) => `${f.service_type}: ${translateError(f.error ?? "", translator)}`)
+                                    .join("；");
+                                const portHint =
+                                    /PORT_BIND_FAILED|PORT_CONFLICT/.test(details)
+                                        ? "如需更换端口，请删除该设备后重新接入并指定新的端口。"
+                                        : "";
                                 yield {
                                     type: "error" as const,
-                                    message: `部分服务启动失败: ${names}`,
+                                    message: `部分服务启动失败: ${names}（${reasons}）${portHint}`,
                                 };
                             }
                             config.state?.setPhase("idle");

@@ -136,7 +136,7 @@ function empty_config(): SystemConfig {
  *
  * @param steps    本次接入的增量操作步骤
  * @param config_path 配置文件路径（如 /etc/c4/config.json）
- * @param registry Registry 查询接口（用于填充 source=default 字段和角色查询）
+ * @param registry Registry 查询接口（用于填充技术默认值字段和角色查询）
  */
 export async function merge_config_from_steps(
     steps: ServiceStep[],
@@ -413,14 +413,14 @@ async function handle_add(
         inst_raw["ip"] = inst_raw["host"];
     }
 
-    // 填充 Registry default 字段（source=default）
+    // 填充 Registry 技术默认值字段（声明了 default 的项）
     if (registry) {
         const entry = registry.get_entry(step.service_type);
         if (entry && entry.config_schema) {
             for (const [field_name, field_def] of Object.entries(
                 entry.config_schema.fields,
             )) {
-                if (field_def.source === "default") {
+                if (field_def.default !== undefined && field_def.default !== null) {
                     // 只在 step 未提供该字段时才填充默认值
                     if (!(field_name in new_instance)) {
                         (new_instance as Record<string, unknown>)[field_name] =
@@ -464,9 +464,16 @@ function handle_modify(
         );
     }
 
+    // 字段名归一化: LLM 可能产出 host 而非 ip（与 add 路径一致）
+    const inst_raw = step.instance as Record<string, unknown>;
+    if (inst_raw["host"] && !inst_raw["ip"]) {
+        inst_raw["ip"] = inst_raw["host"];
+    }
+
     // 浅合并 instance 字段（除 id, name, points 外）
     // 例外：port 不参与覆盖——已接入实例的端口保持原值（监听端口的必填约束，agent.md §3.3）
     for (const [key, value] of Object.entries(step.instance)) {
+        if (key === "host") continue; // 归一化后 host 不入配置
         if (key !== "id" && key !== "name" && key !== "points" && key !== "port") {
             (target as Record<string, unknown>)[key] = value;
         }

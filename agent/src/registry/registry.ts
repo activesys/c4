@@ -12,17 +12,17 @@ import type {
 
 // ── L1 摘要扩展类型（agent.md §3.3.0）──
 // RegistryL1Summary 只含基础字段（service_type/display_name/role/protocols），
-// 此处扩展 point_schema 与 config_schema 的 source=plan 字段摘要。
+// 此处扩展 point_schema 与 config_schema 字段摘要。
 
-/** config_schema 中 source=plan 字段的 L1 摘要（供 info-gatherer 判断必填/可选）。 */
+/** config_schema 字段的 L1 摘要（供 info-gatherer 判断必填/可选）。 */
 export interface L1PlanFieldSummary {
     name: string;
     type: string;
-    /** default === null → 必填；有默认值 → 可选 */
+    /** 无 default 键（或 null）→ 必填；有默认值 → 可选 */
     required: boolean;
-    /** 默认值（required 时为 null） */
+    /** 默认值（必填时为 undefined） */
     default: unknown;
-    description: string;
+    description?: string;
 }
 
 /** L1 摘要中的 point_schema（fields + Writer 身份字段）。 */
@@ -31,7 +31,7 @@ export interface L1PointSchema {
     identity_fields?: string[];
 }
 
-/** 完整 L1 服务摘要 = 基础摘要 + point_schema + source=plan 字段摘要 + 服务使用提示。 */
+/** 完整 L1 服务摘要 = 基础摘要 + point_schema + config_schema 字段摘要 + 服务使用提示。 */
 export interface ServiceCatalogEntry extends RegistryL1Summary {
     point_schema: L1PointSchema;
     plan_fields: L1PlanFieldSummary[];
@@ -198,8 +198,8 @@ export class McpServiceRegistry {
   // ── 内部方法 ──
 
   /**
-    * 构建 L1 摘要列表（含 point_schema 与 config_schema source=plan 字段摘要；
-    * 不含 config_schema 全量、binary_path、error_mappings）。
+    * 构建 L1 摘要列表（含 point_schema 与 config_schema 字段摘要；
+    * 不含 binary_path、error_mappings）。
     */
   private _buildL1Summaries(): ServiceCatalogEntry[] {
     return this._entries.map((entry) => ({
@@ -225,11 +225,10 @@ export class McpServiceRegistry {
           : undefined,
       },
       plan_fields: Object.entries(entry.config_schema.fields)
-        .filter(([, field]) => field.source === "plan")
         .map(([name, field]) => ({
           name,
           type: field.type,
-          required: field.default === null,
+          required: field.default === undefined || field.default === null,
           default: field.default,
           description: field.description,
         })),
@@ -295,7 +294,7 @@ export function formatServiceCatalog(summaries: ServiceCatalogEntry[]): string {
     if (s.point_schema.fields.length > 0) {
       lines.push("  点表字段:");
       for (const f of s.point_schema.fields) {
-        lines.push(`    ${f.name} (${f.type}) — ${f.description}`);
+        lines.push(f.description ? `    ${f.name} (${f.type}) — ${f.description}` : `    ${f.name} (${f.type})`);
       }
     }
 
@@ -306,12 +305,12 @@ export function formatServiceCatalog(summaries: ServiceCatalogEntry[]): string {
     }
 
     if (s.plan_fields.length > 0) {
-      lines.push("  实例字段 (source=plan):");
+      lines.push("  实例字段:");
       for (const f of s.plan_fields) {
         const req = f.required
-          ? "必填"
+          ? "必填（必须由用户提供）"
           : `可选，默认 ${String(f.default)}`;
-        lines.push(`    ${f.name} (${f.type}, ${req}) — ${f.description}`);
+        lines.push(f.description ? `    ${f.name} (${f.type}, ${req}) — ${f.description}` : `    ${f.name} (${f.type}, ${req})`);
       }
     }
 

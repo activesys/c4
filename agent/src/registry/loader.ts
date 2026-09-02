@@ -8,9 +8,9 @@ import { z } from "zod";
 // ── RegistryFieldSchema：config_schema 中每个字段的定义 ──
 const RegistryFieldSchema = z.object({
   type: z.string(),
-  source: z.enum(["plan", "default"]),
+  // 无 default 键（或 null）= 必填项，必须由用户提供；有 default 键 = 技术默认值，自动填充
   default: z.unknown().nullable().optional(),
-  description: z.string(),
+  description: z.string().optional(),
 });
 
 // ── RegistrySelectionRuleSchema ──
@@ -31,7 +31,6 @@ const RegistryConfigSchemaFieldMap = z.record(z.string(), RegistryFieldSchema);
 
 // ── RegistryConfigSchemaSchema ──
 const RegistryConfigSchemaSchema = z.object({
-  required: z.array(z.string()).optional(),
   fields: RegistryConfigSchemaFieldMap,
 });
 
@@ -39,7 +38,7 @@ const RegistryConfigSchemaSchema = z.object({
 const PointFieldSchema = z.object({
   name: z.string(),
   type: z.string(),
-  description: z.string(),
+  description: z.string().optional(),
 });
 
 // ── PointSchemaSchema：point_schema（agent.md §3.3）──

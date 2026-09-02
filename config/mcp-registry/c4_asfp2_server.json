@@ -27,17 +27,14 @@
     ]
   },
   "config_schema": {
-    "required": ["port"],
     "fields": {
       "ip": {
         "type": "string",
-        "source": "default",
         "default": "0.0.0.0",
         "description": "绑定 IP（默认所有网卡）"
       },
       "port": {
         "type": "integer",
-        "source": "plan",
         "description": "数据接收监听端口，必填：必须由用户显式指定；用户未提供时必须先询问，禁止自动选择或使用默认值"
       }
     }

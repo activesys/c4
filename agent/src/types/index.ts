@@ -33,7 +33,7 @@ export interface ServiceStep {
 
 // ── AccessPlan ───────────────────────────────────────────
 // 实例 plan 字段直接平铺在 device/forward_target 上（不做语义分类），
-// 由 registry 的 config_schema.source=plan 声明；点业务字段由 point_schema.fields 声明
+// 由 registry 的 config_schema.fields 声明（无 default 键 = 必填）；点业务字段由 point_schema.fields 声明
 
 export interface DevicePoint {
     name: string;                 // 点名称（对应 point.id；空字符串视为无点名，由身份字段生成）
@@ -87,7 +87,7 @@ export interface RegistryProtocol {
 export interface PointField {
     name: string;         // 字段名（如 addr/uid/fun/type/swap）
     type: string;         // 字段类型（如 "integer" / "string"）
-    description: string;  // 字段描述
+    description?: string; // 字段描述（可缺省，L1 渲染时条件化）
 }
 
 /** 点表 schema（agent.md §3.3）：fields = 业务字段声明；identity_fields = 身份字段（Writer 必填，Reader 不填） */
@@ -103,12 +103,10 @@ export interface RegistryEntry {
     protocols: RegistryProtocol[];
     point_schema: PointSchema;    // 点表 schema（fields + identity_fields）
     config_schema: {
-        required?: string[];          // 必填实例配置字段（如 port）；缺失时 Agent 必须询问用户
         fields: Record<string, {
             type: string;
-            source: "plan" | "default";
-            default?: unknown;
-            description: string;
+            default?: unknown;        // 缺省/null = 必填（用户必须提供）；有值 = 技术默认值，自动填充
+            description?: string;
         }>;
     };
     binary_path: string;

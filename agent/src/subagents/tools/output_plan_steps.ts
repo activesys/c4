@@ -4,7 +4,6 @@
 
 import { tool } from "langchain";
 import { z } from "zod";
-import { readFileSync } from "node:fs";
 import type { McpServiceRegistry } from "../../registry/registry.js";
 import {
     IDENTIFIER_RE,
@@ -34,7 +33,7 @@ const deviceInputSchema = z.object({
     name: z.string().describe("设备名称"),
     abbr: z.string().describe("采集目标标识（候选，info-gatherer 提取）"),
     protocol: z.string().describe("通信协议，如 modbus"),
-    points: z.array(devicePointInputSchema).describe("数据点列表"),
+    points: z.array(devicePointInputSchema).min(1).describe("数据点列表（至少一个点）"),
 }).passthrough();
 
 const forwardTargetInputSchema = z.object({
@@ -100,9 +99,11 @@ function pointFieldsToZod(pointFields: PointField[]) {
 function configFieldsToZod(configSchema: RegistryEntry["config_schema"]) {
     const shape: Record<string, z.ZodTypeAny> = {};
     for (const [name, f] of Object.entries(configSchema.fields)) {
-        if (f.source !== "plan") continue;
-        const t = typeToZod(f.type);
-        shape[name] = f.default === null ? t : t.optional();
+        const required = f.default === undefined || f.default === null;
+        // 必填 integer（如 port）须为正数——0 会被 OS 解释为随机端口，静默错行为
+        const t =
+            required && f.type === "integer" ? z.number().int().positive() : typeToZod(f.type);
+        shape[name] = required ? t : t.optional();
     }
     return z.object(shape).strict();
 }
@@ -112,10 +113,14 @@ function pickPlanFields(
     configSchema: RegistryEntry["config_schema"],
 ): Record<string, unknown> {
     const out: Record<string, unknown> = {};
-    for (const [name, f] of Object.entries(configSchema.fields)) {
-        if (f.source === "plan" && name in obj) {
-            out[name] = obj[name];
+    for (const [name, _f] of Object.entries(configSchema.fields)) {
+        const v = obj[name];
+        // 丢弃 undefined/null/空串（与 flatten_plan_fields 同语义），
+        // 防止 "ip": "" 经 z.string() 通过后又被 flatten 丢弃、绕过必填校验
+        if (v === undefined || v === null || v === "") {
+            continue;
         }
+        out[name] = v;
     }
     return out;
 }
@@ -163,120 +168,27 @@ function fill_default_fields(
     if (!entry?.config_schema) return;
     for (const [field_name, field_def] of Object.entries(entry.config_schema.fields)) {
         if (!(field_name in instance)) {
-            if (field_def.source === "default") {
+            if (field_def.default !== undefined && field_def.default !== null) {
                 instance[field_name] = field_def.default;
             }
-            // source=plan 字段不填默认值：端口类字段为必填项，缺失由
-            // validate_required_plan_fields 拦截并要求询问用户
+            // 无 default 键 = 必填项（用户提供原则），不参与填充；
+            // 缺失由 validate_runtime_input 的 Zod 强校验拦截（configFieldsToZod）
         }
     }
 }
 
-/** 校验实例必填 plan 字段（config_schema.required，如 asfp2 监听端口 port）。
- * 缺失 → 返回 fatal（要求向用户询问），禁止使用默认值或自动选择。
- */
-function validate_required_plan_fields(
-    instance: Record<string, unknown>,
-    entry: RegistryEntry | null,
-    label: string,
-): string | null {
-    for (const f of entry?.config_schema.required ?? []) {
-        const v = instance[f];
-        if (v === undefined || v === null || v === "") {
-            const desc = entry?.config_schema.fields[f]?.description ?? f;
-            return `实例 "${label}" 缺少必填配置 "${f}"——${desc}。请向用户询问后再调用本工具，禁止编造或使用默认值`;
-        }
-    }
-    return null;
-}
-
-// ── 端口确定性分配（agent.md「监听端口的必填约束」+ c4_asfp2_server.md §2.2）──
-//   端口为必填项（registry config_schema.required 声明），必须由用户显式指定：
-//   已接入实例（同服务同 instance.id 已存在于 config.json）→ 端口保持原值（加点/修改不改端口）
-//   用户显式指定端口 → 原样保留，被占用时由 Start 阶段报错上报
-//   缺失 → validate_required_plan_fields 拦截（fatal，要求询问用户），不再自动选择空闲端口
-
-type PortInventory = {
-    byService: Map<string, Set<number>>;
-    byInstance: Map<string, number>;
-    osListen: Set<number>;
-};
-
-function os_listen_ports(): Set<number> {
-    const ports = new Set<number>();
-    for (const file of ["/proc/net/tcp", "/proc/net/tcp6"]) {
-        let content: string;
-        try {
-            content = readFileSync(file, "utf-8");
-        } catch {
-            continue;
-        }
-        for (const line of content.split("\n").slice(1)) {
-            const cols = line.trim().split(/\s+/);
-            if (cols.length < 4 || cols[3] !== "0A") continue;
-            const port_hex = cols[1].split(":")[1];
-            if (port_hex) {
-                const p = parseInt(port_hex, 16);
-                if (Number.isFinite(p)) ports.add(p);
-            }
-        }
-    }
-    return ports;
-}
-
-function read_port_inventory(config_path: string | undefined): PortInventory {
-    const inv: PortInventory = {
-        byService: new Map(),
-        byInstance: new Map(),
-        osListen: os_listen_ports(),
-    };
-    if (!config_path) return inv;
-    let cfg: Record<string, unknown>;
-    try {
-        cfg = JSON.parse(readFileSync(config_path, "utf-8")) as Record<string, unknown>;
-    } catch {
-        return inv;
-    }
-    for (const [svc, instances] of Object.entries(cfg)) {
-        if (!Array.isArray(instances)) continue;
-        const ports = inv.byService.get(svc) ?? new Set<number>();
-        for (const inst of instances) {
-            const rec = inst as Record<string, unknown>;
-            const p = rec?.["port"];
-            if (typeof p !== "number") continue;
-            ports.add(p);
-            const id = rec?.["id"];
-            if (typeof id === "string" && id.length > 0) {
-                inv.byInstance.set(`${svc}/${id}`, p);
-            }
-        }
-        inv.byService.set(svc, ports);
-    }
-    return inv;
-}
-
-/**
- * 为实例确定端口：已接入实例保持原值；用户显式指定的端口原样保留。
- * 端口为必填项，不再自动顺延选择空闲端口；缺失由 validate_required_plan_fields 拦截。
- */
-function assign_port(
-    instance: Record<string, unknown>,
-    svc_type: string,
-    instance_id: string,
-    inv: PortInventory,
-): void {
-    const existing = inv.byInstance.get(`${svc_type}/${instance_id}`);
-    if (existing !== undefined) {
-        // 已接入实例：端口保持原值（加点/修改不迁移端口）
-        instance["port"] = existing;
-    }
-}
+// ── 端口保障（agent.md「监听端口的必填约束」+ c4_asfp2_server.md §2.2）──
+//   端口为必填项（registry 声明：字段无 default 键），必须由用户显式指定，缺失由
+//   validate_runtime_input 的 Zod 强校验拦截（fatal，要求询问用户），不自动选择空闲端口。
+//   「已接入实例端口保持原值」的真实保障点在执行模块：
+//     · handle_add 对已存在 instance.id 早退合并（仅合并 points，不触碰实例字段）
+//     · handle_modify 显式排除 port 覆盖
+//   （原 assign_port/端口清点逻辑为恒 no-op 死代码，已删除）
 
 function generate_steps(
     input: z.infer<typeof planStepsInputSchema>,
     registry: McpServiceRegistry,
     fallback_site_abbr: string,
-    port_inventory: PortInventory,
 ): { steps: ServiceStep[]; warnings: string[]; fatal: string | null } {
     const steps: ServiceStep[] = [];
     const warnings: string[] = [];
@@ -369,15 +281,6 @@ function generate_steps(
         );
 
         fill_default_fields(instance, registry.queryRegistry(svc_type));
-        assign_port(instance, svc_type, instance_id, port_inventory);
-        const writer_fatal = validate_required_plan_fields(
-            instance,
-            registry.queryRegistry(svc_type),
-            dev.name,
-        );
-        if (writer_fatal) {
-            return { steps, warnings, fatal: writer_fatal };
-        }
 
         steps.push({
             action: "add",
@@ -474,15 +377,6 @@ function generate_steps(
             );
 
             fill_default_fields(instance, registry.queryRegistry(svc_type));
-            assign_port(instance, svc_type, forward_instance_id, port_inventory);
-            const reader_fatal = validate_required_plan_fields(
-                instance,
-                registry.queryRegistry(svc_type),
-                ft.name,
-            );
-            if (reader_fatal) {
-                return { steps, warnings, fatal: reader_fatal };
-            }
 
             steps.push({
                 action: "add",
@@ -573,7 +467,6 @@ function validate_runtime_input(
 export function createOutputPlanStepsTool(
     registry: McpServiceRegistry,
     site?: { name: string; abbr: string } | null,
-    config_path?: string,
 ) {
     const fallback_site_abbr = site?.abbr ?? "";
     return tool(
@@ -629,7 +522,6 @@ export function createOutputPlanStepsTool(
                 input,
                 registry,
                 fallback_site_abbr,
-                read_port_inventory(config_path),
             );
 
             if (fatal) {

@@ -49,14 +49,6 @@ export function createOutputDeviceInfoTool(registry: McpServiceRegistry) {
                         .map((f) => f.name);
                     if (lacking.length > 0) {
                         missing_points.push(i + 1);
-                        if (missing_points.length === 1) {
-                            return JSON.stringify({
-                                success: false,
-                                error:
-                                    `设备 "${dev.name}" 的第 1 个点缺少字段 ${lacking.map((f) => `"${f}"`).join("、")}` +
-                                    `（来自用户点表的业务字段）。请从用户消息或点表逐点补齐后重新调用，禁止编造`,
-                            });
-                        }
                     }
                 }
                 if (missing_points.length > 0) {
@@ -70,7 +62,11 @@ export function createOutputDeviceInfoTool(registry: McpServiceRegistry) {
                 }
             }
 
-            return JSON.stringify({ success: true, devices: input.devices });
+            return JSON.stringify({
+                success: true,
+                devices: input.devices,
+                forward_targets: (input as Record<string, unknown>).forward_targets ?? [],
+            });
         },
         {
             name: "output_device_info",

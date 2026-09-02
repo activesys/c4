@@ -27,73 +27,59 @@
     "fields": {
       "ip": {
         "type": "string",
-        "source": "plan",
-        "default": null,
         "description": "目标服务器 IP"
       },
       "port": {
         "type": "integer",
-        "source": "plan",
-        "default": null,
         "description": "目标服务器端口"
       },
       "t0": {
         "type": "integer",
-        "source": "default",
         "default": 30,
         "description": "连接超时（秒）"
       },
       "t1": {
         "type": "integer",
-        "source": "default",
         "default": 0,
         "description": "心跳发送间隔（秒）"
       },
       "t2": {
         "type": "integer",
-        "source": "default",
         "default": 0,
         "description": "心跳应答超时（秒）"
       },
       "timer": {
         "type": "integer",
-        "source": "default",
         "default": 100,
         "description": "转发周期（毫秒）"
       },
       "key_sequence": {
         "type": "integer",
-        "source": "default",
         "default": 1,
         "description": "key 是否连续（1=连续）"
       },
       "same_data_type": {
         "type": "integer",
-        "source": "default",
         "default": 1,
         "description": "同类型压缩（1=开启）"
       },
       "same_timestamp": {
         "type": "integer",
-        "source": "default",
         "default": 1,
         "description": "同时刻压缩（1=开启）"
       },
       "smart": {
         "type": "integer",
-        "source": "default",
         "default": 1,
         "description": "时间戳毫秒归零（1=归零）"
       },
       "forward_kack": {
         "type": "integer",
-        "source": "default",
         "default": 255,
         "description": "正向 KeepAlive Ack 值"
       },
       "inverse_keep": {
         "type": "integer",
-        "source": "default",
         "default": 0,
         "description": "反向 KeepAlive 值"
       }

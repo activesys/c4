@@ -41,7 +41,7 @@ Agent 系统覆盖数据接入流程中 Agent 侧的全部职能：
 | C4_FUN_00001 | 理解自然语言 | SuperWorker 系统提示 + 对话能力 | §3.1 | ❌（LLM 推理） |
 | C4_FUN_00002 | 收集结构化文档接入信息 | csv_parser / xlsx_parser 工具 + `responseFormat` | §3.2 | ❌（LLM 推理） |
 | C4_FUN_00003 | 收集非结构化文档接入信息 | txt_parser 工具 + `responseFormat` | §3.2 | ❌（LLM 推理） |
-| C4_FUN_00004 | 生成接入方案 | LLM 推理 + 自然语言输出（待添加 `output_access_plan` 工具） | §3.2 | ❌（LLM 推理） |
+| C4_FUN_00004 | 生成接入方案 | `output_access_plan` 工具（registry 必填项前置校验）+ LLM 自然语言摘要 | §3.2 | ❌（LLM 推理） |
 | C4_FUN_00044 | 分解为可执行配置 | `output_plan_steps` 工具 + Zod 校验 | §3.2.1 | ❌（LLM 推理） |
 | C4_FUN_00005 | 非技术语言交互 | SuperWorker 系统提示硬约束 | §3.1 | ❌（LLM 行为） |
 | C4_FUN_00006 | MCP 生命周期管理 | 执行模块：Stop-Start 协议 + 启动恢复 | §3.2, §3.2.3 | ✅ mergeConfigFromSteps |
@@ -213,7 +213,7 @@ SuperWorker (createAgent)
 │ LLM 分析 raw data + 对话上下文                         │
 │ responseFormat 强制产出结构化 deviceInfo:             │
 │   { devices: [{ name:"1#风机", protocol:"modbus",     │
-│                 ip:"...", port:502, points:[...] }]} │
+│                 connection:{ip,port}, points:[...] }]}│
 │                                                       │
 │ → deviceInfo 被 C4Agent wrapper 捕获                  │
 │ → SSE 输出自然语言摘要:"解析完成，设备名：1#风机..."  │
@@ -338,7 +338,7 @@ const agent = createAgent({
 `point_schema.fields`）理解列含义、推断协议、映射点字段，由 `responseFormat: deviceInfoSchema` 产出结构化设备信息。
 
 `deviceInfoSchema` 是 info-gatherer 的输出骨架。info-gatherer **负责收集齐必要信息**——协议（推断或询问）、采集目标标识 abbr（候选，从描述提取）、
-实例参数（`source=plan` 的字段：`default=null` 必填，有 `default` 提示默认值）、点表字段（`point_schema.fields`），缺失时逐个询问用户补齐（见下"信息收集与询问机制"）：
+实例参数（`config_schema.fields` 中无 `default` 键的项为必填；有 `default` 的项是技术默认值，自动填充不询问）、点表字段（`point_schema.fields`），缺失时逐个询问用户补齐（见下"信息收集与询问机制"）：
 
 ```typescript
 const deviceInfoSchema = z.object({
@@ -350,7 +350,7 @@ const deviceInfoSchema = z.object({
             name: z.string(),
         }).passthrough()),
         missing_fields: z.array(z.string()).optional(),
-    }).passthrough()),               // 实例 plan 字段（ip/port、url/token 等）直接平铺，由 config_schema.source=plan 声明
+    }).passthrough()),               // 实例字段（ip/port、url/token 等）直接平铺，由 config_schema.fields 声明（无 default 键 = 必填）
     forward_targets: z.array(z.object({
         name: z.string(),            // 转发目标名称
         abbr: z.string(),            // 转发目标标识（候选，info-gatherer 从描述提取，见 §3.2.1.3a）
@@ -362,7 +362,7 @@ const deviceInfoSchema = z.object({
 
 > 骨架仅保留 `name`/`protocol`/`points` 三要素，其余字段（实例 plan 字段、协议特有点字段）
 > 一律 `.passthrough()` 放行。info-gatherer 按 registry 的 `point_schema.fields`/`config_schema` 收集齐必要字段
-> （`source=plan` 的实例字段：`default=null` 必填、有 `default` 提示默认值；+ `point_schema.fields` 的全部点字段），缺失时询问用户补齐。
+> （实例字段中无 `default` 键的必填项 + `point_schema.fields` 的全部点字段），缺失时询问用户补齐。
 
 **协议推断（`protocol` 字段，归属 info-gatherer）**：协议是业务信息，由 LLM 分层推断，**不硬编码任何协议**。
 推断**由 info-gatherer 完成**——它用 `service_catalog`（含各服务的 `point_schema.fields`）理解点表列 + 推断协议，分三层：
@@ -387,39 +387,39 @@ info-gatherer 收集两类必要信息，都由 registry 声明：
 
 | 类别 | 来源 | 判定「必需」的依据 |
 |------|------|----------------|
-| **实例参数** | `config_schema.fields` 中 `source=plan` 的字段（除 `id`/`name`） | `source=plan` 且 `default=null` |
+| **实例参数** | `config_schema.fields` 中无 `default` 键的字段（除 `id`/`name`） | 字段无 `default` 键 = 必填，必须由用户提供 |
 | **点表字段** | `point_schema.fields`（含 name/type/description，全部必须） | 全部字段 |
 
-> `source=default` 的字段（如 `timer`）不收集，直接填默认值；`source=plan` 且有 `default` 的字段（如
-> `port=502`）询问时提示默认值、允许留空跳过；`id`/`name` 由 agent 生成。
-> 上述两类必要信息**对采集设备（Writer）和转发目标（Reader）都适用**——两者都有实例参数（`config_schema.source=plan`）和点表字段（`point_schema.fields`），info-gatherer 分别收集齐全。
+> 有 `default` 的字段（如 `timer`）不收集，直接填默认值；`id`/`name` 由 agent 生成。
+> 上述两类必要信息**对采集设备（Writer）和转发目标（Reader）都适用**——两者都有实例参数（`config_schema.fields`）和点表字段（`point_schema.fields`），info-gatherer 分别收集齐全。
 
 **收集流程（循环直到收集齐）**：解析文档 → 推断协议（失败则询问用户协议后重新理解列）→
 **确定性完整性校验** → 缺失则**逐个询问**（一次一项）→ 用户提供 → 再校验 → 循环。
 
-**确定性完整性校验**（info-gatherer 收尾时，SuperWorker 用确定性代码执行）：
-- info-gatherer 产出 deviceInfo 后、传给 plan-generator 前，SuperWorker 对照 registry 的
-  `point_schema.fields`（全部字段）+ `source=plan` 且 `default=null` 的实例字段检查是否齐全
+**确定性完整性校验**（分层执行）：
+- **点表字段**：info-gatherer 产出 deviceInfo 后、传给 plan-generator 前，`output_device_info`
+  以 registry 的 `point_schema.fields` 做确定性校验，缺失即拦截
+- **实例字段**：`output_access_plan` 以 registry（无 `default` 键的项）做前置校验（方案阶段拦截）；
+  `output_plan_steps` 的 `validate_runtime_input` Zod 强校验为执行层最终兜底
 - **点名与点一一对应**：每个点（由 `point_schema.identity_fields` 唯一标识）有且仅有一个点名（`point.name`，即
   后续的 `point.id`）。确定性校验每点有且仅有一个点名（存在性：无缺失/无多出）与「点唯一」（identity_fields 组合
   不重复）；点重复报告用户（§3.2.1.3b：提供新点表则重新进入解析/校验循环，已收集的实例参数不重问）；错位（off-by-one）无法纯确定性判断，交由方案确认逐条展示「地址 ↔ 点名」映射供用户
   核对（§3.2.1.3b）
-- **缺失 vs 类型错误的判定分离**：本步只做「键存在性检查」——逐键判断 `point_schema.fields` 全部字段与
-  `source=plan` 且 `default=null` 的实例字段是否**都有值**（键存在且非空），**不涉及类型合法性**；类型校验交给
+- **缺失 vs 类型错误的判定分离**：各层只做「键存在性检查」——逐键判断 `point_schema.fields` 全部字段与
+  无 `default` 键的实例字段是否**都有值**（键存在且非空），**不涉及类型合法性**；类型校验交给
   step-decomposer 的运行时强校验（§3.2 双层校验 ②）做三态判定
 - 缺失（键不存在或值为空）→ 返回缺失清单 → info-gatherer 逐个询问用户补齐 → 再校验 → 循环，
   齐全才放行给 plan-generator；类型错误在本步**不拦截**，由 step-decomposer 兜底
-- 保证「信息齐全」契约由**确定性代码**兜底，而非 LLM 自觉
+- 保证「信息齐全」契约由**确定性代码**分层兜底（点表：抽取层；实例字段：方案层 + 执行层），而非 LLM 自觉
 
 **询问 vs 确认分离**：询问（info-gatherer，补齐缺失信息，如「请提供 IP」）≠ 确认（plan-generator，
-批准方案，如「是否执行？」）。必填字段（`default=null`）的询问由界面技术保证必答；有 `default` 的
-字段询问时提示默认值、允许留空跳过（留空即用默认值）。
+批准方案，如「是否执行？」）。必填字段（无 `default` 键）通过 info-gatherer 多轮询问收集，
+缺失不放行；有 `default` 的字段为技术默认值，不询问、自动填充。
 
 **plan-generator**（C4_FUN_00004）：
 
-当前实现中，plan-generator 是 LLM 的隐式推理步骤。LLM 根据 info-gatherer 产出的**信息齐全的 deviceInfo** +
-`service_catalog` 选型并组装方案，在自然语言中描述接入方案并等待确认。待添加 `output_access_plan`
-结构化输出工具后，此步骤可产出结构化的 `AccessPlan`。
+plan-generator 调用 `output_access_plan` 工具产出结构化的 `AccessPlan`（registry 必填项前置校验，
+缺必填配置时工具直接拒绝并要求向用户询问），并以自然语言展示方案摘要等待用户确认。
 
 > plan-generator **不再推断协议、不再收集信息**——协议已由 info-gatherer 确定，必要信息已收集齐，
 > 它只做「选型 + 组装方案 + 方案确认」。
@@ -481,13 +481,13 @@ const outputPlanStepsTool = tool(
 |------|------|------|
 | 通过 | 值存在且类型合法 | 继续 |
 | 类型错误 | 值存在但类型不符（如 `addr` 传成字符串） | 返回结构化错误 → LLM 重试（§1.4 ReAct） |
-| 信息缺失 | 必要字段未提供（point_schema.fields 全部字段 + `source=plan` 且 `default=null` 的实例字段） | 已由 info-gatherer 收尾的确定性校验保证，此处是双保险最后防线——若仍发生说明链路有 bug，返回错误 |
+| 信息缺失 | 必要字段未提供（point_schema.fields 全部字段 + 无 `default` 键的实例字段） | 已由 info-gatherer 收尾的确定性校验保证，此处是双保险最后防线——若仍发生说明链路有 bug，返回错误 |
 
 > **C4_FUN_00005 缺失引导**（C4_RS_00261）：业务字段（地址/表名/实例参数等）的值来自**用户**或 registry
-> **显式声明的 `default`**（协议标准默认值，如 Modbus TCP 端口 502）；agent 不得在 registry 未声明时
+> **显式声明的 `default`**（协议技术参数默认值，如 Modbus 的 `t0` 超时）；agent 不得在 registry 未声明时
 > 自行编造默认值（C4_RS_00044）。缺失引导**由 info-gatherer 负责**（见上「信息收集与询问机制」），
 > step-decomposer 的运行时校验只是最后防线。引导清单由 registry 的 `point_schema.fields`（全部字段）与
-> `source=plan` 且 `default=null` 的实例字段声明驱动，零协议硬编码。
+> 无 `default` 键的实例字段声明驱动，零协议硬编码。
 
 配套的协议无关通用转换器（写一次，所有协议复用）：
 
@@ -501,23 +501,23 @@ function pointFieldsToZod(pointFields: PointField[]): z.ZodObject<any> {
     return z.object(shape).passthrough();   // passthrough 放行 id/key/shm_id 等通用字段
 }
 
-// config_schema.source=plan 的实例字段 → Zod schema（registry 驱动，无协议硬编码）
+// config_schema 的实例字段 → Zod schema（registry 驱动，无协议硬编码）
 function configFieldsToZod(configSchema: ConfigSchema): z.ZodObject<any> {
     const shape: Record<string, z.ZodTypeAny> = {};
     for (const [name, f] of Object.entries(configSchema.fields)) {
-        if (f.source !== "plan") continue;  // source=default 的字段不校验
         const t = typeToZod(f.type).describe(f.description);
-        shape[name] = f.default === null ? t : t.optional();  // default=null 必填，有 default 可选（跳过则用默认值）
+        // 无 default 键（或 null）= 必填，必须由用户提供；有 default = 技术默认值，入参可省略
+        shape[name] = f.default === undefined || f.default === null ? t : t.optional();
     }
     return z.object(shape).strict();        // strict：拒绝未声明的字段（白名单）
 }
 
-// 剥离结构化键（id/name/abbr/protocol/points 等），只保留 source=plan 的平铺字段子集——
+// 剥离结构化键（id/name/abbr/protocol/points 等），只保留 config_schema 声明的平铺字段子集——
 // 供 configFieldsToZod 的 .strict() 白名单校验前调用，避免误伤 AccessPlan 的结构化字段
 function pickPlanFields(obj: Record<string, unknown>, configSchema: ConfigSchema): Record<string, unknown> {
     const out: Record<string, unknown> = {};
-    for (const [name, f] of Object.entries(configSchema.fields)) {
-        if (f.source === "plan" && name in obj) {
+    for (const [name, _f] of Object.entries(configSchema.fields)) {
+        if (name in obj) {
             out[name] = obj[name];
         }
     }
@@ -530,7 +530,7 @@ function pickPlanFields(obj: Record<string, unknown>, configSchema: ConfigSchema
 > **不该有任何东西**，拼错的 `prot`、凭空加的 `foo` 都会被拒绝，防止垃圾字段流入 config.json。
 > instance 的 `id`/`name` 由 generate_steps 生成，`abbr`/`protocol`/`points` 是 AccessPlan 的结构化字段，均不经过校验。
 
-> **白名单作用域 = 实例平铺 plan 字段**：`configFieldsToZod` 只校验 `source=plan` 的平铺字段，结构化键不在此列。
+> **白名单作用域 = 实例平铺字段**：`configFieldsToZod` 只校验 config_schema 声明的平铺字段，结构化键不在此列。
 > 校验前用 `pickPlanFields(dev, config_schema)` 剥离结构化键，只取 plan 字段子集传入 `.strict()`，避免误伤合法字段。
 
 **执行模块（确定性代码，非子代理）**：
@@ -632,23 +632,22 @@ InfluxDB 的 `measurement` 表名），**不区分 reader_point**。Reader 的 p
 step-decomposer 按 `{id（Writer）/ key（Reader）, shm_id:0} + point_schema.fields（用户提供）` 通用生成 point，
 **不区分具体服务类型**。点表业务字段（`point_schema.fields`）**无默认值、无自动分配**——用户未提供时由 C4_FUN_00005 引导补充。
 
-**3.2.1.2 字段值来源（config_schema.source 驱动）**
+**3.2.1.2 字段值来源（config_schema.fields 的 default 键驱动）**
 
-每个服务实例的 config_schema 中，每个字段标注 `source`，决定 step-decomposer 从何处取值：
+每个服务实例的 config_schema 中，每个字段以**是否声明 `default` 键**决定取值方式：
 
-| source | 含义 | 填充方式 |
-|--------|------|---------|
-| `"plan"` | 需从 AccessPlan 提取 | 从方案取值；提取不到时 `default=null` 报错，有 `default` 用默认值 |
-| `"default"` | 使用默认值 | 直接取 `config_schema.fields[field].default` |
+| 字段声明 | 含义 | 填充方式 |
+|---------|------|---------|
+| 无 `default` 键（或 `null`） | **必填**——必须由用户提供 | 从 AccessPlan 提取；提取不到时报错（Zod 强校验拦截） |
+| `"default": 值` | 技术默认值 | 用户未提供时自动填充 `config_schema.fields[field].default` |
 
 step-decomposer 对每个服务类型：
 1. 调 `queryRegistryTool(service_type)` 获取完整 config_schema
 2. 遍历 `config_schema.fields`：
-   - `source: "plan"` → 从 AccessPlan 对应字段提取；提取不到时 `default=null` 报错，有 `default` 用默认值
-   - `source: "default"` → 填入 `default` 值
-3. `source: "plan"` 且 `default=null` 的字段必须有值，否则报错
+   - 无 `default` 键 → 从 AccessPlan 对应字段提取，提取不到时报错（Zod 强校验兜底）
+   - 有 `default` → 用户未提供时填入 `default` 值
 
-**实例 plan 字段**：`config_schema` 中 `source: "plan"` 的字段（除 `id`/`name` 等实例标识外）
+**实例字段**：`config_schema.fields` 的字段（除 `id`/`name` 等实例标识外）
 即实例的业务字段，**直接平铺在 AccessPlan 的 device/forward_target 上**，不做"连接/认证/归属"
 之类的语义分类——step-decomposer 按 config_schema 逐字段提取，不硬编码 `ip/port/url` 等。
 Modbus 的 `ip/port`、InfluxDB 的 `url/token/org/bucket`、未来串口协议的 `serial_port/baud_rate`
@@ -656,7 +655,7 @@ Modbus 的 `ip/port`、InfluxDB 的 `url/token/org/bucket`、未来串口协议�
 
 **运行时强校验**：实例字段与点字段在进入 `generate_steps` 前，由 registry 驱动动态构建
 Zod schema 校验（见 §3.2 的"双层校验"）：点字段用 `pointFieldsToZod`，实例字段用 `configFieldsToZod`
-（`.strict()` 白名单，拒绝未声明字段）。`source=plan` 且 `default=null` 的实例字段与 `point_schema.fields`（全部字段）
+（`.strict()` 白名单，拒绝未声明字段）。无 `default` 键的实例字段与 `point_schema.fields`（全部字段）
 共同构成 agent 与 mcp 的边界——校验失败返回 LLM 重试，不写入 config.json。
 
 ##### 3.2.1.2a AccessPlan 格式定义
@@ -685,7 +684,7 @@ interface DeviceSpec {
   abbr: string                // 采集目标标识（候选，LLM 从用户消息提取，如 "transformer1"）；须经 §3.2.1.3a 记忆确认后固化，最终 id 以记忆库为准
   protocol: string            // 通信协议（必填——由 info-gatherer 推断或询问确定，plan-generator 方案确认，见 §3.2 协议推断）
   points: DevicePoint[]       // 采集点列表
-  [field: string]: unknown    // 实例 plan 字段直接平铺（ip/port、url/token/org/bucket 等，由 config_schema.source=plan 声明）
+  [field: string]: unknown    // 实例字段直接平铺（ip/port、url/token/org/bucket 等，由 config_schema.fields 声明）
 }
 
 // 采集点（从点表提取）—— 仅保留 name 骨架，协议特有字段由 registry 的 point_schema.fields 声明
@@ -740,7 +739,7 @@ interface ForwardTargetSpec {
 **step-decomposer 如何使用 AccessPlan**：
 
 1. `site.abbr` + `target.abbr`（采集/转发目标标识）→ 生成 `instance.id`（如 `hnals_transformer1`）
-2. `device` 的 plan 字段（平铺）→ 填入 `source="plan"` 的实例配置字段（字段名由 config_schema 声明，见 §3.2.1.2）
+2. `device` 的实例字段（平铺）→ 填入实例配置字段（字段名由 config_schema 声明，见 §3.2.1.2）
 3. `device.points[]` → 映射到 Writer 服务的 `points[]`（字段由 point_schema.fields 声明提取）
 4. `forward_targets[]` 的 plan 字段（平铺）→ 填入 Reader 服务的实例配置（字段名由 config_schema 声明）
 5. 每个采集点生成对应的 Reader point：`{key, shm_id:0} + point_schema.fields（用户提供）`（见 §3.2.1.1）
@@ -1094,8 +1093,8 @@ step-decomposer 输出 AccessPlanSteps：
 
   action = "add":
     1. 合并 instance + points，shm_id 全部填 0
-    2. 将 service_type 的所有 Registry default 字段补齐（source=default 的字段；
-       source=plan 且有 default 的字段已在 generate_steps 阶段填默认值，见 §3.2.1.2）
+    2. 将 service_type 的所有声明了 `default` 的 Registry 字段补齐
+       （generate_steps 阶段已填充的不再重复，见 §3.2.1.2）
     3. 检查 points 的 id 不重复，instance.id 不与现有冲突
     4. 追加到 config.json[service_type][] 末尾
     5. 若 config.json[service_type] 之前为空或不存在：
@@ -1297,11 +1296,11 @@ Registry 内容分两层交付，避免上下文窗口膨胀：
 
 | 层 | 注入方式 | 内容 | 使用者 | 上下文位置 |
 |---|---------|------|--------|-----------|
-| **L1: 服务摘要** | 系统提示模板变量 `{{ service_catalog }}` | 服务名、display_name、role、protocols（含 description 和 selection_rules）、point_schema.fields（含字段说明）、point_schema.identity_fields（Writer 身份字段，供确定性查重与点名生成，§3.2.1.3b）、config_schema 中 `source=plan` 字段摘要（区分 `default=null` 必填 / 有默认值可选）、prompt_hints（服务使用提示，见下文「系统提示与 MCP 解耦」） | SuperWorker 路由 / info-gatherer 推断协议+收集信息 / plan-generator 选型 | **始终加载** |
+| **L1: 服务摘要** | 系统提示模板变量 `{{ service_catalog }}` | 服务名、display_name、role、protocols（含 description 和 selection_rules）、point_schema.fields（含字段说明）、point_schema.identity_fields（Writer 身份字段，供确定性查重与点名生成，§3.2.1.3b）、config_schema 字段摘要（区分「无 default 键=必填」/「有 default=技术默认值可选」）、prompt_hints（服务使用提示，见下文「系统提示与 MCP 解耦」） | SuperWorker 路由 / info-gatherer 推断协议+收集信息 / plan-generator 选型 | **始终加载** |
 | **L2: 完整定义** | 工具调用 `queryRegistryTool(service_type)` | 完整 Registry JSON（含 config_schema 全量、binary_path、error_mappings） | step-decomposer 生成配置 | **按需拉取** |
 
 **约束**：
-- `{{ service_catalog }}` **只注入 L1**，不包含 `config_schema` 全量字段、`binary_path`、`error_mappings`；但包含 `config_schema` 的 `source=plan` 字段摘要（供 info-gatherer 判断哪些字段必需收集、哪些有默认值可跳过）
+- `{{ service_catalog }}` **只注入 L1**，不包含 `config_schema` 全量字段、`binary_path`、`error_mappings`；但包含 `config_schema` 的字段摘要（供 info-gatherer 判断哪些字段必需收集、哪些有默认值可跳过）
 - `queryRegistryTool` 返回指定服务的**完整 JSON**（所有字段）
 - step-decomposer 只拉取当前 AccessPlan 涉及的服务类型，不全量加载
 - info-gatherer、plan-generator 通过 L1 推断协议/选型，无需调用 `queryRegistryTool`（其 tools 列表不含此工具）
@@ -1338,15 +1337,15 @@ L2 完整 JSON 保留在注册表内存中，仅 step-decomposer 通过 `queryRe
   },
   "config_schema": {
     "fields": {
-      "ip":   { "type": "string",  "source": "plan",    "default": null, "description": "设备 IP 地址" },
-      "port": { "type": "integer", "source": "plan",    "default": 502,  "description": "Modbus 端口（默认 502）" },
-      // ……（t0/t1/retries/coils_quantity_max 等 source=default 实例参数，完整清单见实际 JSON）
-      "timer":{ "type": "integer", "source": "default", "default": 1000, "description": "采集周期（毫秒）" }
+      "ip":   { "type": "string",  "description": "设备 IP 地址（必填：无 default 键，必须由用户提供）" },
+      "port": { "type": "integer", "description": "Modbus 设备端口（必填：无 default 键，必须由用户显式指定，禁止使用协议常见端口作为默认值）" },
+      // ……（t0/t1/retries/coils_quantity_max 等技术默认值字段，完整清单见实际 JSON）
+      "timer":{ "type": "integer", "default": 1000, "description": "采集周期（毫秒，有 default 键 = 技术默认值，未提供时自动填充）" }
     }
   },
   "binary_path": "/usr/local/bin/c4_modbus_client",
   "prompt_hints": [
-    "port 未指定时使用 Modbus 标准端口 502；ip 为设备地址，接入前必须确认",
+    "port 为必填项：必须由用户显式指定，用户未提供时先询问；ip 为设备地址，接入前必须确认",
     "addr/uid/fun/type/swap 为每个数据点的必要字段，缺一不可；swap=0 表示不交换"
   ],
   "error_mappings": {
@@ -1365,7 +1364,7 @@ L2 完整 JSON 保留在注册表内存中，仅 step-decomposer 通过 `queryRe
 >   `fields` 声明顺序）；Writer 填充使用，Reader 不填充（空或省略）；仅 Writer 用于无点名时确定性生成
 >   `point.id`（§3.2.1.3b）。**加载期校验**：role=writer 的条目必须声明非空 `identity_fields`，且每个条目
 >   必须是 `fields` 中已声明的字段名；不满足则 Registry 加载报错
-> - `config_schema` 中 `source=plan` 的字段（除 `id`/`name`）→ 实例 plan 字段（平铺 + 校验，不做语义分类）
+> - `config_schema.fields`（除 `id`/`name`）→ 实例字段（平铺 + 校验，不做语义分类）
 >
 > **系统提示与 MCP 解耦（服务使用提示动态注入）**：
 > 某个 MCP 服务特有的使用知识——如「ASFP2 数据接收监听端口为必填项，必须由用户显式指定」——
@@ -1392,9 +1391,26 @@ L2 完整 JSON 保留在注册表内存中，仅 step-decomposer 通过 `queryRe
 > 来自**用户**或 registry **显式声明的 `default`**（协议标准默认值）；agent 不得在 registry 未声明时
 > 自行编造默认值（C4_RS_00044）。缺失时由 C4_FUN_00005 引导补充。
 >
+> **必填项用户提供原则（无默认值原则）**：
+> 所有必须由用户提供的信息——点表业务字段（addr/uid/fun/type/swap 等）、实例必填配置项
+> （如监听端口 port）、转发目标（ip/port）及其转发点业务字段——**必须由用户显式提供，一律
+> 不设默认值、不自动推断、不自动选择**：
+> - **生成接入方案摘要之前**，Agent 必须核验上述必填项是否齐备；任一缺失 → 不展示方案，
+>   先向用户询问缺失项，通过多轮询问与确认收集完整
+> - LLM 在工具调用中漏传的项，由此在多轮确认与询问中被完整收集，而不是被默认值静默填补
+>   （教训：LLM 重试时曾把用户指定的端口静默回退为 registry 默认值）
+> - 必填性以 registry 字段级声明为唯一权威：**`point_schema.fields` 全量必填**（点表业务字段）；
+>   **`config_schema.fields` 中无 `default` 键（或 `null`）的项必填**（实例配置项）；有 `default`
+>   的项为技术默认值，自动填充。
+>   该字段级声明语义贯穿全链路——L1 注入渲染「必填」、工具入参 Zod 强校验
+>   （`configFieldsToZod`）拦截缺失、不参与默认值填充
+> - 确定性校验兜底：抽取层（`output_device_info` 拦截点业务字段缺失）与执行层
+>   （`output_plan_steps` 的 `validate_runtime_input` Zod 强校验），拦截均以可读错误
+>   要求向用户询问，禁止编造
+>
 > **监听端口的必填约束**（适用于带监听端口的 Writer 服务，如 `c4_asfp2_server` 的 `port`）：
-> **端口为必填项，不设置默认值**——必须由用户显式指定（registry `config_schema.required`
-> 声明，Agent 生成实例配置时强校验）：
+> **端口为必填项，不设置默认值**——必须由用户显式指定（registry 声明：`port` 字段无
+> `default` 键，经工具入参 Zod 强校验）：
 > - **用户未提供端口**：Agent 不得生成方案或写入配置，必须先询问用户要使用的端口；
 >   禁止自动选择空闲端口或回退默认值（LLM 重试时曾把用户指定的端口静默回退为
 >   registry 默认值，默认值机制因此整体移除）。

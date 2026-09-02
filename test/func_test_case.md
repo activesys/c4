@@ -146,7 +146,7 @@ Agent 询问缺失信息后，用户补充回答：
 ### 第四轮修复：端口确定性捕获与注入（2026-09-01）
 
 - **super_worker.ts**：新增 `userPort` 状态——从用户消息确定性捕获显式指定的接收端口
-  （正则 /(?:接收|监听)?端口…(\d{4,5})/，同场站名解析机制），确认轮注入
+  （正则 /(?:接收|监听)端口…(\d{4,5})/，强制「接收/监听」前缀避免误捕转发端口；同场站名解析机制），确认轮注入
   「用户指定的数据接收端口: NNNN（必须原样使用，禁止改为默认端口）」，执行完成后复位
 - **system.txt 解耦回归**：撤销曾硬编码的「默认接收端口 9000」字样——默认端口属于 asfp2
   MCP 注册 JSON 的 prompt_hints（运行时拼接），system.txt 保持服务中立，仅要求
@@ -156,10 +156,15 @@ Agent 询问缺失信息后，用户补充回答：
 
 捕获+注入仍属概率性防线（LLM 仍可能忽略注入指令回退默认值）。据此将设计改为**釜底抽薪**：
 
-- **不设置默认端口**：registry `c4_asfp2_server.json` 移除 `port` 默认值，`config_schema.required`
-  声明 `["port"]`，prompt_hints 改为必填语义
-- **Agent 强校验**：`output_plan_steps.ts` 新增 `validate_required_plan_fields`——实例缺 port
-  时返回 fatal（带可读指引「请向用户询问」），方案无法生成
+- **不设置默认端口**（最终机制，字段级声明）：registry 中 `port` 字段**无 `default` 键**——
+  必填语义由字段声明自表达；modbus port 删 502、iec104 port 删 2404 协议默认端口；
+  config_schema.fields 进一步删除 `source` 维度（有 `default` 键=技术默认值自动填充，
+  无=必填），L1 渲染「必填」、Zod 入参强校验原生生效
+- **Agent 强校验**：`output_plan_steps` 的 `validate_runtime_input`（Zod）——实例缺 port/ip
+  时报「缺少必要字段」（带设备/转发目标上下文），要求向用户询问，方案无法生成
+- **必填项总定义**（用户裁定）：`point_schema.fields` 全量（点表）∪ `config_schema.fields`
+  中无 `default` 键的项（配置），全部由用户提供、不设默认值；记录于 agent.md
+  「必填项用户提供原则（无默认值原则）」
 - **移除自动选端口**：`assign_port` 删除「从默认端口起顺延选择空闲端口」分支；用户指定的
   端口原样写入，被占用由 Start 阶段报 PORT_BIND_FAILED
 - **交互规则**：用户未提供端口时 Agent 必须先询问，禁止生成方案；文档（agent.md
