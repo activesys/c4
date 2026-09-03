@@ -374,9 +374,13 @@ export async function createC4Agent(
 
                 const MAX_MISSES = 3;
                 let misses = 0;
+                // 空回复抖动兜底：工具执行后模型可能零文本输出（解析结果不展示、
+                // 对话历史断链，func_test_case 用例 9）——限补跑一次总结
+                let summaryNudgeUsed = false;
 
                 while (misses <= MAX_MISSES) {
                     let hasToolCall = false;
+                    let producedText = false;
 
                     log?.llm_call(conversation, misses + 1, input.messages);
 
@@ -396,6 +400,9 @@ export async function createC4Agent(
                                 }
                                 if (call.name === "output_access_plan" && r?.success) {
                                     accessPlan = r;
+                                    // 新方案产生 → 旧确认失效，须重新点击确认按钮（执行闸门）
+                                    userConfirmed = false;
+                                    userPort = null;
                                     config.state?.setPhase("planning");
                                     log?.phase(conversation, "planning");
                                     config.state?.setAccessPlan(true);
@@ -419,6 +426,7 @@ export async function createC4Agent(
                             yield { type: "text" as const, content: token };
                         }
                         if (textParts.length > 0) {
+                            producedText = true;
                             log?.llm_text(conversation, textParts.join(""));
                         }
                         for await (const tc of msg.toolCalls) {
@@ -432,6 +440,16 @@ export async function createC4Agent(
                     await bgCapture;
                     for (const tr of toolResults) {
                         yield { type: "tool_result" as const, name: tr.name, result: tr.result };
+                    }
+
+                    if (hasToolCall && !producedText && !summaryNudgeUsed) {
+                        summaryNudgeUsed = true;
+                        misses++;
+                        input.messages = [...input.messages, {
+                            role: "user" as const,
+                            content: "请用中文向用户总结以上工具的执行结果。",
+                        }];
+                        continue;
                     }
 
                     if (hasToolCall || misses >= MAX_MISSES || !isConfirm) break;
@@ -466,6 +484,28 @@ export async function createC4Agent(
                             ? access_plan_to_steps_input(planAccessPlan)
                             : null;
                     let data: any = pdi_devices && pdi_devices.length > 0 ? pdi : adapted;
+                    // 补齐：deviceInfo 抽取可能早于用户提供端口等实例字段（字段缺失），
+                    // 用 accessPlan 同名设备的连接字段补齐（accessPlan 已过方案层必填校验）。
+                    // 不补齐时兜底重生成会缺 port 失败，把修复拖入下一轮（用例 9 教训）
+                    if (data === pdi && adapted && Array.isArray(adapted.devices)) {
+                        const accByName = new Map<string, Record<string, unknown>>();
+                        for (const d of adapted.devices as Array<Record<string, unknown>>) {
+                            if (typeof d.name === "string") accByName.set(d.name, d);
+                        }
+                        for (const dev of (data.devices as Array<Record<string, unknown>>) ?? []) {
+                            const acc = typeof dev.name === "string" ? accByName.get(dev.name) : undefined;
+                            if (!acc) continue;
+                            for (const [k, v] of Object.entries(acc)) {
+                                if (k === "name" || k === "points" || k === "abbr") continue;
+                                if (dev[k] === undefined || dev[k] === null || dev[k] === "") {
+                                    dev[k] = v;
+                                }
+                            }
+                        }
+                        if (!data.site && adapted.site) {
+                            data.site = adapted.site;
+                        }
+                    }
                     // N1 修复：forward_targets 双源合并——output_device_info 只回显 devices，
                     // 若确认轮数据缺失转发目标，会导致重生成静默丢弃用户要求的转发。
                     // ① pdi 的 forward_targets 优先（含 info-gatherer 固化的 abbr 候选）；
@@ -486,25 +526,57 @@ export async function createC4Agent(
                             try { data = JSON.parse(jsonMatch[0]); } catch { /* ignore */ }
                         }
                     }
-                    if (data?.devices) {
+                    // 兜底重生成仅在 LLM 完全未产出计划时进行（planSteps 为 null）：
+                    // LLM 已产出并经工具校验的计划不得被覆盖——pdi 缺转发目标时重生成
+                    // 只产出采集单步，会静默丢弃转发（func_test_case 用例 9 复发根因）
+                    if (data?.devices && !planSteps) {
                         try {
                             const genTool = createOutputPlanStepsTool(config.registry, config.site);
                             const raw = await (genTool as any).invoke(data);
                             const r = typeof raw === "string" ? JSON.parse(raw) : raw;
+                            log?.tool_result(
+                                conversation,
+                                "confirm_regen",
+                                JSON.stringify({
+                                    source: pdi_devices && pdi_devices.length > 0 ? "planDeviceInfo" : "accessPlan",
+                                    regen_success: Boolean(r?.success),
+                                    steps_count: Array.isArray(r?.steps) ? r.steps.length : 0,
+                                    error: r?.error ?? null,
+                                }),
+                            );
                             if (r?.success && Array.isArray(r?.steps)) {
                                 planSteps = r.steps as ServiceStep[];
                             }
-                        } catch { /* deterministic generation failed, skip */ }
+                        } catch (regen_err) {
+                            log?.tool_result(conversation, "confirm_regen", JSON.stringify({
+                                regen_success: false,
+                                error: regen_err instanceof Error ? regen_err.message : String(regen_err),
+                            }));
+                        }
                     }
                 }
 
                 if (planSteps && planSteps.length > 0) {
+                    log?.tool_result(
+                        conversation,
+                        "plan_steps_final",
+                        JSON.stringify(
+                            planSteps.map((s) => ({
+                                action: s.action,
+                                service_type: s.service_type,
+                                id: (s.instance as Record<string, unknown>)?.id,
+                                points: Array.isArray(s.points) ? s.points.length : 0,
+                            })),
+                        ),
+                    );
                     if (!userConfirmed) {
                         log?.error(conversation, "执行被拒绝: 未收到确认按钮消息");
+                        // 以 text 进入对话历史（error 气泡不入 history，LLM 下轮将无从得知
+                        // 执行被拒，会误报「执行完成」）；句式含「是否确认执行」使前端按钮重现
                         yield {
                             type: "text" as const,
                             content:
-                                "请点击「确认」按钮完成确认后，我再执行接入（文字回复不作为确认依据）。",
+                                "⚠️ 本次接入未执行，配置未写入。请点击下方「确认」按钮完成确认（文字回复不作为确认依据）。是否确认执行？",
                         };
                         planSteps = null;
                     }
@@ -584,6 +656,9 @@ export async function createC4Agent(
                             config.state?.setPhase("idle");
                             log?.phase(conversation, "idle");
                             config.state?.setAccessPlan(false);
+                            // 确认已随本次执行消耗，复位闸门（下一条新接入须重新确认）
+                            userConfirmed = false;
+                            userPort = null;
                         } else {
                             log?.error(conversation, `执行问题: ${mr.error ?? "未知"}`);
                             yield { type: "text" as const, content: `执行问题: ${mr.error ?? "未知"}` };
@@ -599,8 +674,8 @@ export async function createC4Agent(
                         config.state?.setError(exMsg);
                     }
                 }
-                userConfirmed = false;
-                userPort = null;
+                // 闸门状态不复位于此：userConfirmed/userPort 在执行完成后才复位——
+                // 「执行失败 → 补问 → 重试」的多轮修复必须跨轮保持确认（func_test_case 用例 9）
                 log?.done(conversation);
                 yield { type: "done" as const };
             } catch (err: unknown) {

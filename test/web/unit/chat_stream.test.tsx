@@ -125,7 +125,7 @@ describe("ChatView — streaming render (web.md §3.1.2, §4.2)", () => {
 });
 
 describe("ChatView — file upload echo (web.md §3.2.2)", () => {
-  it("appends upload-echo text chunks into a single user bubble (no replace)", async () => {
+  it("appends upload-echo text chunks into a single agent bubble (no replace) — 解析结果是 Agent 输出，按 agent 样式渲染（web.md §3.2.2）", async () => {
     server.use(
       http.post("/api/upload", () =>
         streamResponse([
@@ -149,7 +149,13 @@ describe("ChatView — file upload echo (web.md §3.2.2)", () => {
         screen.getByText("解析完成：1#风机 IP 192.168.110.10"),
       ).toBeInTheDocument();
     });
-    expect(screen.getAllByTestId("user-bubble")).toHaveLength(1);
+    const agentBubbles = screen.getAllByTestId("agent-bubble");
+    expect(agentBubbles.length).toBeGreaterThanOrEqual(1);
+    expect(agentBubbles[agentBubbles.length - 1].textContent).toBe(
+      "解析完成：1#风机 IP 192.168.110.10",
+    );
+    // 上传回显不得再以 user 样式渲染（蓝底白字为用户输入专属）
+    expect(screen.queryByTestId("user-bubble")).toBeNull();
   });
 });
 

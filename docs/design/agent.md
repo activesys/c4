@@ -378,6 +378,9 @@ const deviceInfoSchema = z.object({
 > Reader 从转发目标描述推断（如「转发到上级系统」→ ASFP2、「入库」→ InfluxDB）。两类协议都确定后信息才算收集齐。
 
 > 协议推断成功后**不单独打断用户**，协议作为方案的一部分在 plan-generator 的方案确认环节隐含确认。
+> **隐含确认的前提是方案摘要必须逐设备、逐转发目标明确列出推断出的协议名**（禁止只写「数据转发
+> 协议」等含糊表述）——协议推断是概率性的，若推断错误而摘要不展示，用户无从发现，会带错确认
+> 直到对端协议不匹配接入失败（func_test_case 用例 6）。
 > `deviceInfo.protocol` 与 `AccessPlan.protocol` 都是**必填**——info-gatherer 通过三层推断 + 询问用户兜底
 > 保证协议在收尾时必已确定（推断不出就询问，不产出空协议），到 step-decomposer 查 registry 时协议已就绪。
 

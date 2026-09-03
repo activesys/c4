@@ -80,7 +80,8 @@ export function useChatStream(): UseChatStreamReturn {
   const abortRef = useRef<AbortController | null>(null);
 
   // 上传解析结果是纯文本回显（web.md §3.2.2 一次性解析、结果回显）：流式累积进单个
-  // user 气泡，不触发任何 /api/chat 轮次；气泡仍进入 messages，随 history 回传。
+  // agent 气泡（解析结果是 Agent 的输出，须按 agent 样式渲染，不得用 user 样式），
+  // 不触发任何 /api/chat 轮次；气泡仍进入 messages，随 history 以 assistant 角色回传。
   const echoBubbleIdRef = useRef<string | null>(null);
 
   const streamEcho = useCallback((content: string) => {
@@ -94,9 +95,9 @@ export function useChatStream(): UseChatStreamReturn {
       );
       return;
     }
-    const id = nextId("user");
+    const id = nextId("agent");
     echoBubbleIdRef.current = id;
-    setMessages((prev) => [...prev, { id, role: "user", content }]);
+    setMessages((prev) => [...prev, { id, role: "agent", content }]);
   }, []);
 
   const endEcho = useCallback(() => {

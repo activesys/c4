@@ -115,6 +115,15 @@ export function createUploadRouter(agent: C4Agent): Router {
                 return;
             }
 
+            // multer 以 latin1 解码文件名，中文文件名会乱码（如「1#风机点表」→「1#é£æºç¹è¡¨」）；
+            // 按 latin1 → utf8 还原原始文件名
+            if (req.file) {
+                req.file.originalname = Buffer.from(
+                    req.file.originalname,
+                    "latin1",
+                ).toString("utf8");
+            }
+
             // Build message: 传递文件路径 + 原始文件名
             const userMessage =
                 typeof req.body.message === "string" && req.body.message.length > 0
@@ -124,6 +133,7 @@ export function createUploadRouter(agent: C4Agent): Router {
             const prompt = [
                 `用户上传了文件: path=${file.path}, name=${file.originalname}`,
                 `用户消息: ${userMessage}`,
+                `（展示要求：全程使用中文回复，仅协议名/字段标识等技术术语可保留英文）`,
             ].join("\n");
 
             // Set SSE headers
