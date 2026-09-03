@@ -471,6 +471,23 @@ export function createOutputPlanStepsTool(
     const fallback_site_abbr = site?.abbr ?? "";
     return tool(
         async (input: z.infer<typeof planStepsInputSchema>) => {
+            // 形状归一化：兼容 connection 嵌套（output_access_plan 形状）与平铺两种写法。
+            // 两工具形状不同曾导致 LLM 按方案形状调用本工具而连续失败重试（func_test_case
+            // 用例 5 附录）——在此确定性展开，消除形状纠结
+            const normalize_shape = (item: Record<string, unknown>) => {
+                const conn = item["connection"];
+                if (conn && typeof conn === "object") {
+                    Object.assign(item, conn as Record<string, unknown>);
+                    delete item["connection"];
+                }
+            };
+            for (const dev of input.devices ?? []) {
+                normalize_shape(dev as Record<string, unknown>);
+            }
+            for (const ft of input.forward_targets ?? []) {
+                normalize_shape(ft as Record<string, unknown>);
+            }
+
             if (input.changes && input.changes.length > 0) {
                 for (const c of input.changes) {
                     const inst = c.instance as Record<string, unknown>;
