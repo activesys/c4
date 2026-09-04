@@ -3,6 +3,13 @@
 
 import { createAgent } from "langchain";
 import type { StructuredTool } from "@langchain/core/tools";
+import {
+    isAIMessage,
+    isHumanMessage,
+    isSystemMessage,
+    isToolMessage,
+    type BaseMessage,
+} from "@langchain/core/messages";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -10,7 +17,7 @@ import { fileURLToPath } from "node:url";
 import type { McpServiceRegistry } from "../registry/registry.js";
 import type { C4McpManager } from "../mcp/client.js";
 import { xlsxParserTool, csvParserTool, txtParserTool } from "../subagents/tools/doc_parsers.js";
-import { createOutputPlanStepsTool } from "../subagents/tools/output_plan_steps.js";
+import { createOutputPlanStepsTool, normalize_protocol } from "../subagents/tools/output_plan_steps.js";
 import { sanitize_identifier } from "../executor/executor.js";
 import { buildErrorTranslator, translateError } from "../mcp/tools.js";
 import { createOutputAccessPlanTool } from "../subagents/tools/output_access_plan.js";
@@ -41,6 +48,8 @@ export interface SuperWorkerConfig {
     agentConfigPath: string;
     instanceId: string;
     site?: { name: string; abbr: string } | null;
+    /** 用户在对话中显式声明的通信协议（规范化后，如 "asfp2"）；null = 尚未声明 */
+    declared_protocol?: string | null;
     state?: AgentStateWriter;
     agentLogger?: AgentLogger;
 }
@@ -102,7 +111,7 @@ export async function createSuperWorker(
         xlsxParserTool,
         csvParserTool,
         txtParserTool,
-        createOutputDeviceInfoTool(registry),
+        createOutputDeviceInfoTool(registry, config),
         createOutputAccessPlanTool(registry),
         createOutputPlanStepsTool(registry, config.site),
         createQueryRegistryTool(registry),
@@ -243,6 +252,79 @@ function access_plan_to_steps_input(r: Record<string, unknown>): Record<string, 
     return out;
 }
 
+// ── 会话历史持久化（跨轮完整上下文）───────────────────────
+// 前端回传的 history 只含 user/assistant 纯文本，工具调用/结果证据丢失，
+// 导致模型在后续轮看不到已解析的点表等工具产出、陷入自我怀疑死循环。
+// 服务端按 conversationId 保存完整消息历史（含工具调用/结果），后续轮优先恢复。
+
+/** 跨轮持久化的消息形状——与 LangChain coerceMessageLikeToMessage 兼容的普通字典 */
+interface HistoryMsg {
+    role: "user" | "assistant" | "system" | "tool";
+    content: string;
+    tool_calls?: Array<{ name: string; args: unknown; id: string; type: "tool_call" }>;
+    tool_call_id?: string;
+    name?: string;
+}
+
+/** 历史上限——防止长会话下内存/上下文无界增长 */
+const MAX_HISTORY_MSGS = 100;
+
+/** BaseMessage.content 可能是 string 或 content blocks，统一转为字符串 */
+function contentToString(content: unknown): string {
+    if (typeof content === "string") {
+        return content;
+    }
+    if (Array.isArray(content)) {
+        return content
+            .map((b) => {
+                const block = b as { text?: unknown; type?: unknown };
+                return block && typeof block.text === "string" ? block.text : "";
+            })
+            .join("");
+    }
+    return "";
+}
+
+/** 将 LangChain 消息序列化为可跨轮存储的普通字典；无法识别的类型返回 null */
+function toHistoryMsg(m: BaseMessage): HistoryMsg | null {
+    if (isHumanMessage(m)) {
+        return { role: "user", content: contentToString(m.content) };
+    }
+    if (isSystemMessage(m)) {
+        return { role: "system", content: contentToString(m.content) };
+    }
+    if (isAIMessage(m)) {
+        const toolCalls = (m.tool_calls ?? []).map((tc) => ({
+            name: tc.name,
+            args: tc.args,
+            id: typeof tc.id === "string" ? tc.id : "",
+            type: "tool_call" as const,
+        }));
+        return {
+            role: "assistant",
+            content: contentToString(m.content),
+            ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
+        };
+    }
+    if (isToolMessage(m)) {
+        return {
+            role: "tool",
+            content: contentToString(m.content),
+            tool_call_id: m.tool_call_id,
+            name: m.name ?? "",
+        };
+    }
+    return null;
+}
+
+/** 抖动兜底注入的 nudge 消息内容——持久化历史时剔除，避免污染跨轮上下文 */
+const NUDGE_CONTENTS = new Set<string>([
+    "请用中文向用户总结以上工具的执行结果。",
+    "请立即调用你刚才宣布要调用的工具继续完成任务，不要仅用文字说明。",
+    "展示接入方案前必须先调用 output_access_plan 工具产出结构化方案。请立即调用，然后再展示摘要。",
+    "你必须立即调用 output_plan_steps 工具。不要用文字回答。",
+]);
+
 export async function createC4Agent(
     config: SuperWorkerConfig,
 ): Promise<C4Agent> {
@@ -257,11 +339,20 @@ export async function createC4Agent(
     let userPort: string | null = null;
     // 执行闸门状态（agent.md「执行闸门」）：是否收到过用户确认
     let userConfirmed = false;
+    // 会话历史（含工具调用/结果证据）——按 conversationId 持久化，跨轮恢复完整上下文
+    const conversationHistories = new Map<string, HistoryMsg[]>();
 
     return {
         invoke: async function* (input) {
             const conversation = input.conversationId ?? "unknown";
             const log = config.agentLogger;
+            // 恢复服务端历史：后续轮优先使用服务端完整历史（含工具证据），
+            // 前端 text-only history 仅作服务端无记录时的兜底
+            const storedHistory = conversationHistories.get(conversation);
+            if (storedHistory && storedHistory.length > 0 && input.messages.length > 0) {
+                const newMsg = input.messages[input.messages.length - 1];
+                input.messages = [...storedHistory, newMsg];
+            }
             let planSteps: ServiceStep[] | null = null;
             let planDeviceInfo: Record<string, unknown> | null = null;
             let planAccessPlan: Record<string, unknown> | null = null;
@@ -281,6 +372,16 @@ export async function createC4Agent(
                         );
                         if (portMatch) {
                             userPort = portMatch[1];
+                        }
+                        // 确定性捕获用户显式声明的协议（如「使用asfp2协议」）——
+                        // 防止重新解析时重新推断协议（func_test_case 用例 11）
+                        const protoMatch = lastContent.match(
+                            /\b(asfp2|modbus(?:\s*tcp)?|iec104|influxdb)\b/i,
+                        );
+                        if (protoMatch) {
+                            config.declared_protocol = normalize_protocol(
+                                protoMatch[1].toLowerCase().replace(/\s+/g, "_"),
+                            );
                         }
                     }
                     // 否定/拒绝词优先判断，避免 "取消，不执行..." 中的 "执行" 被误判为确认
@@ -370,6 +471,25 @@ export async function createC4Agent(
                         deviceInfo = null;
                         accessPlan = null;
                     }
+
+                    // 自由文本确认引导（确定性，不经 LLM）：确认按钮是唯一确认通道，
+                    // 短确认词消息不构成确认——固定引导用户点击按钮，防止模型宣而不行
+                    // 后静默无操作（func_test_case 用例 11）。长消息中的「确认」字样
+                    // （如「确认修改端口为 9001」）走正常流程，不受影响
+                    if (
+                        last.role === "user" &&
+                        !isReject &&
+                        !lastContent.startsWith("[C4_BUTTON") &&
+                        lastContent.replace(/\s/g, "").length <= 6 &&
+                        /确认|执行/.test(lastContent)
+                    ) {
+                        yield {
+                            type: "text" as const,
+                            content:
+                                "⚠️ 接入尚未执行——请点击下方「确认」按钮以执行接入（文字回复不作为确认依据）。是否确认执行？",
+                        };
+                        return;
+                    }
                 }
 
                 const MAX_MISSES = 3;
@@ -377,10 +497,21 @@ export async function createC4Agent(
                 // 空回复抖动兜底：工具执行后模型可能零文本输出（解析结果不展示、
                 // 对话历史断链，func_test_case 用例 9）——限补跑一次总结
                 let summaryNudgeUsed = false;
+                // 「宣而不行」抖动兜底：模型以纯文本宣布下一步工具（如「让我先输出
+                // 结构化设备信息」）却未实际调用，图收尾后流程停滞——限补跑一次
+                let announceNudgeUsed = false;
+                // 方案展示绕过工具兜底：模型不经 output_access_plan 直接展示方案并索要
+                // 确认（按钮未武装，用户无确认手段，func_test_case 用例 11）——限一次
+                let accessPlanForceUsed = false;
+                // 最后一轮 streamEvents 的 run 流——用于在收尾时读取最终状态并持久化历史
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                let lastStream: any = null;
 
                 while (misses <= MAX_MISSES) {
                     let hasToolCall = false;
                     let producedText = false;
+                    let lastTextSample = "";
+                    let lastMsgHadToolCall = false;
 
                     log?.llm_call(conversation, misses + 1, input.messages);
 
@@ -388,6 +519,7 @@ export async function createC4Agent(
                         { messages: input.messages },
                         { version: "v3", configurable: { recursion_limit: 50 } },
                     );
+                    lastStream = stream;
 
                     const toolResults: Array<{ name: string; result: string }> = [];
                     const bgCapture = (async () => {
@@ -415,25 +547,34 @@ export async function createC4Agent(
                                 const resultStr = typeof out === "string" ? out : JSON.stringify(out);
                                 toolResults.push({ name: call.name, result: resultStr });
                                 log?.tool_result(conversation, call.name, resultStr);
-                            } catch { /* ignore */ }
+                            } catch (bg_err) {
+                                // 工具执行异常不再静默：不可见的失败会让模型宣而不行后
+                                // 无法定位（func_test_case 用例 11）
+                                log?.tool_result(conversation, "tool_exec_error", JSON.stringify({
+                                    error: bg_err instanceof Error ? bg_err.message : String(bg_err),
+                                }));
+                            }
                         }
                     })();
 
                     for await (const msg of stream.messages) {
                         const textParts: string[] = [];
+                        lastMsgHadToolCall = false;
                         for await (const token of msg.text) {
                             textParts.push(token);
                             yield { type: "text" as const, content: token };
                         }
                         if (textParts.length > 0) {
                             producedText = true;
-                            log?.llm_text(conversation, textParts.join(""));
+                            lastTextSample = textParts.join("");
+                            log?.llm_text(conversation, lastTextSample);
                         }
                         for await (const tc of msg.toolCalls) {
                             const tcArgs = (tc as unknown as { args?: unknown }).args ?? {};
                             yield { type: "tool_call" as const, name: tc.name, args: {} };
                             log?.tool_call(conversation, tc.name, tcArgs);
                             hasToolCall = true;
+                            lastMsgHadToolCall = true;
                         }
                     }
 
@@ -448,6 +589,43 @@ export async function createC4Agent(
                         input.messages = [...input.messages, {
                             role: "user" as const,
                             content: "请用中文向用户总结以上工具的执行结果。",
+                        }];
+                        continue;
+                    }
+
+                    // 「宣而不行」抖动兜底：末条消息是纯文本且宣布了下一步动作
+                    // （「让我先输出/调用/解析…」）却未实际调用（含整轮零工具调用的
+                    // 长推理摇摆，func_test_case 用例 11 复发）——注入指令补跑一轮
+                    // （限一次）；纯总结性收尾与向用户提问（无宣布动词）不受影响
+                    const announced_unacted =
+                        producedText &&
+                        !lastMsgHadToolCall &&
+                        /让我(?:先)?(?:输出|调用|执行|解析|检查)/.test(lastTextSample);
+                    if (announced_unacted && !announceNudgeUsed) {
+                        announceNudgeUsed = true;
+                        misses++;
+                        input.messages = [...input.messages, {
+                            role: "user" as const,
+                            content: "请立即调用你刚才宣布要调用的工具继续完成任务，不要仅用文字说明。",
+                        }];
+                        continue;
+                    }
+
+                    // 方案展示绕过工具兜底：本轮有方案展示文本（含确认句式）但未调用
+                    // output_access_plan——注入强制其先产出结构化方案（限一次），
+                    // planArmed 随之武装，确认按钮才会出现
+                    const plan_presented =
+                        producedText &&
+                        /是否确认|确认执行|请确认/.test(lastTextSample);
+                    const access_plan_ran = toolResults.some(
+                        (tr) => tr.name === "output_access_plan",
+                    );
+                    if (plan_presented && !access_plan_ran && !accessPlanForceUsed) {
+                        accessPlanForceUsed = true;
+                        misses++;
+                        input.messages = [...input.messages, {
+                            role: "user" as const,
+                            content: "展示接入方案前必须先调用 output_access_plan 工具产出结构化方案。请立即调用，然后再展示摘要。",
                         }];
                         continue;
                     }
@@ -676,6 +854,29 @@ export async function createC4Agent(
                 }
                 // 闸门状态不复位于此：userConfirmed/userPort 在执行完成后才复位——
                 // 「执行失败 → 补问 → 重试」的多轮修复必须跨轮保持确认（func_test_case 用例 9）
+
+                // 持久化本轮完整历史（含工具调用/结果证据），供后续轮恢复上下文
+                try {
+                    const finalState = await lastStream?.output;
+                    const msgs = (finalState?.messages ?? []) as BaseMessage[];
+                    const clean = msgs
+                        .map(toHistoryMsg)
+                        .filter((m): m is HistoryMsg => m !== null)
+                        .filter(
+                            (m) => !(m.role === "user" && NUDGE_CONTENTS.has(m.content)),
+                        );
+                    if (clean.length > MAX_HISTORY_MSGS) {
+                        conversationHistories.set(
+                            conversation,
+                            clean.slice(clean.length - MAX_HISTORY_MSGS),
+                        );
+                    } else if (clean.length > 0) {
+                        conversationHistories.set(conversation, clean);
+                    }
+                } catch {
+                    // 历史持久化失败不影响主流程（下一轮退化到前端 text-only history）
+                }
+
                 log?.done(conversation);
                 yield { type: "done" as const };
             } catch (err: unknown) {

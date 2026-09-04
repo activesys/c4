@@ -48,6 +48,19 @@ function sseStream(chunks: string[]): ReadableStream<Uint8Array> {
 }
 
 /** Wrap a stream into a Response so we can hand it to msw. */
+/** confirm 按钮武装事件——result 内层引号经 JSON.stringify 正确转义到 SSE wire */
+function armingChunks(): string[] {
+  const result = JSON.stringify({ success: true });
+  return [
+    `data: {"type":"tool_call","name":"output_access_plan","args":{}}\n\n`,
+    `data: ${JSON.stringify({
+      type: "tool_result",
+      name: "output_access_plan",
+      result,
+    })}\n\n`,
+  ];
+}
+
 function streamResponse(chunks: string[]): Response {
   const stream = sseStream(chunks);
   return new Response(stream, {
@@ -218,6 +231,8 @@ describe("ChatView — confirm/cancel button payloads (web.md §3.2.4, §3.2.5, 
   it("3.2.4 clicking 确认 posts { message:'确认', history } (NO resume/interruptId)", async () => {
     const firstResponse = streamResponse([
       `:ok\n\n`,
+      `data: {"type":"tool_call","name":"output_access_plan","args":{}}\n\n`,
+      ...armingChunks(),
       `data: {"type":"text","content":"是否确认执行？","conversationId":"c1"}\n\n`,
       `event: done\ndata: {"conversationId":"c1"}\n\n`,
     ]);
@@ -265,9 +280,36 @@ describe("ChatView — confirm/cancel button payloads (web.md §3.2.4, §3.2.5, 
     expect(Array.isArray(confirmBody!.history)).toBe(true);
   });
 
+  it("3.2.4b does NOT show buttons when no access_plan armed (信息收集阶段询问)", async () => {
+    server.use(
+      http.post("/api/chat", () =>
+        streamResponse([
+          `:ok\n\n`,
+          `data: {"type":"text","content":"请确认转发地址映射关系。","conversationId":"c1"}\n\n`,
+          `event: done\ndata: {"conversationId":"c1"}\n\n`,
+        ]),
+      ),
+    );
+
+    render(<ChatView />);
+
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "点表是这样的" } });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText("请确认转发地址映射关系。")).toBeInTheDocument();
+    });
+    expect(screen.queryByRole("button", { name: "确认" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "取消" })).toBeNull();
+  });
+
   it("3.2.5 clicking 取消 posts { message:'[C4_BUTTON_CANCEL] 取消，不执行', history } (NO resume/interruptId)", async () => {
     const firstResponse = streamResponse([
       `:ok\n\n`,
+      `data: {"type":"tool_call","name":"output_access_plan","args":{}}\n\n`,
+      ...armingChunks(),
       `data: {"type":"text","content":"请确认是否按方案执行","conversationId":"c1"}\n\n`,
       `event: done\ndata: {"conversationId":"c1"}\n\n`,
     ]);

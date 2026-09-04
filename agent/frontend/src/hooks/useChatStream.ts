@@ -58,6 +58,12 @@ export interface UseChatStreamReturn {
   ) => Promise<void>;
   streamEcho: (content: string) => void;
   endEcho: () => void;
+  /** 确认按钮武装：output_access_plan 成功后 true，output_device_info 成功（方案过期）后 false */
+  planArmed: boolean;
+  /** 读取当前会话 ID（供上传流程复用同一会话） */
+  getConversationId: () => string;
+  /** 设置当前会话 ID（上传流程拿到服务端回传的 ID 后回写） */
+  setConversationId: (id: string) => void;
   reset: () => void;
 }
 
@@ -73,11 +79,17 @@ export function useChatStream(): UseChatStreamReturn {
   const [toolCards, setToolCards] = useState<ToolCardState[]>([]);
   const [assistantText, setAssistantText] = useState("");
   const [error, setError] = useState<string | null>(null);
+  // 方案确认按钮的武装状态（web.md §3.1.3）：仅当 output_access_plan 成功后武装，
+  // output_device_info 成功（信息更新、方案过期）即解除——信息收集阶段的普通询问
+  // 即使含「请确认」句式也不得弹出确认按钮
+  const [planArmed, setPlanArmed] = useState(false);
 
   // We keep a ref to the *current* agent bubble id so text tokens append
   // to the right bubble. Without this, every token would render a new bubble.
   const agentBubbleIdRef = useRef<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  // 会话 ID 持久化：跨轮复用同一会话，后端才能恢复完整跨轮上下文（含工具证据）
+  const conversationIdRef = useRef<string>("");
 
   // 上传解析结果是纯文本回显（web.md §3.2.2 一次性解析、结果回显）：流式累积进单个
   // agent 气泡（解析结果是 Agent 的输出，须按 agent 样式渲染，不得用 user 样式），
@@ -108,11 +120,19 @@ export function useChatStream(): UseChatStreamReturn {
     abortRef.current?.abort();
     abortRef.current = null;
     agentBubbleIdRef.current = null;
+    conversationIdRef.current = "";
     setStatus("idle");
     setMessages([]);
     setToolCards([]);
     setAssistantText("");
     setError(null);
+    setPlanArmed(false);
+  }, []);
+
+  // 供上传流程读写会话 ID（上传轮与对话轮须同属一个会话）
+  const getConversationId = useCallback(() => conversationIdRef.current, []);
+  const setConversationId = useCallback((id: string) => {
+    if (id) conversationIdRef.current = id;
   }, []);
 
   const send = useCallback(
@@ -151,10 +171,11 @@ export function useChatStream(): UseChatStreamReturn {
 
       try {
         setStatus("streaming");
-        await streamChat(
+        const effectiveCid = conversationId ?? conversationIdRef.current;
+        const returnedCid = await streamChat(
           {
             message,
-            conversationId,
+            conversationId: effectiveCid,
             history: truncateHistory(history),
           },
           (ev: SseEvent) => {
@@ -184,6 +205,13 @@ export function useChatStream(): UseChatStreamReturn {
                   typeof ev.data.name === "string" ? ev.data.name : "tool";
                 const result =
                   typeof ev.data.result === "string" ? ev.data.result : "";
+                // 方案按钮武装/解除（web.md §3.1.3）
+                if (name === "output_access_plan" && /"success":\s*true/.test(result)) {
+                  setPlanArmed(true);
+                }
+                if (name === "output_device_info" && /"success":\s*true/.test(result)) {
+                  setPlanArmed(false);
+                }
                 setToolCards((prev) => {
                   // Flip the matching running card to done; otherwise append.
                   const idx = prev.findIndex((c) => c.name === name && c.status === "running");
@@ -225,6 +253,7 @@ export function useChatStream(): UseChatStreamReturn {
           },
           { signal: controller.signal },
         );
+        if (returnedCid) conversationIdRef.current = returnedCid;
         setStatus("idle");
       } catch (err) {
         if (controller.signal.aborted) {
@@ -247,5 +276,5 @@ export function useChatStream(): UseChatStreamReturn {
     [],
   );
 
-  return { status, messages, toolCards, assistantText, error, send, streamEcho, endEcho, reset };
+  return { status, messages, toolCards, assistantText, error, send, streamEcho, endEcho, planArmed, getConversationId, setConversationId, reset };
 }

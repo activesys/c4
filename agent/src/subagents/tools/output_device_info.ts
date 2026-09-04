@@ -23,11 +23,30 @@ const deviceInfoSchema = z.object({
     }).passthrough()).describe("实例 plan 字段（ip/port、url/token 等）+ 目标级字段（measurement）平铺"),
 });
 
-export function createOutputDeviceInfoTool(registry: McpServiceRegistry) {
+export function createOutputDeviceInfoTool(
+    registry: McpServiceRegistry,
+    config?: { declared_protocol?: string | null },
+) {
     return tool(
         async (input: z.infer<typeof deviceInfoSchema>) => {
             if (!input.devices || input.devices.length === 0) {
                 return JSON.stringify({ success: false, error: "devices 不能为空" });
+            }
+
+            // 协议声明校验：用户已在对话中明确声明协议时，工具调用不得使用其他协议
+            //（防止重新解析时重新推断导致反复询问错误协议的业务字段，func_test_case 用例 11）
+            const declared = config?.declared_protocol;
+            if (declared) {
+                for (const dev of input.devices) {
+                    if (normalize_protocol(dev.protocol) !== declared) {
+                        return JSON.stringify({
+                            success: false,
+                            error:
+                                `设备 "${dev.name}" 的协议应为用户声明的 "${declared}"，` +
+                                `而当前为 "${dev.protocol}"。请按用户声明的协议修正后重新调用，禁止重新推断`,
+                        });
+                    }
+                }
             }
 
             // 点表完整性检查（协议已定时）：采集点的业务字段必须逐点完整保留，

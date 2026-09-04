@@ -21,7 +21,7 @@ import { FileUpload } from "./FileUpload";
 import { streamUpload, classifyFileType } from "@frontend/api/upload";
 
 export function ChatView(): JSX.Element {
-  const { status, messages, toolCards, assistantText, send, streamEcho, endEcho } =
+  const { status, messages, toolCards, assistantText, send, streamEcho, endEcho, planArmed, getConversationId, setConversationId } =
     useChatStream();
   const [draft, setDraft] = useState("");
   const [uploadMessage, setUploadMessage] = useState(
@@ -35,9 +35,11 @@ export function ChatView(): JSX.Element {
     if (el) el.scrollTop = el.scrollHeight;
   }, [messages, toolCards]);
 
+  // 确认按钮双条件：结构化方案已产出（planArmed，output_access_plan 成功）+ 摘要句式命中。
+  // 仅凭句式会让信息收集阶段的普通询问（如「请确认转发地址映射」）过早弹出按钮
   const confirmVisible = useMemo(
-    () => matchConfirmPhrase(assistantText),
-    [assistantText],
+    () => planArmed && matchConfirmPhrase(assistantText),
+    [planArmed, assistantText],
   );
 
   // Reconstruct a minimal history from the bubbles so the confirm/cancel
@@ -76,8 +78,8 @@ export function ChatView(): JSX.Element {
       return;
     }
     try {
-      await streamUpload(
-        { file, message: uploadMessage },
+      const returnedCid = await streamUpload(
+        { file, message: uploadMessage, conversationId: getConversationId() },
         (ev) => {
           if (ev.type === "text") {
             // 解析结果纯文本回显（web.md §3.2.2）：累积进单个气泡，随 history 回传，
@@ -92,6 +94,7 @@ export function ChatView(): JSX.Element {
           }
         },
       );
+      if (returnedCid) setConversationId(returnedCid);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       await send(`（文件上传失败：${msg}）`, history);

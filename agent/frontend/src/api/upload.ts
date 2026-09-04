@@ -41,27 +41,27 @@ export interface UploadOptions {
 export interface UploadParams {
   file: File;
   message?: string;
+  /** 当前会话 ID——上传解析轮与后续对话轮须同属一个会话，服务端才能恢复跨轮工具证据 */
+  conversationId?: string;
 }
 
 export type UploadEventHandler = (event: SseEvent) => void;
 
 /**
- * POST /api/upload and stream SSE events back. Resolves when the stream ends
- * (either via `event: done` or ReadableStream exhaustion).
- *
- * Per web.md §3.2.2: upload events do NOT include `conversationId` — the
- * backend does not associate uploads with an ongoing chat. Callers who want
- * the parsed text to participate in subsequent turns must store it in their
- * own history and POST it via `/api/chat` themselves.
+ * POST /api/upload and stream SSE events back. Resolves with the echoed
+ * conversationId (X-Conversation-Id header) once the stream ends (either via
+ * `event: done` or ReadableStream exhaustion), so the caller can continue the
+ * same conversation on subsequent `/api/chat` turns.
  */
 export async function streamUpload(
   params: UploadParams,
   onEvent: UploadEventHandler,
   opts: UploadOptions = {},
-): Promise<void> {
+): Promise<string> {
   const form = new FormData();
   form.append("file", params.file);
   if (params.message) form.append("message", params.message);
+  if (params.conversationId) form.append("conversationId", params.conversationId);
 
   const res = await fetch("/api/upload", {
     method: "POST",
@@ -75,6 +75,9 @@ export async function streamUpload(
   if (!res.body) {
     throw new Error("文件上传失败: 响应为空");
   }
+
+  const conversationId =
+    res.headers.get("X-Conversation-Id") ?? params.conversationId ?? "";
 
   const reader = res.body.getReader();
   const decoder = new TextDecoder("utf-8");
@@ -98,7 +101,7 @@ export async function streamUpload(
         } catch {
           // ignore double-cancel
         }
-        return;
+        return conversationId;
       }
     }
   }
@@ -107,4 +110,5 @@ export async function streamUpload(
   if (buffer.trim().length > 0) {
     for (const ev of sseParser(buffer + "\n\n")) onEvent(ev);
   }
+  return conversationId;
 }

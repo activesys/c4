@@ -136,11 +136,20 @@ export function createUploadRouter(agent: C4Agent): Router {
                 `（展示要求：全程使用中文回复，仅协议名/字段标识等技术术语可保留英文）`,
             ].join("\n");
 
+            // 与 /api/chat 共享会话 ID：前端回传则复用，否则生成并回传，
+            // 使上传解析轮与后续对话轮处于同一会话，服务端才能恢复跨轮工具证据
+            const conversationId =
+                typeof req.body.conversationId === "string" &&
+                req.body.conversationId.length > 0
+                    ? req.body.conversationId
+                    : randomUUID();
+
             // Set SSE headers
             res.setHeader("Content-Type", "text/event-stream");
             res.setHeader("Cache-Control", "no-cache");
             res.setHeader("Connection", "keep-alive");
             res.setHeader("X-Accel-Buffering", "no");
+            res.setHeader("X-Conversation-Id", conversationId);
             res.flushHeaders();
 
             // Keepalive
@@ -153,6 +162,7 @@ export function createUploadRouter(agent: C4Agent): Router {
 
             const stream = agent.invoke({
                 messages: [{ role: "user", content: prompt }],
+                conversationId,
             });
 
             function processNext(
@@ -175,7 +185,7 @@ export function createUploadRouter(agent: C4Agent): Router {
                         sendSSE(res, null, { type: "tool_result", name: event.name, result: event.result });
                         break;
                     case "done":
-                        sendSSE(res, "done", {});
+                        sendSSE(res, "done", { conversationId });
                         break;
                     case "error":
                         sendSSE(res, "error", { message: event.message });
