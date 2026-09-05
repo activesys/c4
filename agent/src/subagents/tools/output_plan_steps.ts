@@ -39,7 +39,7 @@ const deviceInputSchema = z.object({
 const forwardTargetInputSchema = z.object({
     name: z.string().describe("转发目标名称"),
     abbr: z.string().describe("转发目标标识（候选，info-gatherer 提取）"),
-    protocol: z.string().describe("转发协议，如 asfp2"),
+    protocol: z.string().describe("转发协议，必须由用户明确提供，禁止沿用接收侧协议或猜测"),
     points: z.array(devicePointInputSchema).optional().describe(
         "转发点业务字段（必要项）：按采集点顺序与采集点一一对应；" +
         "每个元素必须包含该服务 point_schema.fields 声明的全部业务字段" +
@@ -140,12 +140,33 @@ export function find_service_type(
     for (const e of entries) {
         if (e.role !== role) continue;
         for (const p of e.protocols) {
-            if (p.protocol === protocol || protocol.startsWith(p.protocol)) {
+            if (normalize_protocol(p.protocol) === protocol) {
                 return e.service_type;
             }
         }
     }
     return null;
+}
+
+/** 转义正则特殊字符（协议名拼入正则时使用） */
+function escape_regex(s: string): string {
+    return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** 返回服务目录中已部署的协议名集合（按 role 过滤，可选）。用于未知协议的可读报错。 */
+export function list_supported_protocols(
+    registry: McpServiceRegistry,
+    role?: "writer" | "reader",
+): string[] {
+    const seen = new Set<string>();
+    for (const e of registry.getServiceCatalogEntries()) {
+        if (role && e.role !== role) continue;
+        for (const p of e.protocols) {
+            const name = normalize_protocol(p.protocol);
+            if (name) seen.add(name);
+        }
+    }
+    return [...seen];
 }
 
 function flatten_plan_fields(

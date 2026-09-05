@@ -4,7 +4,7 @@
 import { tool } from "langchain";
 import { z } from "zod";
 import type { McpServiceRegistry } from "../../registry/registry.js";
-import { find_service_type, normalize_protocol } from "./output_plan_steps.js";
+import { find_service_type, list_supported_protocols, normalize_protocol } from "./output_plan_steps.js";
 
 // ── Schema ─────────────────────────────────────────────────
 
@@ -21,7 +21,7 @@ const deviceSpecSchema = z.object({
     name: z.string().describe("设备名称"),
     abbr: z.string().optional().describe("采集目标标识（候选，从 deviceInfo.abbr 原样复制，如 wt1；用于生成 instance.id 与记忆库一致）"),
     seq: z.number().describe("设备编号（从1开始）"),
-    protocol: z.string().describe("通信协议，如 modbus_tcp, iec104"),
+    protocol: z.string().describe("通信协议，如 modbus, iec104"),
     connection: z.object({
         ip: z.string().describe("设备 IP"),
         port: z.number().describe("端口"),
@@ -32,7 +32,7 @@ const deviceSpecSchema = z.object({
 const forwardTargetSchema = z.object({
     name: z.string().describe("转发目标名称，如 中心侧数据库"),
     abbr: z.string().optional().describe("转发目标标识（候选，从 deviceInfo.forward_targets 的 abbr 原样复制，如 center）"),
-    protocol: z.string().describe("转发协议，如 asfp2, influxdb"),
+    protocol: z.string().describe("转发协议，必须由用户明确提供，禁止沿用接收侧协议或猜测"),
     connection: z.object({
         ip: z.string().optional().describe("目标 IP（asfp2 等 TCP 协议用）"),
         port: z.number().optional().describe("目标端口（asfp2 等 TCP 协议用）"),
@@ -104,11 +104,23 @@ function validate_required_config(
 ): string[] {
     const errors: string[] = [];
     for (const item of items) {
-        const svc = find_service_type(
-            registry,
-            normalize_protocol(String(item.protocol ?? "")),
-            role,
-        );
+        const proto = String(item.protocol ?? "").trim();
+        if (proto === "") {
+            errors.push(
+                `${label} "${item.name}" 缺少通信协议，请向用户询问后再调用本工具`,
+            );
+            continue;
+        }
+        const svc = find_service_type(registry, normalize_protocol(proto), role);
+        if (!svc) {
+            const supported = list_supported_protocols(registry, role).join("、");
+            errors.push(
+                `${label} "${item.name}" 的协议 "${proto}" 未在服务目录中找到。` +
+                `当前已部署的${role === "writer" ? "数据采集" : "数据转发"}协议：${supported}。` +
+                `请确认协议名称是否正确，或确认该协议对应的 MCP 服务是否已部署。`,
+            );
+            continue;
+        }
         const entry = svc ? registry.queryRegistry(svc) : null;
         const conn = (item.connection ?? {}) as Record<string, unknown>;
         for (const [name, f] of Object.entries(entry?.config_schema.fields ?? {})) {
