@@ -17,7 +17,7 @@ import { fileURLToPath } from "node:url";
 import type { McpServiceRegistry } from "../registry/registry.js";
 import type { C4McpManager } from "../mcp/client.js";
 import { xlsxParserTool, csvParserTool, txtParserTool } from "../subagents/tools/doc_parsers.js";
-import { createOutputPlanStepsTool, normalize_protocol } from "../subagents/tools/output_plan_steps.js";
+import { createOutputPlanStepsTool, list_supported_protocols, normalize_protocol } from "../subagents/tools/output_plan_steps.js";
 import { sanitize_identifier } from "../executor/executor.js";
 import { buildErrorTranslator, translateError } from "../mcp/tools.js";
 import { createOutputAccessPlanTool } from "../subagents/tools/output_access_plan.js";
@@ -50,6 +50,10 @@ export interface SuperWorkerConfig {
     site?: { name: string; abbr: string } | null;
     /** 用户在对话中显式声明的通信协议（规范化后，如 "asfp2"）；null = 尚未声明 */
     declared_protocol?: string | null;
+    /** 用户显式声明的转发协议（规范化后）；null = 尚未声明——转发协议与接收协议逐侧独立必供 */
+    declared_forward_protocol?: string | null;
+    /** 转发协议握手态：闸门拒绝后置位，等待用户答复完成声明（见 resolve_forward_handshake） */
+    forward_handshake_pending?: boolean;
     state?: AgentStateWriter;
     agentLogger?: AgentLogger;
 }
@@ -325,6 +329,105 @@ const NUDGE_CONTENTS = new Set<string>([
     "你必须立即调用 output_plan_steps 工具。不要用文字回答。",
 ]);
 
+/** 转义正则特殊字符（协议名拼入正则时使用） */
+function escape_protocol_regex(s: string): string {
+    return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * 从用户消息确定性捕获转发协议声明。转发协议与接收协议逐侧独立必供：
+ * 消息中出现协议名只视为接收侧已提供，转发协议必须命中显式转发侧模式才算已声明。
+ * 四种模式（候选名均需在服务目录中存在，避免误捕普通英文词）：
+ * ①「转发协议为/是/: X」②「转发采用/使用/通过/基于 X 协议」
+ * ③「用 X 协议转发/推送/写入」④「写入 X」（协议名直接跟在写入后，如 写入 InfluxDB）
+ */
+function capture_declared_forward_protocol(
+    content: string,
+    registry: McpServiceRegistry,
+): string | null {
+    const known = list_supported_protocols(registry);
+    const patterns: RegExp[] = [
+        /转发协议(?:为|是|[:：])?\s*([a-zA-Z][a-zA-Z0-9_]*)/i,
+        /转发(?:采用|使用|通过|基于)\s*([a-zA-Z][a-zA-Z0-9_]*)\s*协议/,
+        /([a-zA-Z][a-zA-Z0-9_]*)\s*协议\s*(?:转发|推送|写入)/,
+        /写入\s*([a-zA-Z][a-zA-Z0-9_]+)/i,
+    ];
+    for (const re of patterns) {
+        const m = content.match(re);
+        if (!m) {
+            continue;
+        }
+        const norm = normalize_protocol(m[1].toLowerCase());
+        if (known.some((k) => normalize_protocol(k) === norm)) {
+            return norm;
+        }
+    }
+    return null;
+}
+
+/**
+ * 从用户消息确定性捕获协议声明（接收侧）。协议已改为「用户必供、禁止推断」，
+ * 捕获用于记忆并强制后续调用不得改用其他协议。
+ * 两种情形均视为用户已提供：①显式「使用/接入 X 协议」；②已部署协议名出现在描述中。
+ * 转发侧声明不算接收协议：命中位置紧邻「转发」前缀时跳过 ①；exclude 为已声明的
+ * 转发协议时，②跳过同名候选（如「转发采用asfp2协议」不应把 asfp2 记为接收协议）。
+ */
+function capture_declared_protocol(
+    content: string,
+    registry: McpServiceRegistry,
+    exclude?: string | null,
+): string | null {
+    const explicit = content.match(
+        /(?:使用|采用|接入|通过|基于|采集|接收|转发)\s*([a-zA-Z][a-zA-Z0-9_]*)\s*协议/,
+    );
+    if (explicit && explicit.index !== undefined) {
+        const before = content.slice(Math.max(0, explicit.index - 2), explicit.index);
+        if (!before.includes("转发")) {
+            return normalize_protocol(explicit[1].toLowerCase());
+        }
+    }
+    const known = list_supported_protocols(registry);
+    for (const name of known) {
+        if (exclude && normalize_protocol(name) === normalize_protocol(exclude)) {
+            continue;
+        }
+        const re = new RegExp(`\\b${escape_protocol_regex(name)}\\b`, "i");
+        if (re.test(content)) {
+            return normalize_protocol(name.toLowerCase());
+        }
+    }
+    return null;
+}
+
+/**
+ * 转发协议问答握手判定——权威声明通道，不依赖枚举用户措辞：
+ * ①答复含唯一已知协议名 → 采纳（开放问的任意含协议名回答都收）；
+ * ②纯肯定答复（是/对/正确等）且 agent 上一条文本中仅出现一个协议名 → 采纳该名
+ * （对复述的确认即提供，与修改复述确认、方案确认按钮同一原则）；
+ * 其余（多协议名/含糊/否定）→ 不置位，agent 继续提问自然收敛。
+ */
+function resolve_forward_handshake(
+    reply: string,
+    mentioned: string[],
+    agentLastText: string,
+    known: string[],
+): string | null {
+    if (mentioned.length === 1) {
+        return mentioned[0];
+    }
+    const trimmed = reply.trim();
+    const isAffirmation =
+        trimmed.length > 0 && trimmed.length <= 8 &&
+        /^(是的?|对的?|正确|没错|好的?|可以|确认|嗯+|ok|yes)+[。！!，,\s]*$/i.test(trimmed);
+    if (!isAffirmation) {
+        return null;
+    }
+    const inQuestion = known.filter((name) =>
+        new RegExp(`\\b${escape_protocol_regex(name)}\\b`, "i").test(agentLastText),
+    );
+    return inQuestion.length === 1 ? inQuestion[0] : null;
+}
+
 export async function createC4Agent(
     config: SuperWorkerConfig,
 ): Promise<C4Agent> {
@@ -341,11 +444,26 @@ export async function createC4Agent(
     let userConfirmed = false;
     // 会话历史（含工具调用/结果证据）——按 conversationId 持久化，跨轮恢复完整上下文
     const conversationHistories = new Map<string, HistoryMsg[]>();
+    // 会话级握手状态：用户消息缓冲（便捷通道扫全量历史）+ agent 最后文本（握手复述判定）
+    const userTextByConv = new Map<string, string>();
+    const assistantTextByConv = new Map<string, string>();
+    // 上一次处理的会话——新会话开始时复位跨会话的声明捕获（协议/端口）
+    let lastConversationId: string | null = null;
 
     return {
         invoke: async function* (input) {
             const conversation = input.conversationId ?? "unknown";
             const log = config.agentLogger;
+            // 新会话开始：上一会话的协议声明/端口声明失效，避免跨会话泄漏（func_test_case 用例 13）
+            if (conversation !== lastConversationId) {
+                lastConversationId = conversation;
+                config.declared_protocol = null;
+                config.declared_forward_protocol = null;
+                config.forward_handshake_pending = false;
+                userPort = null;
+                userTextByConv.delete(conversation);
+                assistantTextByConv.delete(conversation);
+            }
             // 恢复服务端历史：后续轮优先使用服务端完整历史（含工具证据），
             // 前端 text-only history 仅作服务端无记录时的兜底
             const storedHistory = conversationHistories.get(conversation);
@@ -373,15 +491,45 @@ export async function createC4Agent(
                         if (portMatch) {
                             userPort = portMatch[1];
                         }
-                        // 确定性捕获用户显式声明的协议（如「使用asfp2协议」）——
-                        // 防止重新解析时重新推断协议（func_test_case 用例 11）
-                        const protoMatch = lastContent.match(
-                            /\b(asfp2|modbus(?:\s*tcp)?|iec104|influxdb)\b/i,
+                        // 协议声明双通道。便捷通道：被动扫描本会话累计用户消息（显式声明模式，
+                        // 声明可能出现在任意早前轮次）。转发协议单独捕获，接收侧捕获排除同名，
+                        // 避免「转发采用asfp2协议」被误记为接收协议
+                        let buf = userTextByConv.get(conversation) ?? "";
+                        buf = (buf + "\n" + lastContent).slice(-8000);
+                        userTextByConv.set(conversation, buf);
+                        const declaredFwd = capture_declared_forward_protocol(
+                            buf,
+                            config.registry,
                         );
-                        if (protoMatch) {
-                            config.declared_protocol = normalize_protocol(
-                                protoMatch[1].toLowerCase().replace(/\s+/g, "_"),
+                        if (declaredFwd) {
+                            config.declared_forward_protocol = declaredFwd;
+                            config.forward_handshake_pending = false;
+                        }
+                        const declared = capture_declared_protocol(
+                            buf,
+                            config.registry,
+                            declaredFwd ?? config.declared_forward_protocol,
+                        );
+                        if (declared) {
+                            config.declared_protocol = declared;
+                        }
+                        // 权威通道：闸门握手——拒绝后（pending）的用户答复按对话结构判定，
+                        // 措辞任意也能收敛（resolve_forward_handshake）
+                        if (!config.declared_forward_protocol && config.forward_handshake_pending) {
+                            const known = list_supported_protocols(config.registry);
+                            const mentioned = known.filter((name) =>
+                                new RegExp(`\\b${escape_protocol_regex(name)}\\b`, "i").test(lastContent),
                             );
+                            const cand = resolve_forward_handshake(
+                                lastContent,
+                                mentioned,
+                                assistantTextByConv.get(conversation) ?? "",
+                                known,
+                            );
+                            if (cand) {
+                                config.declared_forward_protocol = cand;
+                                config.forward_handshake_pending = false;
+                            }
                         }
                     }
                     // 否定/拒绝词优先判断，避免 "取消，不执行..." 中的 "执行" 被误判为确认
@@ -567,6 +715,7 @@ export async function createC4Agent(
                         if (textParts.length > 0) {
                             producedText = true;
                             lastTextSample = textParts.join("");
+                            assistantTextByConv.set(conversation, lastTextSample);
                             log?.llm_text(conversation, lastTextSample);
                         }
                         for await (const tc of msg.toolCalls) {
