@@ -25,15 +25,10 @@ export interface L1PlanFieldSummary {
     description?: string;
 }
 
-/** L1 摘要中的 point_schema（fields + Writer 身份字段）。 */
-export interface L1PointSchema {
-    fields: PointField[];
-    identity_fields?: string[];
-}
-
-/** 完整 L1 服务摘要 = 基础摘要 + point_schema + config_schema 字段摘要 + 服务使用提示。 */
+/** 完整 L1 服务摘要 = 基础摘要 + point_fields + config_schema 字段摘要 + 服务使用提示。 */
 export interface ServiceCatalogEntry extends RegistryL1Summary {
-    point_schema: L1PointSchema;
+    point_fields: PointField[];
+    identity_fields?: string[];
     plan_fields: L1PlanFieldSummary[];
     prompt_hints: string[];
 }
@@ -137,7 +132,7 @@ export class McpServiceRegistry {
    * ```
    * ## 可用 MCP 服务
    * - **c4_modbus_client** (Modbus 数据采集) [writer]
-   *   协议: modbus_tcp — Modbus TCP 协议采集
+    *   协议: modbus — Modbus 协议采集
    *     规则: device.port == 502 → 标准 Modbus TCP 端口
    * ...
    * ```
@@ -214,16 +209,14 @@ export class McpServiceRegistry {
           description: r.description,
         })),
       })),
-      point_schema: {
-        fields: entry.point_schema.fields.map((f) => ({
-          name: f.name,
-          type: f.type,
-          description: f.description,
-        })),
-        identity_fields: entry.point_schema.identity_fields
-          ? [...entry.point_schema.identity_fields]
-          : undefined,
-      },
+      point_fields: entry.point_schema.fields.map((f) => ({
+        name: f.name,
+        type: f.type,
+        description: f.description,
+      })),
+      identity_fields: entry.point_schema.identity_fields
+        ? [...entry.point_schema.identity_fields]
+        : undefined,
       plan_fields: Object.entries(entry.config_schema.fields)
         .map(([name, field]) => ({
           name,
@@ -291,16 +284,16 @@ export function formatServiceCatalog(summaries: ServiceCatalogEntry[]): string {
       }
     }
 
-    if (s.point_schema.fields.length > 0) {
+    if (s.point_fields.length > 0) {
       lines.push("  点表字段:");
-      for (const f of s.point_schema.fields) {
+      for (const f of s.point_fields) {
         lines.push(f.description ? `    ${f.name} (${f.type}) — ${f.description}` : `    ${f.name} (${f.type})`);
       }
     }
 
-    if (s.point_schema.identity_fields && s.point_schema.identity_fields.length > 0) {
+    if (s.identity_fields && s.identity_fields.length > 0) {
       lines.push(
-        `  身份字段: ${s.point_schema.identity_fields.join(" + ")}（唯一标识一个点；无点名时按此生成点名）`,
+        `  身份字段: ${s.identity_fields.join(" + ")}（唯一标识一个点；无点名时按此生成点名）`,
       );
     }
 

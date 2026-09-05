@@ -23,7 +23,7 @@ export interface SubagentConfig {
 /**
  * info-gatherer 子代理（C4_FUN_00002 / 00003）
  *
- * 解析文档、推断协议、收集实例参数与点表字段，缺失时逐个询问用户补齐。
+ * 解析文档、确定协议（用户提供）、收集实例参数与点表字段，缺失时逐个询问用户补齐。
  * 工具接收文件路径字符串，自行打开文件读取内容。
  *
  * 根据 agent.md §3.2 info-gatherer 定义。
@@ -32,17 +32,19 @@ export function createInfoGathererSubagent(): SubagentConfig {
     return {
         name: "info-gatherer",
         description:
-            "解析 Excel/CSV/PDF/Word/图片，推断协议，收集实例参数与点表字段。" +
+            "解析 Excel/CSV/PDF/Word/图片，确定协议（用户提供），收集实例参数与点表字段。" +
             "工具接收文件路径字符串，自行打开文件读取内容。",
         systemPrompt: [
-            "负责收集接入所需的全部必要信息——解析文档、推断协议、收集实例参数与点表字段，缺失时逐个询问用户补齐。",
+            "负责收集接入所需的全部必要信息——解析文档、确定协议（用户提供）、收集实例参数与点表字段，缺失时逐个询问用户补齐。",
             "支持 .xlsx .csv .pdf .docx .png .jpg 格式。",
             "工具参数是文件路径，收到后调用对应解析工具。",
             "",
-            "协议推断分三层（先匹配服务目录中各协议的 point_schema.fields）：",
-            "1) 从点表字段唯一匹配推断（如含 uid/fun/type/swap 列 → Modbus）",
-            "2) 从用户描述推断（如「采集 Modbus 设备」）",
-            "3) 前两步均无法确定时，询问用户协议，得知后用该协议的 point_schema.fields 重新理解点表列",
+            "协议必须由用户提供，禁止推断或猜测：消息中出现协议名（如 asfp2、modbus、iec104、influxdb）",
+            "或协议描述（如「采集 Modbus 设备」「接 IEC104 远动装置」）即视为用户已提供；",
+            "消息中无任何协议信息时，必须先询问用户协议，再用该协议的 point_schema.fields 校验点表列。",
+            "接收协议与转发协议相互独立，各自必须由用户明确提供：用户为接收侧提供的协议",
+            "（如「厂家通过 asfp2 协议转来数据」）仅对接收侧生效，不得默认用于转发侧；",
+            "转发目标的协议未获用户明确提供时，必须先询问用户转发协议，禁止沿用接收侧协议或猜测。",
             "",
             "输出结构化数据，包含以下字段：",
             "- name: 设备名称",
@@ -65,7 +67,7 @@ export function createInfoGathererSubagent(): SubagentConfig {
  *
  * 通过系统提示中的 L1 服务摘要（{{ service_catalog }}）获知可用服务
  * 及其支持协议，从设备信息生成结构化 AccessPlan。
- * 不再推断协议、不再收集信息——只做「选型 + 组装方案 + 方案确认」。
+ * 不再确定协议、不再收集信息——只做「选型 + 组装方案 + 方案确认」。
  *
  * 根据 agent.md §3.2 plan-generator 定义。
  *
@@ -85,7 +87,7 @@ export function createPlanGeneratorSubagent(
             "包含协议选择、设备清单、数据点映射、转发目标。",
         systemPrompt: [
             "基于 info-gatherer 产出的信息齐全的 deviceInfo，从以下可用服务中选择匹配的服务类型生成 AccessPlan。",
-            "不再推断协议、不再收集信息——只做「选型 + 组装方案 + 方案确认」。",
+            "不再确定协议、不再收集信息——只做「选型 + 组装方案 + 方案确认」。",
             "",
             "## 可用 MCP 服务",
             catalog,
@@ -105,16 +107,16 @@ export function createPlanGeneratorSubagent(
             '  "forward_targets": [{',
             '    "name": "目标名称",',
             '    "abbr": "转发目标标识（如 center）",',
-            '    "protocol": "asfp2",',
+            '    "protocol": "用户提供的转发协议",',
             '    "ip": "...",',
             '    "port": 9999',
             "  }]",
-            "}",
             "```",
             "",
             "规则：",
             "- 实例 id 由 {site_abbr}_{target_abbr} 生成（如 hnals_wt1），不含协议/角色信息",
-            "- 协议选择依据 Registry 中的 protocol 定义和 selection_rules",
+            "- 接收协议与转发协议相互独立，各自由用户提供；转发协议缺失时先询问，禁止沿用接收协议或猜测",
+            "- 协议由用户提供，按 Registry 中的 protocol 定义映射到服务类型（selection_rules 辅助选型）",
             "- 展示方案时须一并展示协议与 abbr 绑定，让用户确认协议是否正确、abbr 是否绑定到正确设备",
         ].join("\n"),
         tools: [],
