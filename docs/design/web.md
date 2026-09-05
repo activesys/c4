@@ -121,7 +121,7 @@ Agent 阶段变化刷新。
 ```typescript
 interface ChatRequest {
     message: string;                          // 用户消息文本（必填）
-    conversationId?: string;                  // 客户端关联标识（后端仅回显，见 §3.1.2）
+    conversationId?: string;                  // 会话 ID（后端按此持久化跨轮历史，见 §3.1.2）
     history?: Array<{ role: string; content: string }>;  // 历史消息（前端维护并回传）
     // 以下字段后端代码保留，但当前无实际作用（确认不依赖中断恢复，见 §3.1.3）
     resume?: boolean;                         // 无实际作用
@@ -155,14 +155,18 @@ SSE 响应事件（`Content-Type: text/event-stream`）：
   工具内部细节默认折叠，避免协议级术语惊吓非技术用户。
 - `done` 结束本次流（或流关闭兜底，见 §4.2）。
 
-**conversationId 语义**：`conversationId` 是**纯客户端关联/回显标识**——后端把它写进
-`X-Conversation-Id` 响应头与每个事件的 `conversationId` 字段，但**不参与任何服务端状态管理**。
-前端可将它作为日志/追踪标识，但**不得承诺「续传」**。
+**conversationId 语义**：`conversationId` 是**会话主键**——后端按它持久化完整消息历史（含工具
+调用/结果证据，见下「多轮上下文」），并把它写进 `X-Conversation-Id` 响应头与每个事件的
+`conversationId` 字段。前端**必须跨轮复用同一 `conversationId`**（`useChatStream` 持久化该值并
+自动附带），否则服务端历史无法恢复、跨轮工具证据丢失。
 
-**多轮上下文**：后端未实现会话持久化，跨轮状态由两部分互补：
-- **前端维护 `history`**：每轮把历史消息随请求回传，后端据此重建对话上下文。
+**多轮上下文**：跨轮状态由两部分互补：
+- **后端按 `conversationId` 持久化完整历史**：`super_worker` 每轮结束后把 `run.output.messages`
+  （含工具调用/结果）按 conversationId 存入内存 Map，后续轮优先恢复服务端历史（前端 history
+  仅作服务端无记录时的兜底）；nudge 消息剔除，限长 100 条。修复跨轮工具证据丢失导致的
+  推理死循环（func_test_case 用例 12）。
 - **后端内存闭包**：`C4Agent` 在内存中维护跨轮的设备信息与接入方案（agent.md §3.2.1.3a），
-  **按 agent 实例、而非按 conversationId 隔离**，且不持久化（Agent 重启即丢失）。
+  且不持久化（Agent 重启即丢失——重启后服务端历史为空，退化为前端 history 兜底）。
 
 > **history 回传需限长**：`express.json` 的 body 上限为 1 MB，长会话下 history 逐轮增长会
 > 撞上限并推高 LLM 上下文成本。前端应**仅回传最近 N 轮**（建议 N=10），而非全量历史。
@@ -210,7 +214,7 @@ Agent 生成接入方案后需要用户确认。**确认的唯一有效通道是
 |----|----|
 | 允许扩展名 | `.xlsx .csv .xls .pdf .docx .doc .png .jpg .jpeg .gif .bmp .txt` |
 | 大小上限 | 50 MB |
-| 响应 | SSE 流（`text`/`tool_call`/`tool_result`/`done`/`error` 事件，**均不带 `conversationId`**） |
+| 响应 | SSE 流（`text`/`tool_call`/`tool_result`/`done`/`error` 事件；`done` 事件带 `conversationId`，响应头 `X-Conversation-Id` 回传会话 ID） |
 
 #### 3.2.2 前端处理
 
@@ -219,11 +223,11 @@ Agent 生成接入方案后需要用户确认。**确认的唯一有效通道是
 - **实际可解析格式提示**：仅 `.xlsx`/`.csv`/`.txt` 有对应解析工具；`.pdf`/`.docx`/图片会被
   后端接受（multer 放行）但**无解析器**，Agent 无法提取内容。前端在文件选择器中对此类格式
   标注「暂不支持解析」，避免用户误传后得到空结果。
-- **会话关联**：upload 接口**不接收也不返回 `conversationId`**，其 SSE 事件亦不带该字段，
-  **无法与进行中的对话做服务端关联**。上传是「一次性解析、结果纯文本回显」——回显气泡按
-  **agent 样式**渲染（解析结果是 Agent 的输出，非用户输入）；如需让解析结果参与后续对话，
-  由前端把回显文本自行存入本地 `history`（以 assistant 角色回传），在**下一轮** `POST /api/chat`
-  时随 `history` 回传即可。
+- **会话关联**：upload 接口**接收可选 `conversationId` 表单字段并回传**（`X-Conversation-Id` 头 +
+  `done` 事件）——上传解析轮与后续对话轮同属一个会话，服务端按 conversationId 持久化解析
+  产生的工具证据，供后续轮恢复。前端 `streamUpload` 返回该 ID，`ChatView` 回写到 `useChatStream`
+  的会话状态，后续 `POST /api/chat` 自动复用。上传是「一次性解析、结果纯文本回显」——回显气泡
+  按 **agent 样式**渲染（解析结果是 Agent 的输出，非用户输入）。
 - **文件生命周期**：上传文件落盘 `/tmp/c4_upload_*` 后，当前后端**不清理**。前端无需处理，
   但部署文档需注明「运维定期清理 `/tmp/c4_upload_*`」或后续由后端补充清理逻辑。
 

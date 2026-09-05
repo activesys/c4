@@ -125,7 +125,7 @@ while (!resultAchieved && retries < maxRetries) {
 
 ```
 SuperWorker (createDeepAgent)
-  ├─ info-gatherer 子代理     (解析文档 + 推断协议 + 收集信息 → 结构化设备信息)
+  ├─ info-gatherer 子代理     (解析文档 + 确定协议(用户提供) + 收集信息 → 结构化设备信息)
   ├─ plan-generator 子代理  (设备信息 → AccessPlan)
   └─ step-decomposer 子代理 (AccessPlan → ServiceStep[])
 ```
@@ -324,7 +324,7 @@ const agent = createAgent({
 
 **info-gatherer**（原 doc-parser，C4_FUN_00002 / 00003）：
 
-负责**收集接入所需的全部必要信息**——解析文档、推断协议、收集实例参数与点表字段，缺失时逐个询问用户补齐。
+负责**收集接入所需的全部必要信息**——解析文档、确定协议（用户提供）、收集实例参数与点表字段，缺失时逐个询问用户补齐。
 接入任务（add/modify/delete）天然是「采集（Writer）+ 转发（Reader）」的完整链路，info-gatherer **同时收集两端**：
 采集设备（devices）与转发目标（forward_targets），缺一端即信息不完整。产出"信息齐全"的设备信息，供 plan-generator 组装方案。
 
@@ -335,9 +335,9 @@ const agent = createAgent({
 | `txt_parser` | 读取纯文本文件 | `filePath` | `{content}` |
 
 解析工具只做**纯格式提取**，不做语义推断。LLM 拿到 raw data 后，结合 `service_catalog`（含各协议
-`point_schema.fields`）理解列含义、推断协议、映射点字段，由 `responseFormat: deviceInfoSchema` 产出结构化设备信息。
+`point_schema.fields`）理解列含义、映射点字段、确定协议（用户提供），由 `responseFormat: deviceInfoSchema` 产出结构化设备信息。
 
-`deviceInfoSchema` 是 info-gatherer 的输出骨架。info-gatherer **负责收集齐必要信息**——协议（推断或询问）、采集目标标识 abbr（候选，从描述提取）、
+`deviceInfoSchema` 是 info-gatherer 的输出骨架。info-gatherer **负责收集齐必要信息**——协议（用户提供或询问）、采集目标标识 abbr（候选，从描述提取）、
 实例参数（`config_schema.fields` 中无 `default` 键的项为必填；有 `default` 的项是技术默认值，自动填充不询问）、点表字段（`point_schema.fields`），缺失时逐个询问用户补齐（见下"信息收集与询问机制"）：
 
 ```typescript
@@ -345,7 +345,7 @@ const deviceInfoSchema = z.object({
     devices: z.array(z.object({
         name: z.string(),            // 从对话上下文提取
         abbr: z.string(),            // 采集目标标识（候选，info-gatherer 从描述提取，见 §3.2.1.3a）
-        protocol: z.string(),        // 协议必填——info-gatherer 三层推断 + 询问闭环保证（见下）
+        protocol: z.string(),        // 协议必填——info-gatherer 用户提供 + 询问闭环保证（见下）
         points: z.array(z.object({   // 点字段宽松，具体字段由 point_schema.fields 决定
             name: z.string(),
         }).passthrough()),
@@ -354,7 +354,7 @@ const deviceInfoSchema = z.object({
     forward_targets: z.array(z.object({
         name: z.string(),            // 转发目标名称
         abbr: z.string(),            // 转发目标标识（候选，info-gatherer 从描述提取，见 §3.2.1.3a）
-        protocol: z.string(),        // 转发协议必填——info-gatherer 推断 + 询问闭环保证
+        protocol: z.string(),        // 转发协议必填——用户提供 + 询问闭环保证
         missing_fields: z.array(z.string()).optional(),
     }).passthrough()),               // 实例 plan 字段（ip/port、url/token 等）+ 目标级字段（measurement）平铺
 });
@@ -364,25 +364,39 @@ const deviceInfoSchema = z.object({
 > 一律 `.passthrough()` 放行。info-gatherer 按 registry 的 `point_schema.fields`/`config_schema` 收集齐必要字段
 > （实例字段中无 `default` 键的必填项 + `point_schema.fields` 的全部点字段），缺失时询问用户补齐。
 
-**协议推断（`protocol` 字段，归属 info-gatherer）**：协议是业务信息，由 LLM 分层推断，**不硬编码任何协议**。
-推断**由 info-gatherer 完成**——它用 `service_catalog`（含各服务的 `point_schema.fields`）理解点表列 + 推断协议，分三层：
+**协议（`protocol` 字段，归属 info-gatherer）**：协议是必填业务信息，**由用户提供，禁止推断或猜测**，**不硬编码任何协议**。
+info-gatherer **不推断协议**——它只从用户消息中确定协议，再结合 `service_catalog`（含各服务的 `point_schema.fields`）校验点表。
 
-1. **从点表字段推断**：对比 `service_catalog` 中各 Writer 服务的 `point_schema.fields`，若点表列与某协议
-   唯一匹配（如含 `uid`/`fun`/`type`/`swap` 列 → Modbus），据此确定协议
-2. **从用户描述推断**：若多协议的 `point_schema.fields` 无法区分（如协议 A、B 的点表都只是整数地址列），
-   从用户消息中的描述（「采集 Modbus 设备」、「接 IEC104 远动装置」）分析协议类型
-3. **询问用户**（C4_FUN_00005）：前两步均无法确定时，询问用户补充协议/通信方式信息，
-   得知协议后**用该协议的 `point_schema.fields` 重新理解点表列**，再继续收集其余信息
+判定「用户已提供协议」的两种情形（确定性关键词捕获，`declared_protocol`）：
+1. **显式协议名**：消息中出现「使用 asfp2 协议」「接入 modbus 协议」等协议名
+2. **协议描述**：消息中出现含协议名的描述（「采集 Modbus 设备」「接 IEC104 远动装置」）
 
-> 三层推断**同时适用于 Writer（采集协议）与 Reader（转发协议）**——Writer 从采集点表列推断，
-> Reader 从转发目标描述推断（如「转发到上级系统」→ ASFP2、「入库」→ InfluxDB）。两类协议都确定后信息才算收集齐。
+用户消息中无任何协议信息时，info-gatherer 先**询问用户协议**（C4_FUN_00005），得知协议后**用该协议的
+`point_schema.fields` 校验点表**，再继续收集其余信息。
 
-> 协议推断成功后**不单独打断用户**，协议作为方案的一部分在 plan-generator 的方案确认环节隐含确认。
-> **隐含确认的前提是方案摘要必须逐设备、逐转发目标明确列出推断出的协议名**（禁止只写「数据转发
-> 协议」等含糊表述）——协议推断是概率性的，若推断错误而摘要不展示，用户无从发现，会带错确认
-> 直到对端协议不匹配接入失败（func_test_case 用例 6）。
-> `deviceInfo.protocol` 与 `AccessPlan.protocol` 都是**必填**——info-gatherer 通过三层推断 + 询问用户兜底
-> 保证协议在收尾时必已确定（推断不出就询问，不产出空协议），到 step-decomposer 查 registry 时协议已就绪。
+> 协议确定后（用户提供或询问确定），`output_device_info` 以 registry 的 `point_schema.fields` 对点表做
+> 确定性完整性校验；点表字段缺失时向用户诊断（协议错 / 点表缺字段可补 / 点表错三态，见 func_test_case 用例 13）。
+> 用户提供的协议在服务目录中不存在时（如 `abc`），`output_device_info` / `output_access_plan` 返回可读错误并
+> 列出已部署协议列表——区分「协议名错误」与「协议未部署（新协议可插拔，C4_FUN_00017）」两种情形提示。
+> `declared_protocol` 确定性捕获协议声明（显式「X协议」模式 + 已部署协议名匹配），用户声明后后续一切调用
+> 必须使用该协议、禁止改用其他协议或重新推断（func_test_case 用例 11/13）。
+> 转发协议（Reader）与采集协议（Writer）同样遵循「用户必供 + 询问闭环」——接收协议与转发协议相互独立，
+> 各自必须由用户明确提供。用户为接收侧声明的协议（如「厂家通过 asfp2 协议转来数据」）仅对接收侧生效，
+> 不得默认用于转发侧；转发目标的协议未获用户明确提供时必须询问，禁止按转发目标描述推断协议。
+> （原「转发到上级系统→ASFP2、入库→InfluxDB」的目标→协议映射已于 2026-09-05 移除——该映射属于
+> 协议推断，与「协议必须由用户提供」原则冲突，实测中导致用户未提供转发协议时被自动填为 asfp2。）
+> 确定性防线采用「双通道 + 问答握手」，不依赖枚举用户措辞。①便捷通道：super_worker 对本会话
+> 累计用户消息被动扫描显式转发声明模式（「转发采用X协议」「转发协议为X」「用X协议转发」
+> 「写入X」等）；②权威通道——问答握手：`output_device_info` 在存在转发目标而转发协议未声明时
+> 拒绝提交并置握手态，agent 必须向用户提问（推荐复述候选协议的是非题，如「转发协议是 ASFP2
+> 吗？」）；用户答复按对话结构判定——含唯一已知协议名即采纳；纯肯定答复（是/对/正确）且
+> agent 上一条文本中仅出现一个协议名时采纳该名。「对复述的确认 = 提供」，与修改复述确认、
+> 方案确认按钮同一原则。用户表述不可枚举，但 agent 的提问形态可枚举：开放问把答案空间压缩为
+> 「含协议名与否」，封闭问压缩为是/否——表述多样性由 LLM 提问吸收，确定性由结构判定保证，
+> 任意措辞（如联合声明「接收和转发都是用asfp2协议」）最多一轮额外确认即可收敛，不会死锁。
+> 两类协议都确定后信息才算收集齐。
+> `deviceInfo.protocol` 与 `AccessPlan.protocol` 都是**必填**——由用户提供或询问确定，到 step-decomposer 查
+> registry 时协议已就绪。
 
 **信息收集与询问机制**（C4_FUN_00005 缺失引导）：
 
@@ -396,7 +410,7 @@ info-gatherer 收集两类必要信息，都由 registry 声明：
 > 有 `default` 的字段（如 `timer`）不收集，直接填默认值；`id`/`name` 由 agent 生成。
 > 上述两类必要信息**对采集设备（Writer）和转发目标（Reader）都适用**——两者都有实例参数（`config_schema.fields`）和点表字段（`point_schema.fields`），info-gatherer 分别收集齐全。
 
-**收集流程（循环直到收集齐）**：解析文档 → 推断协议（失败则询问用户协议后重新理解列）→
+**收集流程（循环直到收集齐）**：解析文档 → 确定协议（用户未提供则询问用户协议后校验点表）→
 **确定性完整性校验** → 缺失则**逐个询问**（一次一项）→ 用户提供 → 再校验 → 循环。
 
 **确定性完整性校验**（分层执行）：
@@ -424,11 +438,11 @@ info-gatherer 收集两类必要信息，都由 registry 声明：
 plan-generator 调用 `output_access_plan` 工具产出结构化的 `AccessPlan`（registry 必填项前置校验，
 缺必填配置时工具直接拒绝并要求向用户询问），并以自然语言展示方案摘要等待用户确认。
 
-> plan-generator **不再推断协议、不再收集信息**——协议已由 info-gatherer 确定，必要信息已收集齐，
+> plan-generator **不再确定协议、不再收集信息**——协议已由 info-gatherer 确定，必要信息已收集齐，
 > 它只做「选型 + 组装方案 + 方案确认」。
 
 **方案确认（含协议隐含确认 + 标识确认）**：展示接入方案时，须一并展示协议与采集/转发目标标识（abbr），
-让用户确认**协议是否正确**、**abbr 是否绑定到正确的设备**——协议由 info-gatherer 推断或询问确定，
+让用户确认**协议是否正确**、**abbr 是否绑定到正确的设备**——协议由 info-gatherer 用户提供或询问确定，
 abbr 由 §3.2.1.3a 记忆库检索 + 确认确定，二者都作为方案的一部分让用户最终确认。
 
 **step-decomposer**（C4_FUN_00044）—— `output_plan_steps` 工具：
@@ -685,7 +699,7 @@ interface AccessPlan {
 interface DeviceSpec {
   name: string                // 设备名称（中文显示，如 "1#升压站"）
   abbr: string                // 采集目标标识（候选，LLM 从用户消息提取，如 "transformer1"）；须经 §3.2.1.3a 记忆确认后固化，最终 id 以记忆库为准
-  protocol: string            // 通信协议（必填——由 info-gatherer 推断或询问确定，plan-generator 方案确认，见 §3.2 协议推断）
+  protocol: string            // 通信协议（必填——由 info-gatherer 用户提供或询问确定，plan-generator 方案确认，见 §3.2 协议）
   points: DevicePoint[]       // 采集点列表
   [field: string]: unknown    // 实例字段直接平铺（ip/port、url/token/org/bucket 等，由 config_schema.fields 声明）
 }
@@ -700,7 +714,7 @@ interface DevicePoint {
 interface ForwardTargetSpec {
   name: string                // 目标名称（中文显示，如 "中心侧数据库"）
   abbr: string                // 转发目标标识（候选，LLM 从用户消息提取，如 "center"）；须经 §3.2.1.3a 记忆确认后固化，最终 id 以记忆库为准
-  protocol: string            // 转发协议（必填——由 info-gatherer 推断或询问确定，plan-generator 方案确认，见 §3.2 协议推断）
+  protocol: string            // 转发协议（必填——用户提供或询问确定，plan-generator 方案确认，见 §3.2 协议）
   points?: object[]           // 转发点业务字段（必要项）：按采集点顺序与采集点一一对应，每个元素含 point_schema.fields 声明的全部业务字段（如 ASFP2 的 addr、InfluxDB 的 measurement/field/type）；用户未提供时必须询问，禁止自动编造
   [field: string]: unknown    // 实例 plan 字段（ip/port、url/token/org/bucket 等）+ 目标级字段（measurement，由 point_schema.fields 声明）
 }
@@ -1301,18 +1315,18 @@ Registry 内容分两层交付，避免上下文窗口膨胀：
 
 | 层 | 注入方式 | 内容 | 使用者 | 上下文位置 |
 |---|---------|------|--------|-----------|
-| **L1: 服务摘要** | 系统提示模板变量 `{{ service_catalog }}` | 服务名、display_name、role、protocols（含 description 和 selection_rules）、point_schema.fields（含字段说明）、point_schema.identity_fields（Writer 身份字段，供确定性查重与点名生成，§3.2.1.3b）、config_schema 字段摘要（区分「无 default 键=必填」/「有 default=技术默认值可选」）、prompt_hints（服务使用提示，见下文「系统提示与 MCP 解耦」） | SuperWorker 路由 / info-gatherer 推断协议+收集信息 / plan-generator 选型 | **始终加载** |
+| **L1: 服务摘要** | 系统提示模板变量 `{{ service_catalog }}` | 服务名、display_name、role、protocols（含 description 和 selection_rules）、point_schema.fields（含字段说明）、point_schema.identity_fields（Writer 身份字段，供确定性查重与点名生成，§3.2.1.3b）、config_schema 字段摘要（区分「无 default 键=必填」/「有 default=技术默认值可选」）、prompt_hints（服务使用提示，见下文「系统提示与 MCP 解耦」） | SuperWorker 路由 / info-gatherer 确定协议+收集信息 / plan-generator 选型 | **始终加载** |
 | **L2: 完整定义** | 工具调用 `queryRegistryTool(service_type)` | 完整 Registry JSON（含 config_schema 全量、binary_path、error_mappings） | step-decomposer 生成配置 | **按需拉取** |
 
 **约束**：
 - `{{ service_catalog }}` **只注入 L1**，不包含 `config_schema` 全量字段、`binary_path`、`error_mappings`；但包含 `config_schema` 的字段摘要（供 info-gatherer 判断哪些字段必需收集、哪些有默认值可跳过）
 - `queryRegistryTool` 返回指定服务的**完整 JSON**（所有字段）
 - step-decomposer 只拉取当前 AccessPlan 涉及的服务类型，不全量加载
-- info-gatherer、plan-generator 通过 L1 推断协议/选型，无需调用 `queryRegistryTool`（其 tools 列表不含此工具）
+- info-gatherer、plan-generator 通过 L1 确定协议/选型，无需调用 `queryRegistryTool`（其 tools 列表不含此工具）
 - 服务使用提示（`prompt_hints`）随 L1 注入——见下文「**系统提示与 MCP 解耦**」**运行时构建**：Agent 启动时 `McpServiceRegistry.loadFromDirectory()` 扫描全部 Registry JSON，
 提取 L1 摘要生成 `service_catalog` 字符串，注入以下系统提示：
 - SuperWorker 系统提示（§3.1）— 路由决策用途
-- info-gatherer 系统提示（§3.2）— 协议推断 + 信息收集用途
+- info-gatherer 系统提示（§3.2）— 协议确定 + 信息收集用途
 - plan-generator 系统提示（§3.2）— 选型用途
 
 L2 完整 JSON 保留在注册表内存中，仅 step-decomposer 通过 `queryRegistryTool` 按需拉取。
