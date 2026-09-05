@@ -59,17 +59,16 @@ describe.skipIf(!process.env.DEEPSEEK_API_KEY)("文件上传（真实后端 + LL
 });
 
 describe("文件上传（确定性契约）", () => {
-  it("4.2.2 upload 事件不含 conversationId", async () => {
+  it("4.2.2 upload 回传 conversationId（上传轮与对话轮共享会话）", async () => {
     const events: SseEvent[] = [];
-    await streamUpload(
+    const returnedCid = await streamUpload(
       { file: txtFile("points2.txt"), message: "请解析此文件中的设备信息" },
       (ev) => events.push(ev),
     );
 
     expect(events.length).toBeGreaterThan(0);
-    for (const ev of events) {
-      expect(ev.data.conversationId).toBeUndefined();
-    }
+    // 上传轮现在回传 conversationId，前端据此让后续对话轮复用同一会话（web.md §3.2.2）
+    expect(returnedCid.length).toBeGreaterThan(0);
   });
 
   it("4.2.3 classifyFileType 格式判定", () => {
