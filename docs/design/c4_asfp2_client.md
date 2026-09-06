@@ -98,6 +98,7 @@ ASFP2 发送实例。
 {
     "c4_asfp2_client": [
         {
+            "id": "hnals_center",
             "name": "转发到中心测数据库服务器",
             "ip": "172.16.109.11",
             "port": 9999,
@@ -114,6 +115,7 @@ ASFP2 发送实例。
             ]
         },
         {
+            "id": "hnals_third_party",
             "name": "转发到第三方数据服务器",
             "ip": "172.16.109.13",
             "port": 9999,
@@ -137,6 +139,7 @@ ASFP2 发送实例。
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
+| `id` | string | — | 实例标识（如 `hnals_center`），作为日志 `inst` 属性；缺省时回退 `name`，建议显式配置 |
 | `name` | string | — | 实例名称，用于日志和监控标识 |
 | `ip` | string | — | 目标服务器 IP 地址 |
 | `port` | int | — | ASFP2 服务端口 |
@@ -144,8 +147,8 @@ ASFP2 发送实例。
 | `t1` | int | `0` | 正向 KeepAlive 发送间隔（秒）。`0` 表示关闭 T1 定时器（不发送心跳），此时 `t2` 无效。`t1 > 0` 时作为空闲超时定时器——仅在 t1 秒内无数据发送时才发送 KeepAlive |
 | `t2` | int | `0` | 正向 KeepAlive 应答超时（秒）。仅在 `t1 > 0` 时有效。`0` 表示关闭 T2 应答等待（不检测对端存活性），约束 `t2 < t1` |
 | `smart` | int | — | 时间戳毫秒归零：`1`=归零（提高包聚合率和压缩率），`0`=保留毫秒精度 |
-| `forward_kack` | int | — | 正向 KeepAlive Ack 字节值（典型 255） |
-| `inverse_keep` | int | — | 反向 KeepAlive 字节值（典型 0） |
+| `forward_kack` | int | `255` | 正向 KeepAlive Ack 字节值（规范典型值 255）。**未配置或配置为 0 均按 255 处理**——客户端以该字节识别服务端 kack，0 与反向 KEEP 典型值冲突时 T2 应答等待将无法清除而误断链 |
+| `inverse_keep` | int | `0` | 反向 KeepAlive 字节值（典型 0；规范要求不得与 forward_kack 相同，`t1 > 0` 时启动校验，违者 config_invalid） |
 | `timer` | int | — | 转发周期（毫秒），即从共享内存读取并发送数据的间隔。设计约束：Reader 频率 10 倍于 Writer（Writer 为 1Hz），即 `timer ≤ 100`。典型配置 `timer=100`（100ms 间隔，10Hz） |
 
 ### 2.3 points 数组元素
@@ -695,6 +698,100 @@ var index map[uint32]*PointMapping
 | 生命周期工具 | `start` / `stop` | `start` / `stop` |
 | 配置字段差异 | `port`、`t1`、`t2`、`forward_kack`、`inverse_keep` | `ip` + `port`、`t0`、`t1`、`t2`、`smart`、`forward_kack`、`inverse_keep`、`timer` |
 | Points 字段 | `id`、`addr`、`shm_id` | `key`、`addr`、`shm_id` |
+
+---
+
+## 9. 日志设计
+
+### 9.1 现状与目标
+
+现状：运行期仅有 panic 恢复与启动 Fatal 两处输出，数据面完全不可观测——远端是否连上、
+发送是否成功、点位是否因类型不可编码被跳过均无迹可循。目标：
+
+1. **生命周期可追溯**：从配置加载到实例停止的每一步有日志；
+2. **数据面可量化**：连接/发送/跳过有周期统计，重连与超时可定位；
+3. **稳态静默**：默认级别下稳态运行不刷屏，调试信息按需开启。
+
+### 9.2 输出通道（stderr → journald）
+
+本服务是 stdio MCP：**stdout 为 JSON-RPC 专用，任何日志禁止写 stdout**，一律写 stderr。
+Agent 以 `StdioClientTransport` 拉起本进程且未重定向 stderr（inherit），故 stderr 直接进入
+c4-agent 的 journald——与部署设计「日志（journald）」一致，不新增日志文件与轮转负担。
+运维入口：`journalctl -u c4-agent | grep <instance_id>`。
+
+### 9.3 实现选型与统一入口
+
+- 采用标准库 `log/slog` + 自定义 Handler（Text → stderr），不引入第三方日志库；
+- **journald 原生级别**：Handler 在每行输出前拼 `<N>` 优先级前缀（crit=2 / err=3 / warning=4 /
+  info=6 / debug=7）。c4-agent 是 systemd 服务，stderr 进 journal 时 `SyslogLevelPrefix`（默认开启）
+  解析该前缀写入 `PRIORITY` 字段 → `journalctl -u c4-agent -p warning` 等原生级别过滤直接生效；
+- **单行约束**：前缀解析仅对行首生效，日志消息与字段值禁止含换行，业务字段一律走 slog attr；
+- 结构化取舍：`PRIORITY` 是唯一写入的原生 journal 字段，其余字段（inst、reason 等）以
+  key=value 文本在行内，供 grep 与日志采集解析；JSON 格式与 `<N>` 前缀兼容（journal 剥离
+  前缀后行内仍为完整 JSON）；
+- **统一默认 logger**：`main()` 起始读 env 初始化 handler 并 `slog.SetDefault`——go-sdk
+  v1.6.1 内部经 slog 输出的日志随之走同一 handler（同级别、同前缀），info 级别下无噪声；
+- 公共封装置于 `c4/mcp/internal/logger`（新建），供全部 MCP 复用（modbus/iec104/influxdb 后续接入）；
+- 属性规范：每条日志必带 `svc`（服务名）与 `inst`（instance_id，如 hnals_center），业务字段随事件附带；
+- 现有 panic 恢复的 `log.Printf` 迁移为 slog err 级；`log.Fatal` 保留。
+
+### 9.4 开关（环境变量）
+
+| 变量 | 取值 | 默认 | 说明 |
+|------|------|------|------|
+| `C4_MCP_LOG_LEVEL` | crit / err / warning / info / debug | info | 对应 journal 优先级 2/3/4/6/7；emerg/alert/notice 不使用（别名 `warn`/`error` 亦接受） |
+| `C4_MCP_LOG_FORMAT` | text / json | text | text 便于 journalctl 人工阅读，json 便于采集 |
+| `C4_MCP_LOG_STATS_INTERVAL` | 秒（0=关闭） | 60 | 数据面周期统计间隔 |
+
+> `C4_MCP_LOG_STATS_INTERVAL=0` **仅关闭统计行**——shm 看门狗（`shm_lost` 检测）与统计
+> 同周期运行（默认 60s），=0 时固定 60s，不因关闭统计而停摆；非法取值回退默认并输出一条
+> `logger_config_fallback` 警告。
+
+变量由 Agent 侧 `agent.env` / systemd 环境注入，本服务不读配置文件中的日志项。
+
+**级别语义准则**：
+
+| 级别 | 判定标准 |
+|------|---------|
+| crit | 实例停止且转发链路中断、无法自愈，需人工或 Agent 重新 start（如共享内存段丢失） |
+| err | 单次操作失败，存在自动恢复路径（读取失败、panic 恢复） |
+| warning | 降级/丢弃/超时，可自愈（拨号失败重连、T2 超时、编码跳过） |
+| info | 生命周期事件与周期统计 |
+| debug | 逐包/逐点明细诊断 |
+
+### 9.5 事件清单（发送侧）
+
+| 事件 | 级别 | 字段 | 触发时机 |
+|------|------|------|---------|
+| `config_loaded` | info | instances、points_total | 解析 config 成功 |
+| `config_invalid` | warning | err | config 解析/校验失败，start 中止（错误原文随 tool 结果返回 Agent） |
+| `shm_attach_failed` | err | instance_id、err | 共享内存打开/映射失败，start 中止 |
+| `instance_started` | info | inst、target（ip:port）、timer_ms、smart、points | start 工具拉起实例——仅在**全部实例连接成功后**发出，与 `instance_stopped` 配对 |
+| `instance_stopped` | info | inst | stop 或重载停止 |
+| `connected` | info | inst、remote、attempt、elapsed_ms | TCP 连接建立（重连成功）；初次连接由 `instance_started` 覆盖 |
+| `disconnected` | info | inst、remote、reason、duration_s | 连接断开。reason：`send_error`（数据发送失败）/ `t2_timeout`（T2 应答超时）/ `recv_error`（接收侧致命错误，EOF/RST） |
+| `stats_periodic` | info | inst、packets_sent、points_sent、smart_skipped、encode_skipped、send_errors、reconnects | 每 `STATS_INTERVAL` 打印发送计数快照 |
+| `connect_failed` | warning | inst、remote、attempt、retry_after_s、err | 拨号失败进入重连；**限频：首条 + 每 60s 一条**（重连本身无退避，为既有行为）；启动期连接失败为 err 且中止 start |
+| `encode_skipped` | warning | inst、key、shm_id、addr、type、reason | block 不可编码跳过，同类限频（见 9.6） |
+| `shm_lost` | **crit** | inst、err | 共享内存段不可用，转发链路中断，实例停止，需重新 start（看门狗与统计同周期；=0 时固定 60s） |
+| `panic_recovered` | err | inst、goroutine、err | goroutine panic 恢复（runSender / runReceiver / stats） |
+| `keepalive_exchanged` | debug | inst、dir | KeepAlive 收发。dir：`send_keep`（T1 空闲超时，发送正向 KEEP 并启 T2）/ `recv_kack`（收到 kack 应答，停 T2）/ `recv_keep`（收到反向 KEEP，回复 KACK） |
+| `t2_timeout` | warning | inst、remote | T2 应答超时——发送 KEEP 后 t2 秒未收到 kack，判定链路死亡，断开并重连 |
+
+> 待对应功能实现后补充目录：`send_packet`（debug 逐包摘要）、`shm_read_failed`
+> （读失败事件——当前 readBlock 失败静默跳过）。`key_not_mapped` 按构造不可达
+> （发送映射即来自配置 points），无对应事件。
+
+### 9.6 噪声控制
+
+1. **数据面不逐点/逐包**：默认仅周期统计；smart 模式的无变化跳过计数并入 `stats_periodic`，
+   不产生独立日志；逐包与 KeepAlive 明细在 debug 级；
+2. **限频**：`encode_skipped` 首条立即输出，其后每周期汇总一条（计数见 `stats_periodic`）；
+   `connect_failed` 限频为首条 + 每 60s 一条（重连本身按 timer 周期重试、无退避，为既有行为）；
+3. **禁止记录**：点位业务值、完整报文 hex（debug 下 raw 摘要 ≤32 字节）；
+4. **验收**：单实例转发全生命周期可仅凭 `journalctl -u c4-agent | grep hnals_center` 还原；
+   `journalctl -u c4-agent -p warning` 即可看到全部异常（crit/err/warning，PRIORITY 原生过滤）；
+   稳态 info 级别下每实例每分钟 ≤2 行（stats 1 行 + 事件 0~1 行）。
 
 ---
 

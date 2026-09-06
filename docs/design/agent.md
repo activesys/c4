@@ -1751,7 +1751,8 @@ Agent 启动时读取 `~/.local/c4/agent.json`（固定位置，`~` 为运行 C4
   // ========== 日志 ==========
   "logging": {
     "level": "info",
-    "dir": "~/.local/c4/log"
+    "dir": "/var/log/c4/agent",
+    "agent_level": "debug"
   },
 
   // ========== Web 前端静态托管 ==========
@@ -1776,18 +1777,34 @@ Agent 启动时读取 `~/.local/c4/agent.json`（固定位置，`~` 为运行 C4
 | `shm_manager.config_path` | string | 数据路径 MCP 服务配置文件路径 |
 | `state.backend` | string | 状态存储后端（`"filesystem"` / `"memory"`）。生产环境用 filesystem 保活，开发可用 memory |
 | `state.path` | string | filesystem 后端的存储目录 |
-| `logging.level` | string | 日志级别：`"debug"` / `"info"` / `"warn"` / `"error"` |
-| `logging.dir` | string | 日志文件输出目录（默认 `~/.local/c4/log`） |
+| `logging.level` | string | 运维日志（console 通道）级别：`"debug"` / `"info"` / `"warn"` / `"error"` |
+| `logging.dir` | string | 结构化运行日志（NDJSON，每日文件）输出目录；打包部署配 `/var/log/c4/agent`（需 systemd 授予运行账户写权限） |
+| `logging.agent_level` | string | 可选。结构化日志级别：`"debug"` / `"info"` / `"warn"` / `"error"`，缺省 `"debug"` |
 | `frontend.dir` | string | Web 前端静态资源目录（Express 托管，缺省则不托管） |
 
 ### 5.2 运行时目录结构
 
 Agent 部署后的运行时目录布局。`~/.local/c4/agent.json` 为固定位置（`~` 为运行 C4 的
-专用账户主目录），其余路径可由 `agent.json` 中各配置域覆盖。除 MCP 注册表外，配置、
-状态与日志均位于 `~/.local/c4/` 下；MCP 注册表位于 `/usr/local/etc/c4/mcp-registry/`
+专用账户主目录），其余路径可由 `agent.json` 中各配置域覆盖。除 MCP 注册表外，配置与
+状态位于 `~/.local/c4/` 下；结构化运行日志目录由 `logging.dir` 指定（打包部署为
+`/var/log/c4/agent`）；MCP 注册表位于 `/usr/local/etc/c4/mcp-registry/`
 （随包安装、root 所有、只读）。Agent 与 MCP 服务以非 root 账户运行，无需 root 权限。
 MCP 服务二进制路径不由 agent.json 统一指定——各 MCP 服务通过其 Registry JSON 中的
 `binary_path` 字段声明自身二进制位置（如 `/usr/local/bin/c4_modbus_client`）。
+
+**日志（双层，已实现）**：
+
+- **运维层**（`Logger`，console 通道）：格式 `[INFO]/[ERROR]/[DEBUG] <ISO时间> <消息>`，
+  输出 stdout/stderr，systemd 服务下经 journald 收集；级别由 `logging.level` 控制。
+  承载进程生命周期与系统事件（启动、配置加载、MCP 连接、致命错误）；
+- **结构化层**（`AgentLogger`，NDJSON 文件）：每日文件 `agent-YYYY-MM-DD.log` 写入
+  `logging.dir`，行格式 `{"ts", "level", "event", "conversation", "data"}`；事件目录
+  `user_input` / `llm_call` / `llm_text` / `tool_call` / `tool_result` / `done` 等，
+  级别由 `logging.agent_level` 控制（生产配 debug 全量）。承载 LLM 交互与工具调用
+  流水，是功能调试的主要数据源，与运维层互不镜像；
+- **规划中**：运维层升级为 journald 五级（crit/err/warning/info/debug，`<N>` 前缀，
+  与 MCP `internal/logger` 同约定，见 c4_asfp2_server.md §9），使 `journalctl -p`
+  跨 Agent 与 MCP 原生过滤（见 c4_deployment.md §10）。
 二进制与注册表由安装脚本在部署阶段以 root 一次性安装，运行时以非 root 账户执行。
 `~/.local/c4/` 目录及目录下的配置文件由 Agent 首次启动时创建，具体创建方法后续补充。
 
@@ -1830,7 +1847,7 @@ MCP 服务二进制路径不由 agent.json 统一指定——各 MCP 服务通�
 | `/usr/local/etc/c4/mcp-registry/` | `agent.json → mcp_registry.path` | MCP 服务注册 JSON | 安装包（root 预置），Agent 只读扫描 |
 | `/usr/local/bin/`（等） | Registry JSON `→ binary_path` | MCP 服务 Go 二进制 | 安装脚本（root 安装，一次性），Agent spawn 子进程 |
 | `~/.local/c4/state/` | `agent.json → state.path` | LangGraph 对话状态 | Agent（读写），用于跨重启保活 |
-| `~/.local/c4/log/` | `agent.json → logging.dir` | 结构化运行日志 | Agent（写入），运维人员（查看） |
+| `logging.dir`（打包部署 `/var/log/c4/agent`） | `agent.json → logging.dir` | 结构化运行日志（NDJSON 每日文件） | Agent（写入，需 systemd 授权），运维人员（查看） |
 
 **配置文件关系**：
 

@@ -5,18 +5,21 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
-	"log"
+	stdlog "log"
+	"log/slog"
 	"net"
 	"os"
 	"regexp"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"golang.org/x/sys/unix"
 
-	"c4/mcp/internal/shm"
+	"c4/mcp/internal/logger"
 	"c4/mcp/internal/protocol"
+	"c4/mcp/internal/shm"
 )
 
 // ──────────────────────────────────────────────
@@ -66,18 +69,56 @@ type instanceState struct {
 	addrMap  map[uint32]int // addr → shm_id
 	stats    instanceStats
 	quit     chan struct{}
-	wg       sync.WaitGroup // tracks runServer goroutine
+	quitOnce sync.Once // guards close(quit) — statsLoop 与 stop 共用同一路径
+	wg       sync.WaitGroup
+	log      *slog.Logger // inst-scoped logger
+	connsMu  sync.Mutex
+	conns    map[net.Conn]struct{} // live connections（stop 时布读超时释放）
+	// first-occurrence flags for rate-limited warnings/errors (§9.6)
+	parseErrLogged    atomic.Bool
+	keyMissLogged     atomic.Bool
+	shmWriteErrLogged atomic.Bool
+}
+
+// stop closes quit exactly once; safe to call from statsLoop and stopHandler.
+func (ist *instanceState) stop() {
+	ist.quitOnce.Do(func() { close(ist.quit) })
+}
+
+func (ist *instanceState) addConn(c net.Conn) {
+	ist.connsMu.Lock()
+	ist.conns[c] = struct{}{}
+	ist.connsMu.Unlock()
+}
+
+func (ist *instanceState) removeConn(c net.Conn) {
+	ist.connsMu.Lock()
+	delete(ist.conns, c)
+	ist.connsMu.Unlock()
+}
+
+// closeConns unblocks connection goroutines blocked in conn.Read by arming a
+// read deadline on every live connection.
+func (ist *instanceState) closeConns() {
+	ist.connsMu.Lock()
+	defer ist.connsMu.Unlock()
+	for c := range ist.conns {
+		c.SetReadDeadline(time.Now())
+	}
 }
 
 type serverState struct {
-	started    atomic.Bool
-	instances  []*instanceState
-	mu         sync.Mutex
-	shmData    []byte
-	shmFd      int
+	started   atomic.Bool
+	instances []*instanceState
+	mu        sync.Mutex
+	shmData   []byte
+	shmFd     int
 }
 
 var state = &serverState{}
+
+// log is the service-scoped structured logger (journald, five levels, §9).
+var log *slog.Logger
 
 // ──────────────────────────────────────────────
 //  Config loading
@@ -105,6 +146,15 @@ func loadConfig(configPath string) ([]serverInstance, error) {
 		return nil, fmt.Errorf("CONFIG_PARSE_ERROR: failed to parse 'c4_asfp2_server' section: %v", err)
 	}
 
+	// KeepAlive 字节缺省归一化：forward_kack 取规范典型值 0xFF。显式或隐式为 0 均视为
+	// 未配置——0 与 inverse_keep 的典型值冲突，客户端将无法区分 kack 与反向 KEEP，
+	// 导致其 T2 应答等待永远无法清除（ASFP2 2.1.1 规范：典型 255 / 0）。
+	for i := range instances {
+		if instances[i].ForwardKack == 0 {
+			instances[i].ForwardKack = 255
+		}
+	}
+
 	return instances, nil
 }
 
@@ -120,6 +170,15 @@ func validateConfig(instances []serverInstance) error {
 		ports[inst.Port] = inst.ID
 		if inst.ID == "" {
 			return fmt.Errorf("CONFIG_PARSE_ERROR: instance has empty id field")
+		}
+		// ASFP2 spec: T2 must be strictly less than T1 (t2=0 = no-ack-wait mode)
+		if inst.T1 > 0 && inst.T2 > 0 && inst.T2 >= inst.T1 {
+			return fmt.Errorf("CONFIG_PARSE_ERROR: instance '%s' violates T2 < T1 (t1=%d, t2=%d)", inst.ID, inst.T1, inst.T2)
+		}
+		// 反向 KEEP 字节不得与正向 kack 字节相同，否则客户端无法区分两种 1 字节帧
+		if inst.InverseKeep == inst.ForwardKack {
+			return fmt.Errorf("CONFIG_PARSE_ERROR: instance '%s': inverse_keep (%d) must differ from forward_kack (%d)",
+				inst.ID, inst.InverseKeep, inst.ForwardKack)
 		}
 		for _, pt := range inst.Points {
 			if pt.Addr > protocol.MaxAddr {
@@ -168,6 +227,71 @@ func attachShm(instanceID string) ([]byte, int, error) {
 }
 
 // ──────────────────────────────────────────────
+//  Keepalive timers (ASFP2 2.1.1, libasfp2 semantics)
+// ──────────────────────────────────────────────
+
+// kaClock implements the ASFP2 keepalive timers: T1 fires when the connection
+// has been idle for t1 seconds (send keepalive + arm T2); T2 fires when no
+// acknowledgement arrived within t2 seconds (link presumed dead).
+// t1=0 disables keepalive entirely; t1>0 with t2=0 sends keeps without
+// awaiting an ack (no liveness detection). Spec constraint: t2 < t1.
+type kaClock struct {
+	mu   sync.Mutex
+	t1   time.Duration
+	t2   time.Duration
+	t1At time.Time
+	t2At time.Time
+	t2On bool
+}
+
+func newKAClock(t1, t2 int) *kaClock {
+	return &kaClock{t1: time.Duration(t1) * time.Second, t2: time.Duration(t2) * time.Second}
+}
+
+// resetT1 restarts the T1 idle timer (no-op when keepalive is disabled).
+func (k *kaClock) resetT1() {
+	if k.t1 <= 0 {
+		return
+	}
+	k.mu.Lock()
+	k.t1At = time.Now().Add(k.t1)
+	k.mu.Unlock()
+}
+
+// armT2 starts waiting for the keepalive acknowledgement (no-op when t2=0).
+func (k *kaClock) armT2() {
+	if k.t2 <= 0 {
+		return
+	}
+	k.mu.Lock()
+	k.t2At = time.Now().Add(k.t2)
+	k.t2On = true
+	k.mu.Unlock()
+}
+
+// stopT2 cancels a pending acknowledgement wait.
+func (k *kaClock) stopT2() {
+	k.mu.Lock()
+	k.t2On = false
+	k.mu.Unlock()
+}
+
+// poll returns "t2" when the ack wait expired (link dead), "t1" when the
+// idle timer expired (send keepalive), or "".
+func (k *kaClock) poll() string {
+	now := time.Now()
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if k.t2On && !now.Before(k.t2At) {
+		return "t2"
+	}
+	if k.t1 > 0 && !now.Before(k.t1At) {
+		return "t1"
+	}
+	return ""
+}
+
+// ──────────────────────────────────────────────
 //  ASFP2 Parser
 // ──────────────────────────────────────────────
 
@@ -176,7 +300,7 @@ var bufPool = sync.Pool{New: func() any { return make([]byte, 65536) }}
 func parseASFP2Data(conn net.Conn, inst *instanceState, shmData []byte) {
 	defer func() {
 		if r := recover(); r != nil {
-			log.Printf("c4_asfp2_server: connection goroutine panic (id=%s): %v", inst.cfg.ID, r)
+			inst.log.Error("panic_recovered", "goroutine", "connection", "err", fmt.Sprint(r))
 		}
 	}()
 	defer conn.Close()
@@ -186,8 +310,44 @@ func parseASFP2Data(conn net.Conn, inst *instanceState, shmData []byte) {
 
 	var remain []byte
 
+	// Per-connection keepalive timers — T1 starts on connection establishment.
+	ka := newKAClock(inst.cfg.T1, inst.cfg.T2)
+	ka.resetT1()
+	remote := ""
+	if conn.RemoteAddr() != nil {
+		remote = conn.RemoteAddr().String()
+	}
+
 	for {
+		// Keepalive timer poll: fires at 1s granularity via the read deadline wakeups
+		switch ka.poll() {
+		case "t2":
+			// T2 expired: no KACK from client — link presumed dead
+			inst.log.Warn("keepalive_timeout", "remote", remote)
+			return
+		case "t1":
+			// T1 expired: idle — send reverse keepalive (1 byte, inverse_keep)
+			conn.SetWriteDeadline(time.Now().Add(time.Second))
+			if _, err := conn.Write([]byte{inst.cfg.InverseKeep}); err != nil {
+				return
+			}
+			conn.SetWriteDeadline(time.Time{})
+			inst.log.Debug("keepalive_exchanged", "dir", "send_keep")
+			ka.resetT1()
+			ka.armT2()
+		}
+
+		// 周期读超时：空闲连接每秒醒来检查 quit，保证 stop 时 goroutine 可退出
+		conn.SetReadDeadline(time.Now().Add(time.Second))
 		n, err := conn.Read(tmp)
+		if ne, ok := err.(net.Error); ok && ne.Timeout() {
+			select {
+			case <-inst.quit:
+				return
+			default:
+			}
+			continue
+		}
 		if err != nil {
 			return
 		}
@@ -196,7 +356,12 @@ func parseASFP2Data(conn net.Conn, inst *instanceState, shmData []byte) {
 		}
 
 		remain = append(remain, tmp[:n]...)
-		if len(remain) > 1<<20 {
+		// 2MiB：高于 v211 合法最大包（16+12+65535×20 ≈ 1.25MiB），仅对真正失步的流丢弃
+		if len(remain) > 1<<21 {
+			atomic.AddUint64(&inst.stats.parseErrors, 1)
+			if !inst.parseErrLogged.Swap(true) {
+				inst.log.Warn("parse_error", "reason", "desync_buffer_overflow", "raw_len", len(remain))
+			}
 			return
 		}
 		pos := 0
@@ -206,11 +371,21 @@ func parseASFP2Data(conn net.Conn, inst *instanceState, shmData []byte) {
 			// Heartbeat: 'K' prefix
 			if firstByte == 'K' {
 				if pos+4 <= len(remain) && string(remain[pos:pos+4]) == "KEEP" {
+					// 写超时：对端零窗口/僵死时 Write 可长时间阻塞，避免拖住 stop 的 wg.Wait
+					conn.SetWriteDeadline(time.Now().Add(time.Second))
 					conn.Write([]byte{inst.cfg.ForwardKack})
+					conn.SetWriteDeadline(time.Time{})
+					inst.log.Debug("keepalive_exchanged", "dir", "recv_keep", "reply", "kack")
+					// 收到对端心跳证明链路存活：重启 T1（libasfp2 after_parse 语义）
+					ka.resetT1()
 					pos += 4
 					continue
 				}
 				if pos+4 <= len(remain) && string(remain[pos:pos+4]) == "KACK" {
+					inst.log.Debug("keepalive_exchanged", "dir", "recv_kack")
+					// 反向心跳应答：停 T2，重启 T1
+					ka.stopT2()
+					ka.resetT1()
 					pos += 4
 					continue
 				}
@@ -222,6 +397,9 @@ func parseASFP2Data(conn net.Conn, inst *instanceState, shmData []byte) {
 			if firstByte != 'A' {
 				pos++
 				atomic.AddUint64(&inst.stats.parseErrors, 1)
+				if !inst.parseErrLogged.Swap(true) {
+					inst.log.Warn("parse_error", "reason", "bad_marker", "byte", firstByte, "raw_len", len(remain))
+				}
 				continue
 			}
 
@@ -242,6 +420,9 @@ func parseASFP2Data(conn net.Conn, inst *instanceState, shmData []byte) {
 			default:
 				pos++
 				atomic.AddUint64(&inst.stats.parseErrors, 1)
+				if !inst.parseErrLogged.Swap(true) {
+					inst.log.Warn("parse_error", "reason", "bad_flag", "flag", flag, "raw_len", len(remain))
+				}
 				continue
 			}
 			pos += 8
@@ -298,6 +479,9 @@ func parseASFP2Data(conn net.Conn, inst *instanceState, shmData []byte) {
 			// Drop entire packet if same data type is variable-length
 			if hasType && protocol.VariableTypes[mutableType] {
 				atomic.AddUint64(&inst.stats.parseErrors, 1)
+				if !inst.parseErrLogged.Swap(true) {
+					inst.log.Warn("parse_error", "reason", "varlen_type_packet", "type", mutableType, "raw_len", length)
+				}
 				pos = pktStart + length
 				continue
 			}
@@ -316,22 +500,36 @@ func parseASFP2Data(conn net.Conn, inst *instanceState, shmData []byte) {
 					addr := mutableKey + uint32(i)
 					shmID, ok := inst.addrMap[addr]
 					if ok {
-						writeBlock(shmData, shmID, mutableType, mutableTimestamp, uint64(bit), 1)
-						atomic.AddUint64(&inst.stats.itemsWritten, 1)
+						if ok2, reason := writeBlock(shmData, shmID, mutableType, mutableTimestamp, uint64(bit), 1); ok2 {
+							atomic.AddUint64(&inst.stats.itemsWritten, 1)
+						} else if !inst.shmWriteErrLogged.Swap(true) {
+							inst.log.Error("shm_write_failed", "shm_id", shmID, "reason", reason)
+						}
 					} else {
 						atomic.AddUint64(&inst.stats.itemsDropped, 1)
+						if !inst.keyMissLogged.Swap(true) {
+							inst.log.Warn("key_not_mapped", "addr", addr)
+						}
 					}
 					atomic.AddUint64(&inst.stats.itemsReceived, 1)
 				}
 				pos += compressedBytes
 				atomic.AddUint64(&inst.stats.packetsReceived, 1)
+				inst.log.Debug("packet_header", "type", versionStr, "count", count,
+					"key_range", fmt.Sprintf("%d-%d", mutableKey, mutableKey+uint32(count-1)))
 				continue
 			}
 
 			// Parse Data items
+			firstKey := uint32(0)
+			lastKey := uint32(0)
 			for i := 0; i < count; i++ {
 				itemType := mutableType
 				itemKey := mutableKey + uint32(i)
+				if i == 0 {
+					firstKey = itemKey
+				}
+				lastKey = itemKey
 				itemTs := mutableTimestamp
 
 				if !hasType {
@@ -378,10 +576,16 @@ func parseASFP2Data(conn net.Conn, inst *instanceState, shmData []byte) {
 
 				shmID, ok := inst.addrMap[itemKey]
 				if ok {
-					writeBlock(shmData, shmID, itemType, itemTs, value, valueSize)
-					atomic.AddUint64(&inst.stats.itemsWritten, 1)
+					if ok2, reason := writeBlock(shmData, shmID, itemType, itemTs, value, valueSize); ok2 {
+						atomic.AddUint64(&inst.stats.itemsWritten, 1)
+					} else if !inst.shmWriteErrLogged.Swap(true) {
+						inst.log.Error("shm_write_failed", "shm_id", shmID, "reason", reason)
+					}
 				} else {
 					atomic.AddUint64(&inst.stats.itemsDropped, 1)
+					if !inst.keyMissLogged.Swap(true) {
+						inst.log.Warn("key_not_mapped", "addr", itemKey)
+					}
 				}
 			}
 
@@ -390,6 +594,8 @@ func parseASFP2Data(conn net.Conn, inst *instanceState, shmData []byte) {
 				break
 			}
 			atomic.AddUint64(&inst.stats.packetsReceived, 1)
+			inst.log.Debug("packet_header", "type", versionStr, "count", count,
+				"key_range", fmt.Sprintf("%d-%d", firstKey, lastKey))
 		}
 		remain = remain[pos:]
 	}
@@ -475,16 +681,16 @@ func decodePacketValue(buf []byte, pos int, itemType uint8, versionStr string) (
 //  Shared memory write (seqlock)
 // ──────────────────────────────────────────────
 
-func writeBlock(shmData []byte, shmID int, dataType uint8, timestamp uint64, value uint64, valueSize int) {
+func writeBlock(shmData []byte, shmID int, dataType uint8, timestamp uint64, value uint64, valueSize int) (bool, string) {
 	off := shmID * shm.BlockSize
 	if off+shm.BlockSize > len(shmData) {
-		return
+		return false, "out_of_range"
 	}
 
 	// Verify magic
 	magic := binary.NativeEndian.Uint32(shmData[off+shm.BlkOffMagic:])
 	if magic != shm.Magic {
-		return
+		return false, "magic_mismatch"
 	}
 
 	// Activate block on first write
@@ -504,6 +710,7 @@ func writeBlock(shmData []byte, shmID int, dataType uint8, timestamp uint64, val
 
 	// Seqlock: increment to even
 	binary.NativeEndian.PutUint64(shmData[off+shm.BlkOffWriteSeq:], writeSeq+2)
+	return true, ""
 }
 
 // writeValue writes a value in native byte order into the low `valueSize` bytes
@@ -551,12 +758,20 @@ func startHandler(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolR
 	}
 	instances, err := loadConfig(configPath)
 	if err != nil {
+		log.Warn("config_invalid", "err", err.Error())
 		return newError(err.Error()), nil
 	}
 
 	if err := validateConfig(instances); err != nil {
+		log.Warn("config_invalid", "err", err.Error())
 		return newError(err.Error()), nil
 	}
+
+	pointsTotal := 0
+	for _, cfg := range instances {
+		pointsTotal += len(cfg.Points)
+	}
+	log.Info("config_loaded", "instances", len(instances), "points_total", pointsTotal)
 
 	// Empty instances array is valid — start succeeds with no port listeners
 	if len(instances) == 0 {
@@ -566,6 +781,7 @@ func startHandler(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolR
 
 	shmData, shmFd, err := attachShm(instanceID)
 	if err != nil {
+		log.Error("shm_attach_failed", "instance_id", instanceID, "err", err.Error())
 		return newError(err.Error()), nil
 	}
 
@@ -582,6 +798,7 @@ func startHandler(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolR
 
 		listener, err := net.Listen("tcp", fmt.Sprintf(":%d", cfg.Port))
 		if err != nil {
+			log.Error("listen_failed", "inst", cfg.ID, "port", cfg.Port, "err", err.Error())
 			lastErr = fmt.Sprintf("PORT_BIND_FAILED: instance '%s': cannot bind port %d: %v", cfg.ID, cfg.Port, err)
 			break
 		}
@@ -591,6 +808,8 @@ func startHandler(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolR
 			listener: listener,
 			addrMap:  addrMap,
 			quit:     make(chan struct{}),
+			log:      log.With("inst", cfg.ID),
+			conns:    make(map[net.Conn]struct{}),
 		}
 		instancesState = append(instancesState, ist)
 	}
@@ -604,17 +823,23 @@ func startHandler(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolR
 		return newError(lastErr), nil
 	}
 
-	// Start goroutines
+	// Start goroutines — instance_started 仅在全部实例绑定成功后发出（与 instance_stopped 配对）
 	for _, ist := range instancesState {
+		ist.log.Info("instance_started", "listen", fmt.Sprintf(":%d", ist.cfg.Port), "points", len(ist.cfg.Points))
 		ist.wg.Add(1)
 		go func() {
 			defer func() {
 				if r := recover(); r != nil {
-					log.Printf("c4_asfp2_server: instance goroutine panic (id=%s): %v", ist.cfg.ID, r)
+					ist.log.Error("panic_recovered", "goroutine", "instance", "err", fmt.Sprint(r))
 				}
 			}()
 			defer ist.wg.Done()
 			runServer(ist, shmData)
+		}()
+		ist.wg.Add(1)
+		go func() {
+			defer ist.wg.Done()
+			statsLoop(ist, shmData)
 		}()
 	}
 
@@ -641,7 +866,69 @@ func runServer(ist *instanceState, shmData []byte) {
 			}
 			continue
 		}
-		go parseASFP2Data(conn, ist, shmData)
+		ist.wg.Add(1)
+		ist.addConn(conn)
+		select {
+		case <-ist.quit:
+			ist.removeConn(conn)
+			ist.wg.Done()
+			conn.Close()
+			return
+		default:
+		}
+		remote := ""
+		if conn.RemoteAddr() != nil {
+			remote = conn.RemoteAddr().String()
+		}
+		ist.log.Info("client_connected", "remote", remote)
+		connectedAt := time.Now()
+		go func() {
+			defer func() {
+				ist.removeConn(conn)
+				ist.wg.Done()
+				ist.log.Info("client_disconnected", "remote", remote, "duration_s", time.Since(connectedAt).Seconds())
+			}()
+			parseASFP2Data(conn, ist, shmData)
+		}()
+	}
+}
+
+// statsLoop emits periodic instanceStats snapshots and watches for shared
+// memory loss via the header magic (§9.5 stats_periodic / shm_lost). The
+// watchdog runs on its own fixed cadence and is NOT disabled by
+// C4_MCP_LOG_STATS_INTERVAL=0 — that knob only silences the stats line.
+func statsLoop(ist *instanceState, shmData []byte) {
+	statsIv := logger.StatsInterval()
+	statsEnabled := statsIv > 0
+	if statsIv <= 0 {
+		statsIv = 60 * time.Second
+	}
+	ticker := time.NewTicker(statsIv)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ist.quit:
+			return
+		case <-ticker.C:
+		}
+		if binary.NativeEndian.Uint32(shmData[0:]) != shm.Magic {
+			ist.log.Log(context.Background(), logger.LevelCrit, "shm_lost",
+				"err", "shared memory header magic is invalid, data path interrupted")
+			ist.stop()
+			ist.listener.Close()
+			ist.closeConns()
+			return
+		}
+		if !statsEnabled {
+			continue
+		}
+		ist.log.Info("stats_periodic",
+			"packets", atomic.LoadUint64(&ist.stats.packetsReceived),
+			"items_received", atomic.LoadUint64(&ist.stats.itemsReceived),
+			"items_written", atomic.LoadUint64(&ist.stats.itemsWritten),
+			"items_dropped", atomic.LoadUint64(&ist.stats.itemsDropped),
+			"parse_errors", atomic.LoadUint64(&ist.stats.parseErrors),
+		)
 	}
 }
 
@@ -654,9 +941,11 @@ func stopHandler(ctx context.Context, req *mcp.CallToolRequest, input struct{}) 
 	defer state.mu.Unlock()
 
 	for _, ist := range state.instances {
-		close(ist.quit)
+		ist.stop()
 		ist.listener.Close()
+		ist.closeConns()
 		ist.wg.Wait()
+		ist.log.Info("instance_stopped")
 	}
 	state.instances = nil
 
@@ -693,6 +982,8 @@ func newError(text string) *mcp.CallToolResult {
 // ──────────────────────────────────────────────
 
 func main() {
+	log = logger.Init("c4_asfp2_server")
+
 	server := mcp.NewServer(
 		&mcp.Implementation{Name: "c4_asfp2_server", Version: "0.1.0"},
 		nil,
@@ -717,6 +1008,6 @@ func main() {
 	)
 
 	if err := server.Run(context.Background(), &mcp.StdioTransport{}); err != nil {
-		log.Fatal(err)
+		stdlog.Fatal(err)
 	}
 }

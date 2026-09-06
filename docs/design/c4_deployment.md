@@ -246,7 +246,7 @@ cd agent/frontend && npm ci && npm run build   # tsc --noEmit && vite build → 
 ├── config.json.bak                  # config.json 备份（原子写入前的快照）
 ├── abbr_registry.json               # 场站缩写记忆库（可重建派生数据）
 ├── state/                           # 状态（当前内存态，重启重建；filesystem 持久化待实现，见 §10）
-└── logs/                            # 日志目录（当前 console 经 journald；winston 文件日志待实现，见 §10）
+└── logs/                            # 预留目录，当前未使用（运行日志见 /var/log/c4/agent 与 agent.md §5.2）
 
 /dev/shm/{instance_id}               # POSIX 共享内存（tmpfs，进程退出后回收）
 ```
@@ -429,7 +429,7 @@ journalctl -u c4-agent -n 200
 | `config.json.bak` | 随 config.json 更新 | 原子写入前的快照，损坏时恢复 |
 | `abbr_registry.json` | 可重建派生数据 | 场站缩写记忆库；丢失/损坏可从 config.json 重建 |
 | `state/` | 运行期 | 当前内存态（AgentStateTracker，重启重建）；filesystem 持久化待实现（见 §10） |
-| `logs/` | 运行期 | 当前 console 日志经 journald 收集；winston 文件日志/轮转待实现（见 §10） |
+| `logs/` | 运行期 | 预留，当前未使用；运行日志由双层日志承担（console 摘要 → journald + NDJSON 流水 → `/var/log/c4/agent`，见 agent.md §5.2） |
 | `/dev/shm/{instance_id}` | 进程生命周期 | POSIX 共享内存，进程退出回收 |
 
 ---
@@ -467,6 +467,6 @@ journalctl -u c4-agent -n 200
 - 架构扩展：当前仅 amd64，未来是否支持 aarch64 等架构（取决于目标现场硬件，需额外构建对应 `GOARCH` 二进制并验证）。
 - 随包捆绑的 Node.js LTS 具体版本与获取方式（需提供与目标架构匹配的 Node 构建，例如官方 LTS 预编译包或静态二进制分发）。
 - 安装包签名（GPG/RPM 签名）与校验，配合许可密钥机制（C4_RS_00305）。
-- **winston 文件日志 + 轮转**：当前 Agent 仅 console 日志（经 journald 收集），`logging.dir` 字段已定义但未落盘；需实现 winston 文件传输与轮转，或明确放弃 `logs/` 目录。
+- **Agent 运维流接入 journald 五级**：Agent 现为双层日志且均已实现——console 运维摘要（→ journald）+ NDJSON 流水（→ `/var/log/c4/agent`，自研 AgentLogger，非 winston；该依赖未使用，可移除）。待实现：运维流按五级（crit/err/warning/info/debug）以 `<N>` 前缀输出，与 MCP `internal/logger`（c4_asfp2_server.md §9）同约定，使 `journalctl -p` 跨 Agent 与 MCP 原生过滤。
 - **state filesystem 持久化**：当前状态为内存态（AgentStateTracker，重启重建），`state.backend`/`state.path` 字段已定义但未使用；需实现 filesystem 持久化，或明确改为内存态。
 - **运行期注册的注册表分层**（C4_FUN_00079 落地时）：当前仅随包内置服务，注册表单目录 `/usr/local/etc/c4/mcp-registry/`（只读）；实现运行期注册后需分层（系统只读 + 用户可写 `~/.local/c4/mcp-registry/`），并将 `mcp_registry.path` 改为多目录加载（`paths[]`）。

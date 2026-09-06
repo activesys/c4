@@ -22,3 +22,7 @@ require (
 require c4/mcp/internal/shm v0.0.0
 
 replace c4/mcp/internal/shm => ../internal/shm
+
+require c4/mcp/internal/logger v0.0.0
+
+replace c4/mcp/internal/logger => ../internal/logger
