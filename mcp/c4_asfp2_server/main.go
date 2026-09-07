@@ -574,9 +574,16 @@ func parseASFP2Data(conn net.Conn, inst *instanceState, shmData []byte) {
 				value, valueSize := decodePacketValue(remain, pos, itemType, versionStr)
 				pos += valueSize
 
+				// FLOAT16 在 shm 中以 float32 位模式存储（4 字节，c4_architecture.md
+				// §2.2.3 FLOAT16 特例）；valueSize 为线缆尺寸（2 字节），仅用于报文游标推进
+				shmSize := valueSize
+				if itemType == protocol.TypeFloat16 {
+					shmSize = 4
+				}
+
 				shmID, ok := inst.addrMap[itemKey]
 				if ok {
-					if ok2, reason := writeBlock(shmData, shmID, itemType, itemTs, value, valueSize); ok2 {
+					if ok2, reason := writeBlock(shmData, shmID, itemType, itemTs, value, shmSize); ok2 {
 						atomic.AddUint64(&inst.stats.itemsWritten, 1)
 					} else if !inst.shmWriteErrLogged.Swap(true) {
 						inst.log.Error("shm_write_failed", "shm_id", shmID, "reason", reason)

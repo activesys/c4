@@ -48,6 +48,10 @@ Agent 系统覆盖数据接入流程中 Agent 侧的全部职能：
 | C4_FUN_00007 | 常规操作自主执行 | 执行模块：config 合并 + 幂等 stop | §3.2 | ✅ 同 C4_FUN_00006 |
 | C4_FUN_00017 | 新协议可插拔扩展 | MCP Service Registry + 双层注入 | §3.3 | ✅ Registry 加载 |
 | C4_FUN_00041 | Web 界面交互 | Express + SSE streaming（streamEvents v3） | §3.5 | ❌（UI） |
+| C4_FUN_00082 | 点位实时快照查询 | PointDisplayService：c4_shm_manager `read_points` 读取 + 状态标注 | §3.6 | ❌ 待实现 |
+| C4_FUN_00083 | 点位刷新频率展示 | 会话 tick 的 write_seq 差分 + 滑动窗口 | §3.6 | ❌ 待实现 |
+| C4_FUN_00084 | 持续显示与终止控制 | DisplaySession 会话模型（时长/次数/手动/切换终止） | §3.6 | ❌ 待实现 |
+| C4_FUN_00085 | 点位发现与批量选择 | `list_points` 工具（config.json 枚举 + 筛选） | §3.6 | ❌ 待实现 |
 
 > **确定性测试**：标记 ✅ 的功能不依赖 LLM 推理，可在 Python 黑盒测试（`test/c4_fun_XXXXX/`）中
 > 通过操作真实 MCP 服务验证。标记 ❌ 的功能需要 TypeScript 侧单元测试（`GenericFakeChatModel` mock LLM）。
@@ -1600,6 +1604,148 @@ info-gatherer 的工具通过路径打开文件读取，不传 base64（大文�
 
 ---
 
+### 3.6 点位显示服务（PointDisplayService，C4_FUN_00082 ~ 00085）
+
+> 对应需求 C4_RS_00054 ~ 00057（接入后对点核验）。数据接入完成后，用户以自然语言查询/持续
+> 显示点位实时数据，与厂家原生系统进行人工对点核验。
+
+#### 3.6.1 定位与原则
+
+- **控制面走 LLM，数据面走确定性代码**：LLM 只负责理解订阅/终止意图并调用控制工具；
+  周期刷新、频率统计、终止判定全部由后端确定性模块执行——持续显示每秒刷新绝不经 LLM 往返。
+- **Agent 不直接读 shm（硬约束）**：共享内存的所有访问（含只读观测）统一经 c4_shm_manager
+  的 `read_points` MCP 工具（c4_shm_manager.md §3.3）完成——shm 的权威管理者是
+  c4_shm_manager，读写边界不因功能新增而打开。读取是确定性工具调用，不经 LLM。
+- **观测消费，不在实时数据路径中**：读取仅为展示观测，不写共享内存、不参与采集转发，
+  与 C4_RS_00002（AI 不干涉数据搬运）不冲突。
+- **不落地**：累积展示缓冲仅存于会话内存，会话结束即清除，不持久化（符合 C4_RS_00131）。
+- **呈现边界**：只显示数值不含单位（单位对照由用户依据厂家点表自行进行）；展示原始值，
+  不做精度修饰或舍入（C4_FUN_00082）。
+
+#### 3.6.2 数据读取通道（c4_shm_manager `read_points` 工具）
+
+会话每个 tick 调用一次 `read_points`（c4_shm_manager.md §3.3，经既有 mcp/bridge 通道，
+stdio JSON-RPC），单次批量覆盖会话全部点（工具上限 1000 点，远超显示需求）。调用约定：
+
+- **seqlock 重试在 MCP 侧**：单块 contention 计入应答 `errors` 数组；Agent 对该点立即
+  重试一次，仍失败则沿用上次成功值并维持原状态标注（下一 tick 自然再试）；
+- **调用级失败**（bridge 未连接 / c4_shm_manager 崩溃或 Stop-Start 进行中 / 传输错误）：
+  本轮 tick 整体跳过，所有点保持上次值与状态标注（不杜撰）；连续 ≥ 3 轮失败时会话进入
+  **降级态**（前端横幅"读取通道异常，数据管道不受影响"）；调用恢复后自动继续，失败轮次
+  **不计入任何终止条件**（C4_RS_00056 的终止途径是封闭清单）；
+- **状态判定在 Agent 侧**（C4_RS_00054 强制）：
+  - 工具返回 `no_data`（块未激活）→ **暂无数据**（该点从未收到数据）；
+  - `now − timestamp_ms > 有效阈值` → **已停止刷新**（标注时长）。有效阈值 =
+    `max(staleThresholdMs, 3 × 该点 60s 窗口观测平均间隔)`（staleThresholdMs 默认 60 s，
+    `agent.json → display.staleThresholdMs` 可配）——自适应下限防止慢周期点
+    （如 5 分钟刷新的油温）被误标；会话初期无观测值时先用 staleThresholdMs，
+    频率统计建立后自动收紧到观测值；
+  - 其余 → **正常**；
+- 无数据/陈旧时**不得以零值或过时值冒充当前值**——展示层必须携带状态标注；
+- `value_raw` 权威位型：INT64/UINT64 且绝对值 ≥ 2^53 时展示以 `value_raw` 为准
+  （JSON number 精度限制）。
+
+#### 3.6.3 会话模型（`display/session.ts`）
+
+```typescript
+interface DisplaySession {
+  id: string;
+  createdAt: number;
+  points: Array<{ key: string; shmId: number; addr: number }>;  // 1..N 个（≤ read_points 单次上限 1000；超出拒绝订阅并提示分批）
+  mode: 'realtime' | 'cumulative';       // 实时值模式（缺省）| 累积模式
+  intervalMs: number;                    // 缺省 1000，下限 250
+  terminate:
+    | { kind: 'duration'; deadlineMs: number }
+    | { kind: 'count'; budget: number }
+    | { kind: 'manual' };
+  tickCount: number;
+  cumulative: Map<key, Array<{ t: number; v: number }>>;   // 累积模式，每点上限 600 条（≈10min@1s）
+  freq: Map<key, { changes: number[]; lastSeq: number }>;  // write_seq 变位时间戳，滑动 60s 窗口
+}
+```
+
+- **单活跃会话**：每实例同时至多一个活跃会话；`display_points` 建立新会话时隐式结束旧
+  会话（"切换即取消"，C4_RS_00056）；
+- **终止途径**：时长到期 / `tickCount` 达次数预算 / `stop_display`（整会话或点级移除，
+  points 清空即会话结束）；
+- **tick 竞态防护**：`read_points` await 返回后校验会话仍为当前活跃会话（按 id）且各点
+  仍在会话内——期间发生 stop / 切换 / 点移除则丢弃本轮结果，不写入 freq/cumulative/
+  tickCount（Node 单线程不消除 await 间隙）；
+- **频率统计**（C4_RS_00055）：每个 tick 比对 `read_points` 返回的 `seq`，变位时刻
+  （以 tick 时刻近似，粒度 = `intervalMs`）入 `changes`（首个 tick 仅初始化 lastSeq，
+  不计变位）；滑动 60 s 窗口 → 刷新次数 + 平均间隔（相邻变位差的均值）。展示周期应
+  ≥ 数据实际周期——频率统计天然给出实际周期，随快照一并呈现；
+- **单次快照的频率**（无会话时）：250 ms × 9 次 `read_points` 突发采样（跨约 2 s，
+  每次全量批量），报告"近 2 秒刷新 N 次"；N=0 如实呈现"近 2 秒无刷新"，不杜撰；
+- **累积缓冲**：仅累积模式维护，每点环形上限 600 条，会话结束即丢弃。
+
+#### 3.6.4 控制面工具（LLM，注册于 SuperWorker）
+
+| 工具 | 输入 | 行为 |
+|------|------|------|
+| `list_points` | `{ filter?: string }` | 读 `~/.local/c4/config.json` 中 **writer 类服务的 points**——按 config 模型的 writer/reader 分类，reader 对同 key 的引用仅作一致性校验、不产生独立条目（否则枚举必然重复）；每点含 key / addr / shm_id / 所属实例，支持按实例（设备）或 key 关键词筛选；无匹配时返回空列表由 LLM 告知 |
+| `display_points` | `{ pointKeys: string[], mode?: 'realtime'\|'cumulative', durationMinutes?: number, refreshCount?: number }` | 校验 keys 存在 → 建立会话（隐式结束旧会话）→ 返回会话摘要（模式/周期/终止条件），LLM 据此告知用户卡片位置与终止方式 |
+| `stop_display` | `{ pointKeys?: string[] }` | 无参：终止整个会话；带参：仅移除指定点（清空则会话结束） |
+
+- **歧义消解**（C4_RS_00057）：用户说"风速"而多设备均有时，LLM 以 `list_points` 取候选
+  列表并列出供用户选择，不擅自猜测；
+- **批量订阅**：`pointKeys` 可含整设备全部点（LLM 经 `list_points` 按实例名聚合），
+  如"显示 1#风机的所有点"；
+- 呈现约束（无单位、原始值、状态标注必须随值输出）由 SuperWorker 系统提示硬约束
+  （§3.1 追加），与 C4_FUN_00005 非技术语言原则衔接。
+
+#### 3.6.5 数据面 REST（前端轮询，路由挂 §3.5 Web 层）
+
+| 路由 | 方法 | 作用 |
+|------|------|------|
+| `/api/points?filter=` | GET | 点位发现（00085）：已接入点列表 |
+| `/api/display` | GET | 活跃会话状态（无活跃会话时返回 lastSession 摘要 + `{ active: false }`） |
+| `/api/display/stop` | POST | `{ pointKeys?: string[] }` 停止——UI 停止按钮与 LLM `stop_display` 走同一服务入口 |
+
+**`/api/display` 载荷契约**：
+
+```typescript
+{
+  active: boolean,
+  session?: {
+    sessionId: string,           // 会话唯一标识——前端发现 id 变化即弃游标、全量拉取
+    intervalMs: number,          // 前端轮询周期
+    mode: 'realtime' | 'cumulative',
+    tick: number,                // 会话内单调 tick 序号（累积模式游标基准）
+    terminateRemaining?: string, // 剩余时长 / 剩余次数（人类可读）
+    degraded?: boolean,          // 读取通道连续失败降级态
+    points: Array<{
+      key: string,
+      value: number | string,    // number；INT64/UINT64 大值时为 value_raw 字符串
+      timestampMs: number,
+      state: 'ok' | 'no_data' | 'stale',
+      staleForMs?: number,       // state=stale 时距最后刷新时长
+      freq: { count: number; intervalMs: number },   // 近 60s 窗口
+      lastError?: string,        // contention 持续等单点异常
+    }>,
+  },
+  lastSession?: {                // 上一个会话的终止摘要（自然结束/被切换/降级中止）
+    endedReason: 'completed_count' | 'completed_duration' | 'stopped' | 'replaced' | 'error',
+    finalTick: number,
+  },
+}
+```
+
+累积模式增量：前端 `GET /api/display?since=<tick>`，返回该 tick 之后追加的记录
+（每条携带自身 tick 序号）——游标是**会话内 tick 序号**，非 shm write_seq（后者跨点
+跳变、且会话替换后无意义）。前端轮询周期取会话 `intervalMs`。
+
+#### 3.6.6 Agent 重启语义
+
+显示会话仅存内存（不写入 state 后端，避免持久化采集衍生数据）。Agent 重启后会话消失：
+前端轮询得 `{ active: false }` → 展示"显示已中止（Agent 重启），数据管道未受影响"并提供
+**重新订阅**入口（按上次会话参数一键重建——上次参数由前端持有，不经后端持久化）。
+不自动恢复会话：订阅意图属用户上下文，恢复行为经用户确认，避免臆测式重启订阅。
+（C4_RS_00056 的"恢复后主动告知"以 UI 中止态横幅实现，不产生 LLM 主动消息——
+重启检测是确定性逻辑，不占推理；FUN_00084 的"告知"按此机制理解。）
+
+---
+
 ## 4. 示例：端到端数据接入
 
 **输入**：用户上传 `风机点表.xlsx` + "接入华能阿拉善1#风机，转发到 172.16.109.11"
@@ -1686,6 +1832,11 @@ c4/agent/                              # Agent 系统
 │   │   └── permission.ts
 │   ├── executor/
 │       └── executor.ts             # Stop-Start 协议（确定性代码）
+│   ├── display/                       # 点位显示服务（§3.6，C4_FUN_00082~00085）
+│   │   ├── shm_client.ts             # 经 mcp bridge 调 c4_shm_manager read_points（批量/重试/状态判定）
+│   │   ├── session.ts                # DisplaySession 会话模型、ticker、频率统计
+│   │   ├── tools.ts                  # list_points / display_points / stop_display
+│   │   └── routes.ts                 # GET /api/points、GET /api/display、POST /api/display/stop
 │   └── server/
 │       ├── app.ts                     # Express 路由
 │       └── routes/{chat,upload,status}.ts
@@ -1695,6 +1846,7 @@ c4/agent/                              # Agent 系统
 │       ├── App.tsx                    # useStream + 路由
 │       └── components/
 │           ├── ChatView.tsx           # 对话 + 子代理卡片
+│           ├── PointDisplayPanel.tsx  # 点位显示卡片（web.md §3.5）
 │           ├── ConfigPreview.tsx      # 配置确认
 │           ├── FileUpload.tsx         # 文件上传
 │           └── Dashboard.tsx          # 状态仪表盘

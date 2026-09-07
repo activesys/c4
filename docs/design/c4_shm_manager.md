@@ -798,6 +798,101 @@ sequenceDiagram
 
 ---
 
+### 3.3 Tool: `read_points`
+
+批量读取数据块的当前值、时间戳与写序号。**只读操作**——不修改任何块字段（含 state 与
+write_seq）。服务于对点核验展示（C4_FUN_00082 ~ 00085，Agent 经此工具读取内存值，
+Agent 不直接读 shm）及一般性只读观测。
+
+**触发条件**：Agent 侧点位显示会话的每个刷新周期调用一次（批量覆盖会话全部点），
+或单次快照查询时按采样节奏多次调用。
+
+**参数**：
+
+```json
+{
+    "name": "read_points",
+    "description": "批量读取数据块的当前值、时间戳与写序号（只读，seqlock 协议）",
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "shm_ids": {
+                "type": "array",
+                "items": { "type": "integer", "minimum": 1 },
+                "description": "要读取的数据块 shm_id 列表（批量，单次上限 1000 个）"
+            }
+        },
+        "required": ["shm_ids"]
+    }
+}
+```
+
+**内部流程**：
+
+1. 校验 `shm_ids` 非空、数量 ≤ 1000、均小于 header `max_points`，否则
+   `SHM_ID_OUT_OF_RANGE`；
+2. 校验 header `magic`，失败 → `SHM_CORRUPTED`（整体错误）；
+3. 逐块按 seqlock 协议读取：读 `write_seq`（s1）→ 读 state/type/timestamp/value →
+   复读 `write_seq`（s2）；s1 为奇数（writer 进行中）或 s1≠s2 时重试，上限 5 次
+   （间隔让步），仍失败该块计入 `errors`（status=`contention`），**不影响其他块**；
+4. 块 `state == 0`（未激活，从未写入）→ 该块 `status = "no_data"`，不含值字段；
+5. `status = "ok"` 的块：`value` 按 `data_type` 解码为双精度数值——BOOLEAN/BIT 取最低位；
+   整型按符号性扩展（有符号符号扩展、无符号零扩展）；FLOAT16 按 float32 位模式解释
+   value 低 4 字节后转 double（shm 特例，见 `c4_architecture.md` §2.2.3 FLOAT16 行）；
+   FLOAT32/64 按 IEEE 754 位模式本机序解释；同时保留 `value_raw`（value 字段 8 字节的
+   uint64 十进制串）作为权威位型。
+
+**返回值**（JSON，位于 `content[0].text`）：
+
+```json
+{
+    "reads": [
+        {
+            "shm_id": 1,
+            "status": "ok",
+            "data_type": 6,
+            "timestamp_ms": 1788704497156,
+            "seq": 4711,
+            "value": 7.256,
+            "value_raw": "46377644557028456858"
+        },
+        { "shm_id": 2, "status": "no_data" }
+    ],
+    "errors": [
+        { "shm_id": 9, "status": "contention" }
+    ]
+}
+```
+
+**字段约定**：
+
+| 字段 | 含义 |
+|------|------|
+| `timestamp_ms` | 块内 timestamp 原值（毫秒，Unix epoch）——新鲜度判定由**调用方**执行（工具不设阈值，保持确定性无策略） |
+| `seq` | 读取成功时刻的 `write_seq`（偶数）——调用方跨调用差分即得实际刷新频率（C4_FUN_00083），工具不做统计 |
+| `value` | 按 `data_type` 解码后的双精度数值，供展示 |
+| `value_raw` | value 字段 uint64 原值十进制串，权威位型——`INT64`/`UINT64` 且绝对值 ≥ 2^53 时展示以此为准（JSON number 精度限制） |
+
+**MCP 应答示例**：
+
+```json
+// ========== 成功：混合状态（ok / no_data / contention） ==========
+// --> 请求
+{"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "read_points", "arguments": {"shm_ids": [1, 2, 9]}}}
+// <-- 应答
+{"jsonrpc": "2.0", "id": 3, "result": {"content": [{"type": "text", "text": "{\"reads\":[{\"shm_id\":1,\"status\":\"ok\",\"data_type\":6,\"timestamp_ms\":1788704497156,\"seq\":4711,\"value\":7.256,\"value_raw\":\"46377644557028456858\"},{\"shm_id\":2,\"status\":\"no_data\"}],\"errors\":[{\"shm_id\":9,\"status\":\"contention\"}]}"}], "isError": false}}
+
+// ========== 业务错误：shm_id 超界 ==========
+// <-- 应答
+{"jsonrpc": "2.0", "id": 4, "result": {"content": [{"type": "text", "text": "SHM_ID_OUT_OF_RANGE: shm_id 100001 exceeds max_points 100000"}], "isError": true}}
+
+// ========== 业务错误：header 损坏 ==========
+// <-- 应答
+{"jsonrpc": "2.0", "id": 5, "result": {"content": [{"type": "text", "text": "SHM_CORRUPTED: header magic is invalid (got 0x00000000, expected 0xC4DA7A00)"}], "isError": true}}
+```
+
+---
+
 ## 4. 典型交互时序
 
 ### 4.1 场景一：首次创建

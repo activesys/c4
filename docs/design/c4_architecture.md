@@ -278,7 +278,7 @@ block-beta
 | UINT32 | 6 | 4B | 低 4 字节（offset 0~3） |
 | INT64 | 7 | 8B | 全部 8 字节 |
 | UINT64 | 8 | 8B | 全部 8 字节 |
-| FLOAT16 | 9 | 2B | 低 2 字节（offset 0~1） |
+| FLOAT16 | 9 | 4B | 低 4 字节（offset 0~3）：存储该值对应的 float32 位模式（见下方 FLOAT16 特例） |
 | FLOAT32 | 10 | 4B | 低 4 字节（offset 0~3） |
 | FLOAT64 | 11 | 8B | 全部 8 字节 |
 | BIT | 15 | 1B | 最低字节（offset 0） |
@@ -286,6 +286,11 @@ block-beta
 所有类型的 value 使用本机序存储（Writer 与 Reader 均运行在同一台机器，直接读写本机内存序，无需网络序转换）。
 FLOAT 类型的 value 同样使用本机序存储（Go: `binary.NativeEndian`），其 IEEE 754 位模式与整数类型一致地按本机序写入。
 BOOLEAN 和 BIT 类型：最低位（bit 0）表示有效值，其余位为 0。
+
+> **FLOAT16 特例**：shm 存储尺寸为 **4 字节**，内容为该值对应的 **float32 IEEE 754 位模式**
+> （本机序）——与线缆尺寸（2 字节 f16 位型）不同。Writer 侧（`c4_asfp2_server`）在解码报文后
+> 先将 f16 转为 float32 位模式再写入；读取方（`c4_asfp2_client`、`c4_shm_manager` 的
+> `read_points`）按 float32 位模式解释低 4 字节，可无损转回 float16。
 
 ### 2.2.4 定长块设计优势
 
@@ -964,8 +969,8 @@ IEC104 采集（2 个主变 RTU）和 ASFP2 转发（到中心侧数据库和第
 
 ## 3.3 共享内存管理
 
-`c4_shm_manager` 通过 MCP 协议向 Agent 暴露 `create_shm`、`adjust_shm(instance_id, config_path)`
-三个工具，涵盖共享内存的创建、扩容、点分配和状态查询。`adjust_shm` 通过 `config_path` 参数接收配置文件的绝对路径。Agent 不直接操作共享内存。
+`c4_shm_manager` 通过 MCP 协议向 Agent 暴露 `create_shm`、`adjust_shm(instance_id, config_path)`、
+`read_points(shm_ids)` 三个工具，涵盖共享内存的创建、扩容、点分配和只读取值。`adjust_shm` 通过 `config_path` 参数接收配置文件的绝对路径。Agent 不直接操作共享内存（含只读读取——观测类读取一律经 `read_points`）。
 
 > 工具接口定义、配置文件解析算法、交互时序和错误码详见 [c4_shm_manager.md](c4_shm_manager.md)。
 
