@@ -33,6 +33,9 @@ import {
 import { MultiServerMCPClient } from "@langchain/mcp-adapters";
 import { translateError } from "./mcp/tools.js";
 import { createC4Agent } from "./super_worker/super_worker.js";
+import { DisplayService } from "./display/session.js";
+import { createDisplayRouter } from "./display/routes.js";
+import { createDisplayTools } from "./display/tools.js";
 import { AgentLogger, type AgentLogLevel } from "./logging/agent_logger.js";
 import type {
     AgentConfig,
@@ -82,6 +85,9 @@ const AgentConfigSchema: z.ZodType<AgentConfig> = z.object({
     site: z.object({
         name: z.string(),
         abbr: z.string(),
+    }).optional(),
+    display: z.object({
+        stale_threshold_ms: z.number().int().optional(),
     }).optional(),
 });
 
@@ -312,6 +318,14 @@ async function runStartupRecovery(
 
     if (dataClients.length === 0) {
         logger.info("启动恢复: 无可用数据路径 MCP 服务");
+        // 无数据路径服务也要确保 shm 附着——对点显示的 read_points 依赖附着态（agent.md §3.6.2）
+        try {
+            const adjustResult = await shmClient.adjust_shm();
+            logger.info(`启动恢复: adjust_shm 完成: ${adjustResult}`);
+        } catch (err: unknown) {
+            const msg = err instanceof Error ? err.message : String(err);
+            logger.warn(`启动恢复: adjust_shm 失败: ${msg}`);
+        }
         for (const mc of tempMultiClients) {
             try { await mc.close(); } catch { /* ignore */ }
         }
@@ -515,6 +529,16 @@ async function main(): Promise<void> {
     );
     logger.info("MCP manager 已配置（shm_manager + MultiServerMCPClient）");
 
+    // ── Step 4.5: 对点核验显示服务（agent.md §3.6）──
+    const displayService = new DisplayService({
+        multiClient: mcpManager.getMultiClient(),
+        configPath: config.shm_manager.config_path,
+        staleThresholdMs: config.display?.stale_threshold_ms,
+        logger,
+    });
+    const displayRouter = createDisplayRouter({ manager: displayService });
+    const displayTools = createDisplayTools({ manager: displayService });
+
     // ── Step 5: Build model ──
     let model;
     try {
@@ -541,6 +565,7 @@ async function main(): Promise<void> {
             site: config.site ?? null,
             state: stateTracker,
             agentLogger,
+            displayTools,
         });
         logger.info("SuperWorker Agent 已创建");
     } catch (err: unknown) {
@@ -554,6 +579,7 @@ async function main(): Promise<void> {
         agent,
         stateProvider: stateTracker,
         corsOrigin: config.server.cors_origin,
+        displayRouter,
         frontendDir: config.frontend?.dir,
     });
 

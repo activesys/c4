@@ -14,6 +14,7 @@ import { createChatRouter } from "./routes/chat.js";
 import { createUploadRouter } from "./routes/upload.js";
 import { createServicesRouter } from "./routes/services.js";
 import { createStateRouter } from "./routes/state.js";
+import type { Router } from "express";
 
 // ── Application Options ───────────────────────────────────
 export interface AppOptions {
@@ -31,6 +32,8 @@ export interface AppOptions {
     servicesPath?: string;
     /** Mount path for state router. Default: "/api/state" */
     statePath?: string;
+    /** 对点核验显示路由（agent.md §3.6.5）：/api/points、/api/display、/api/display/stop */
+    displayRouter?: Router;
     /** Absolute path to the web frontend static dir; served when set and existing (design §4.3 / §5.1) */
     frontendDir?: string;
 }
@@ -92,6 +95,7 @@ export function createApp(options: AppOptions): express.Application {
         uploadPath = "/api/upload",
         servicesPath = "/api/services",
         statePath = "/api/state",
+        displayRouter,
         frontendDir,
     } = options;
 
@@ -109,6 +113,9 @@ export function createApp(options: AppOptions): express.Application {
     app.use(uploadPath, createUploadRouter(agent));
     app.use(servicesPath, createServicesRouter());
     app.use(statePath, createStateRouter(stateProvider));
+    if (displayRouter) {
+        app.use("/api", displayRouter);
+    }
 
     // 4. Static frontend hosting (optional; design §4.3 / §5.1)
     if (frontendDir && existsSync(frontendDir)) {

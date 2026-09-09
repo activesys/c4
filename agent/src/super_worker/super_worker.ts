@@ -56,6 +56,8 @@ export interface SuperWorkerConfig {
     forward_handshake_pending?: boolean;
     state?: AgentStateWriter;
     agentLogger?: AgentLogger;
+    /** 对点核验控制面工具（list_points / display_points / stop_display），agent.md §3.6.4 */
+    displayTools?: StructuredTool[];
 }
 
 // ── 系统提示 ──────────────────────────────────────────────
@@ -124,6 +126,7 @@ export async function createSuperWorker(
             agentConfigPath: config.agentConfigPath,
             site: config.site,
         }),
+        ...(config.displayTools ?? []),
     ];
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any

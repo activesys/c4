@@ -829,7 +829,7 @@ export interface MCPClientHandle {
     callTool(params: { name: string; arguments: Record<string, unknown> }): Promise<unknown>;
 }
 
-async function callToolViaMultiClient(
+export async function callToolViaMultiClient(
     multiClient: MultiServerMCPClient,
     serverName: string,
     toolName: string,
