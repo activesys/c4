@@ -556,3 +556,31 @@ LLM 已产出并经工具校验的计划不得被覆盖。空回复兜底（nudg
 任意新措辞的代价是恰好一轮复述确认，不会死锁。已知局限：用户在握手期间一句话出现两个协议名
 （如同时纠正接收协议）时判定保持未定，Agent 继续提问，由用户明确后收敛；误声明的最终兜底是
 方案摘要逐条列出协议 + 确认按钮。
+
+---
+
+## 用例 15：ASFP2 FLOAT16 点经接收服务写入 shm 后数值归零 ✅
+
+- **测试特性**：协议级回归——FLOAT16（type=9）点经 `c4_asfp2_server` 解码写入共享内存后，
+  shm value 字段必须为该值对应的 **float32 位模式（4 字节）**，下游（c4_asfp2_client 转发、
+  c4_shm_manager read_points 展示）按此约定还原
+- **修复的版本**：C4H1
+
+### 测试输入
+
+构造 ASFPV211 数据包：单数据项，type=9（FLOAT16），key=3000，value 线缆编码 f16 `0x3E00`
+（即 1.5）；经 stdio 启动 `c4_asfp2_server`（点位映射 addr 3000 → shm_id 1）后发送到监听端口。
+
+### 曾经出现的问题
+
+C4H1（df3e6b1 之前）：`decodePacketValue` 将 f16 转为 float32 位模式（32 个有效位）后，
+`writeValue` 按 `TypeByteSize(FLOAT16)=2`（线缆尺寸）只拷贝低 2 字节进 shm——float32 位模式
+的符号位与指数位（高 16 位）被丢弃。以 1.5 为例：f32 位型 `0x3FC00000` 低 16 位为 `0x0000`，
+shm 实际存储 `0x00000000`，FLOAT16 点入 shm 后变为 ≈0，下游转发/落库/对点展示全错且状态
+标注仍为"正常"。修复：shm 存储特判为 4 字节 float32 位模式（`c4_architecture.md` §2.2.3
+FLOAT16 特例）。
+
+### 回归断言
+
+发送后直读 `/dev/shm/c4_main` 块（shm_id=1）：`state=1`、`type=9`、value 低 4 字节 =
+`0x3FC00000`、按 float32 解释 = 1.5。
