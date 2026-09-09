@@ -37,11 +37,11 @@ C4_FUN_00053 有两条分支：
 
 | 字段 | 偏移 | 大小 | 期望值 | 字节序 |
 |------|------|------|--------|--------|
-| magic | 0 | 4B | `0xC4DA7A00` | 大端 |
-| version | 4 | 2B | `1` | 大端 |
+| magic | 0 | 4B | `0xC4DA7A00` | 本机序 |
+| version | 4 | 2B | `1` | 本机序 |
 | remap_version | 6 | 2B | `0` | — |
 | point_count | 8 | 4B | `0` | — |
-| max_points | 12 | 4B | `100000` | 大端 |
+| max_points | 12 | 4B | `100000` | 本机序 |
 | global_write_seq | 16 | 8B | `0` | — |
 | reserved | 24 | 8B | `0` | — |
 
@@ -185,24 +185,27 @@ Python 通过 `os.open("/dev/shm/{instance_id}", os.O_RDONLY)` + `mmap` 直接�
 
 ### 4.3 字节序
 
-- `magic`、`version`、`max_points` 及所有多字节字段存储为大端（网络字节序）
-- Python `struct.unpack` 使用 `>` 前缀，各字段格式速查：
+- 块内所有多字节字段均为**本机序**（`c4_architecture.md` §2.2：Writer 与 Reader 同机运行，
+  直接读写本机内存序，无网络序转换）
+- Python `struct.unpack` 使用 `=` 前缀（本机序，无对齐填充），各字段格式速查：
 
 | 字段 | Python struct | 说明 |
 |------|--------------|------|
-| magic（4B） | `>I` | unsigned int |
-| version（2B） | `>H` | unsigned short |
-| remap_version（2B） | `>H` | unsigned short |
-| point_count（4B） | `>I` | unsigned int |
-| max_points（4B） | `>I` | unsigned int |
-| global_write_seq（8B） | `>Q` | unsigned long long |
-| write_seq（8B） | `>Q` | unsigned long long |
-| timestamp（8B） | `>Q` | unsigned long long |
-| value（8B） | `>Q` | unsigned long long |
-| state（1B） | `>B` | unsigned char |
-| type（1B） | `>B` | unsigned char |
+| magic（4B） | `=I` | unsigned int |
+| version（2B） | `=H` | unsigned short |
+| remap_version（2B） | `=H` | unsigned short |
+| point_count（4B） | `=I` | unsigned int |
+| max_points（4B） | `=I` | unsigned int |
+| global_write_seq（8B） | `=Q` | unsigned long long |
+| write_seq（8B） | `=Q` | unsigned long long |
+| timestamp（8B） | `=Q` | unsigned long long |
+| value（8B） | `=Q` | unsigned long long |
+| state（1B） | `=B` | unsigned char |
+| type（1B） | `=B` | unsigned char |
 
-> 值为 0 的字段同样按大端存储（`\x00` 填充位相同，不影响校验），统一使用上表格式即可。
+> **历史勘误**：本节曾误写为"大端/`>` 前缀"，与 `shm_helpers.py` 实际使用的本机序 `=`
+> 不一致——以本机序为准（x86/ARM 小端下 `0xC4DA7A00` 在文件中的字节序列为
+> `00 7A DA C4`，与 `shm_helpers.py:50` 的 `=I` 解读一致）。
 
 ### 4.4 SUT 编译
 
