@@ -1636,7 +1636,8 @@ stdio JSON-RPC），单次批量覆盖会话全部点（工具上限 1000 点，
 - **状态判定在 Agent 侧**（C4_RS_00054 强制）：
   - 工具返回 `no_data`（块未激活）→ **暂无数据**（该点从未收到数据）；
   - `now − timestamp_ms > 有效阈值` → **已停止刷新**（标注时长）。有效阈值 =
-    `max(staleThresholdMs, 3 × 该点 60s 窗口观测平均间隔)`（staleThresholdMs 默认 60 s，
+    `max(staleThresholdMs, 3 × 该点最近一次非空 60s 窗口计算的平均间隔)`——**窗口被剪空后
+    保留最近一次计算值**，直至出现新变位再重算（staleThresholdMs 默认 60 s，
     `agent.json → display.staleThresholdMs` 可配）——自适应下限防止慢周期点
     （如 5 分钟刷新的油温）被误标；会话初期无观测值时先用 staleThresholdMs，
     频率统计建立后自动收紧到观测值；
@@ -1653,7 +1654,7 @@ interface DisplaySession {
   createdAt: number;
   points: Array<{ key: string; shmId: number; addr: number }>;  // 1..N 个（≤ read_points 单次上限 1000；超出拒绝订阅并提示分批）
   mode: 'realtime' | 'cumulative';       // 实时值模式（缺省）| 累积模式
-  intervalMs: number;                    // 缺省 1000，下限 250
+  intervalMs: number;                    // 缺省 1000；低于 250 拒绝建立（返回错误，不钳制）
   terminate:
     | { kind: 'duration'; deadlineMs: number }
     | { kind: 'count'; budget: number }
@@ -1684,7 +1685,7 @@ interface DisplaySession {
 | 工具 | 输入 | 行为 |
 |------|------|------|
 | `list_points` | `{ filter?: string }` | 读 `~/.local/c4/config.json` 中 **writer 类服务的 points**——按 config 模型的 writer/reader 分类，reader 对同 key 的引用仅作一致性校验、不产生独立条目（否则枚举必然重复）；每点含 key / addr / shm_id / 所属实例，支持按实例（设备）或 key 关键词筛选；无匹配时返回空列表由 LLM 告知 |
-| `display_points` | `{ pointKeys: string[], mode?: 'realtime'\|'cumulative', durationMinutes?: number, refreshCount?: number }` | 校验 keys 存在 → 建立会话（隐式结束旧会话）→ 返回会话摘要（模式/周期/终止条件），LLM 据此告知用户卡片位置与终止方式 |
+| `display_points` | `{ pointKeys: string[], displayNames?: Record<string, string>, mode?: 'realtime'\|'cumulative', durationMinutes?: number, refreshCount?: number }` | 校验 keys 存在 → 建立会话（隐式结束旧会话）→ 返回会话摘要（模式/周期/终止条件），LLM 据此告知用户卡片位置与终止方式。`displayNames`（pointKey→点名原文）：用户用中文点名时由 LLM 传入对话中出现的中文名，卡片以中文名为主、key 为辅；未提供的点回退显示 key |
 | `stop_display` | `{ pointKeys?: string[] }` | 无参：终止整个会话；带参：仅移除指定点（清空则会话结束） |
 
 - **歧义消解**（C4_RS_00057）：用户说"风速"而多设备均有时，LLM 以 `list_points` 取候选
@@ -1700,6 +1701,7 @@ interface DisplaySession {
 |------|------|------|
 | `/api/points?filter=` | GET | 点位发现（00085）：已接入点列表 |
 | `/api/display` | GET | 活跃会话状态（无活跃会话时返回 lastSession 摘要 + `{ active: false }`） |
+| `/api/display` | POST | 创建显示会话：`{ pointKeys[], mode?, intervalMs?, durationMinutes?, refreshCount? }`——**重新订阅按钮与 LLM `display_points` 走同一服务入口**（确定性创建，不经 LLM） |
 | `/api/display/stop` | POST | `{ pointKeys?: string[] }` 停止——UI 停止按钮与 LLM `stop_display` 走同一服务入口 |
 
 **`/api/display` 载荷契约**：
@@ -1716,6 +1718,7 @@ interface DisplaySession {
     degraded?: boolean,          // 读取通道连续失败降级态
     points: Array<{
       key: string,
+      name?: string,             // 用户输入的中文点名（displayNames 传入）；前端主显 name、副显 key
       value: number | string,    // number；INT64/UINT64 大值时为 value_raw 字符串
       timestampMs: number,
       state: 'ok' | 'no_data' | 'stale',
@@ -1733,7 +1736,8 @@ interface DisplaySession {
 
 累积模式增量：前端 `GET /api/display?since=<tick>`，返回该 tick 之后追加的记录
 （每条携带自身 tick 序号）——游标是**会话内 tick 序号**，非 shm write_seq（后者跨点
-跳变、且会话替换后无意义）。前端轮询周期取会话 `intervalMs`。
+跳变、且会话替换后无意义）。`since` 仅在当前会话内有意义：`since ≥ 当前 tick` → 空增量；
+游标无效或跨会话 → 返回**全量**（安全默认）。前端轮询周期取会话 `intervalMs`。
 
 #### 3.6.6 Agent 重启语义
 
