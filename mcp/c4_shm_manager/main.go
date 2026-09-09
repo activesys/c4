@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"regexp"
 	"strings"
@@ -12,6 +13,23 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"c4/mcp/internal/shm"
+)
+
+// ASFP2 数据类型枚举（与 c4/mcp/internal/protocol 一致，此处本地化避免跨模块依赖）
+const (
+	typeBoolean uint8 = 0
+	typeInt8    uint8 = 1
+	typeUint8   uint8 = 2
+	typeInt16   uint8 = 3
+	typeUint16  uint8 = 4
+	typeInt32   uint8 = 5
+	typeUint32  uint8 = 6
+	typeInt64   uint8 = 7
+	typeUint64  uint8 = 8
+	typeFloat16 uint8 = 9
+	typeFloat32 uint8 = 10
+	typeFloat64 uint8 = 11
+	typeBit     uint8 = 15
 )
 
 var state = &serverState{}
@@ -561,6 +579,133 @@ func rebuildPointCount(sm *shm.SharedMemory) {
 	sm.SetHeaderUint32(shm.HdrOffPointCount, count)
 }
 
+// ── read_points（c4_shm_manager.md §3.3）──────────────────
+// 批量只读数据块：seqlock 协议读取，contention 计入 errors 不影响其他块。
+// 新鲜度判定与频率统计由调用方执行——本工具保持确定性无策略。
+
+type ReadPointsInput struct {
+	ShmIDs []int `json:"shm_ids"`
+}
+
+type readEntry struct {
+	ShmID       int     `json:"shm_id"`
+	Status      string  `json:"status"`
+	DataType    uint8   `json:"data_type,omitempty"`
+	TimestampMs uint64  `json:"timestamp_ms,omitempty"`
+	Seq         uint64  `json:"seq,omitempty"`
+	Value       float64 `json:"value,omitempty"`
+	ValueRaw    string  `json:"value_raw,omitempty"`
+}
+
+type readErrorEntry struct {
+	ShmID  int    `json:"shm_id"`
+	Status string `json:"status"`
+}
+
+// decodeBlockValue 按 data_type 将块内 8B value 解码为双精度数值
+// （存储布局见 c4_architecture.md §2.2.3：低位存储高位补零，本机序；
+// FLOAT16 特例：低 4 字节为 float32 IEEE 754 位模式）。
+func decodeBlockValue(dataType uint8, raw uint64) float64 {
+	switch dataType {
+	case typeBoolean, typeBit:
+		return float64(raw & 1)
+	case typeInt8:
+		return float64(int8(raw))
+	case typeUint8:
+		return float64(uint8(raw))
+	case typeInt16:
+		return float64(int16(raw))
+	case typeUint16:
+		return float64(uint16(raw))
+	case typeInt32:
+		return float64(int32(raw))
+	case typeUint32:
+		return float64(uint32(raw))
+	case typeInt64:
+		return float64(int64(raw))
+	case typeUint64:
+		return float64(raw)
+	case typeFloat16:
+		return float64(math.Float32frombits(uint32(raw)))
+	case typeFloat32:
+		return float64(math.Float32frombits(uint32(raw)))
+	case typeFloat64:
+		return math.Float64frombits(raw)
+	default:
+		return float64(raw)
+	}
+}
+
+func readPointsHandler(ctx context.Context, req *mcp.CallToolRequest, input ReadPointsInput) (
+	*mcp.CallToolResult, any, error,
+) {
+	if state.sm == nil {
+		return newError("SHM_NOT_CREATED: shared memory not initialized, call create_shm first"), nil, nil
+	}
+	if len(input.ShmIDs) == 0 || len(input.ShmIDs) > 1000 {
+		return newError(fmt.Sprintf("SHM_ID_OUT_OF_RANGE: shm_ids must contain 1..1000 entries, got %d", len(input.ShmIDs))), nil, nil
+	}
+
+	h := state.sm.HeaderInfo()
+	if h.Magic != shm.Magic {
+		return newError("SHM_CORRUPTED: header magic is invalid"), nil, nil
+	}
+
+	reads := make([]readEntry, 0, len(input.ShmIDs))
+	errors := make([]readErrorEntry, 0)
+	for _, id := range input.ShmIDs {
+		if id < 1 || int64(id) >= int64(h.MaxPoints) {
+			return newError(fmt.Sprintf("SHM_ID_OUT_OF_RANGE: shm_id %d exceeds max_points %d", id, h.MaxPoints)), nil, nil
+		}
+
+		var entry readEntry
+		ok := false
+		for attempt := 0; attempt < 5; attempt++ {
+			bi := state.sm.BlockInfo(id)
+			if bi.State == 0 {
+				entry = readEntry{ShmID: id, Status: "no_data"}
+				ok = true
+				break
+			}
+			if bi.WriteSeq%2 != 0 {
+				continue // writer 进行中
+			}
+			again := state.sm.BlockInfo(id)
+			if again.WriteSeq != bi.WriteSeq {
+				continue // 写入发生在两次读取之间
+			}
+			entry = readEntry{
+				ShmID:       id,
+				Status:      "ok",
+				DataType:    bi.Type,
+				TimestampMs: bi.Timestamp,
+				Seq:         bi.WriteSeq,
+				Value:       decodeBlockValue(bi.Type, bi.Value),
+				ValueRaw:    fmt.Sprintf("%d", bi.Value),
+			}
+			ok = true
+			break
+		}
+
+		if !ok {
+			errors = append(errors, readErrorEntry{ShmID: id, Status: "contention"})
+			continue
+		}
+		reads = append(reads, entry)
+	}
+
+	payload := struct {
+		Reads  []readEntry      `json:"reads"`
+		Errors []readErrorEntry `json:"errors"`
+	}{Reads: reads, Errors: errors}
+
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return newError(fmt.Sprintf("SHM_SYSCALL_FAILED: marshal failed - %v", err)), nil, nil
+	}
+	return newResult(string(data)), nil, nil
+}
+
 func newResult(text string) *mcp.CallToolResult {
 	return &mcp.CallToolResult{
 		Content: []mcp.Content{&mcp.TextContent{Text: text}},
@@ -601,6 +746,15 @@ func main() {
 			InputSchema: json.RawMessage(`{"type":"object","properties":{"instance_id":{"type":"string","description":"C4 instance identifier. instance_id is the shared memory name (must match c4_[a-zA-Z0-9]+)"},"config_path":{"type":"string","description":"Absolute path to config.json"}},"required":["instance_id","config_path"]}`),
 		},
 		adjustShmHandler,
+	)
+
+	mcp.AddTool(server,
+		&mcp.Tool{
+			Name:        "read_points",
+			Description: "Batch-read data blocks' current value, timestamp and write sequence (read-only, seqlock protocol)",
+			InputSchema: json.RawMessage(`{"type":"object","properties":{"shm_ids":{"type":"array","items":{"type":"integer","minimum":1},"description":"Data block shm_ids to read (batch, up to 1000 per call)"}},"required":["shm_ids"]}`),
+		},
+		readPointsHandler,
 	)
 
 	if err := server.Run(context.Background(), &mcp.StdioTransport{}); err != nil {
