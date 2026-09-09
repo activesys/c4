@@ -18,6 +18,7 @@ import {
 import { ConfirmButtons } from "./ConfirmButtons";
 import { ToolCallCard } from "./ToolCallCard";
 import { FileUpload } from "./FileUpload";
+import { PointDisplayPanel } from "./PointDisplayPanel";
 import { streamUpload, classifyFileType } from "@frontend/api/upload";
 
 export function ChatView(): JSX.Element {
@@ -105,6 +106,7 @@ export function ChatView(): JSX.Element {
 
   return (
     <div className="chat-view" data-testid="chat-view">
+      <PointDisplayPanel />
       <div className="chat-view__messages" data-testid="message-list" ref={listRef}>
         {messages.map((m: ChatBubble) => (
           <Bubble key={m.id} bubble={m} />

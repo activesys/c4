@@ -568,3 +568,140 @@ input {
 .services-error button:hover {
   background: var(--primary-hover);
 }
+
+/* ── 对点核验显示卡片（PointDisplayPanel）── */
+
+.pdp {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+
+.pdp__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.pdp__stop {
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.pdp__stop:hover {
+  color: var(--color-executing);
+}
+
+.pdp__point {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.pdp__point-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.pdp__name {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  min-width: 0;
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.pdp__key-sub {
+  font-weight: 400;
+  font-size: 11px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pdp__badge {
+  margin-left: auto;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.pdp__badge--ok {
+  background: rgba(16, 185, 129, 0.15);
+  color: var(--color-confirmed);
+}
+
+.pdp__badge--nodata {
+  background: rgba(107, 114, 128, 0.15);
+  color: var(--text-muted);
+}
+
+.pdp__badge--stale {
+  background: rgba(245, 158, 11, 0.18);
+  color: var(--color-executing);
+}
+
+.pdp__point-stop {
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.pdp__value {
+  font-size: 26px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.pdp__meta {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.pdp__records {
+  border-collapse: collapse;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.pdp__records td {
+  padding: 2px 12px 2px 0;
+  color: var(--text-muted);
+}
+
+.pdp__records td:last-child {
+  color: var(--text-primary, inherit);
+}
+
+.pdp__resubscribe {
+  border: none;
+  background: transparent;
+  color: var(--color-collecting);
+  cursor: pointer;
+  font-size: 13px;
+  text-decoration: underline;
+}
+
+.pdp--ended {
+  font-size: 13px;
+  color: var(--text-muted);
+}
