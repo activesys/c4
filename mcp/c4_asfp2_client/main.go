@@ -115,6 +115,7 @@ type instanceState struct {
 	writeMu     sync.Mutex     // serializes data/keepalive writes (write deadline cross-talk)
 	ka          *kaClock       // keepalive timers (T1 idle / T2 ack wait)
 	connDead    atomic.Bool    // receiver → sendRound: link presumed dead, reconnect now
+	t0          time.Duration  // 连接定时器（断链/首连失败到重拨的等待时长，§T0）
 	wg          sync.WaitGroup // tracks runSender/runReceiver/statsLoop goroutines
 	log         *slog.Logger   // inst-scoped logger
 	connectedAt time.Time      // 当前连接建立时刻
@@ -181,6 +182,11 @@ func loadConfig(configPath string) ([]clientInstance, error) {
 	for i := range instances {
 		if instances[i].ForwardKack == 0 {
 			instances[i].ForwardKack = 255
+		}
+		// T0 连接定时器缺省 30s（对齐 mcp-registry 声明的 default）：断链/首连失败后
+		// 以 T0 为周期后台重拨，连接建立后关闭（asfp2_specification.md §T0，图 814）。
+		if instances[i].T0 <= 0 {
+			instances[i].T0 = 30
 		}
 	}
 
@@ -581,40 +587,35 @@ func (ist *instanceState) writeFrame(conn net.Conn, b []byte) error {
 // markConnDead flags the link as broken so sendRound performs the reconnect
 // (single reconnect owner) and records why. Only fires when conn is still the
 // current one — a stale receiver must not kill a freshly re-established link.
+// T0 从断链时刻起算：downAt 在此设置，sendRound 到期后才重拨（§T0）。
 func (ist *instanceState) markConnDead(conn net.Conn, reason string) {
 	ist.mu.Lock()
 	same := ist.conn != nil && ist.conn == conn
 	if same {
 		ist.conn.Close()
+		ist.conn = nil
 		// 首个原因保留：t2_timeout 等权威判定不被后续读错误覆盖
 		if ist.deadReason == "" {
 			ist.deadReason = reason
 		}
+		ist.downAt = time.Now()
 	}
 	ist.mu.Unlock()
 	if same {
 		ist.connDead.Store(true)
+		ist.log.Info("disconnected",
+			"remote", fmt.Sprintf("%s:%d", ist.cfg.IP, ist.cfg.Port),
+			"reason", reason,
+			"duration_s", time.Since(ist.connectedAt).Seconds(),
+			"reconnect_after_s", ist.t0.Seconds())
 	}
 }
-
-// reconnectAfterError is the single reconnect path: logs the disconnect,
-// drops the dead socket, dials again and logs the outcome. Reuses the
+// reconnectAfterError is the single reconnect path, invoked by sendRound once
+// T0 has elapsed since the link went down (§T0): dials once; on failure the
+// T0 window restarts so the next attempt waits a full period. Reuses the
 // post-Dial quit re-check and the stopHandler wg.Wait backstop (§9.5).
-func (ist *instanceState) reconnectAfterError(reason string, countSendErr bool) {
+func (ist *instanceState) reconnectAfterError() {
 	remote := fmt.Sprintf("%s:%d", ist.cfg.IP, ist.cfg.Port)
-	if countSendErr {
-		atomic.AddUint64(&ist.stats.sendErrors, 1)
-	}
-	ist.log.Info("disconnected", "remote", remote, "reason", reason,
-		"duration_s", time.Since(ist.connectedAt).Seconds())
-	ist.downAt = time.Now()
-
-	ist.mu.Lock()
-	if ist.conn != nil {
-		ist.conn.Close()
-		ist.conn = nil
-	}
-	ist.mu.Unlock()
 
 	// Try reconnect only if not stopping
 	select {
@@ -632,33 +633,45 @@ func (ist *instanceState) reconnectAfterError(reason string, countSendErr bool) 
 			return
 		default:
 		}
+		elapsed := time.Since(ist.downAt).Milliseconds()
 		ist.mu.Lock()
 		ist.conn = newConn
+		ist.deadReason = ""
+		ist.downAt = time.Time{}
 		ist.mu.Unlock()
 		atomic.AddUint64(&ist.stats.reconnects, 1)
 		ist.connectAttempt.Store(0)
 		ist.connectedAt = time.Now()
 		ist.connDead.Store(false)
+		ist.connectWarn = time.Time{}
 		ist.ka.resetT1()
 		ist.ka.stopT2()
 		ist.log.Info("connected", "remote", remote,
-			"attempt", attempt, "elapsed_ms", time.Since(ist.downAt).Milliseconds())
+			"attempt", attempt, "elapsed_ms", elapsed)
 	} else if ist.connectWarn.IsZero() || time.Since(ist.connectWarn) >= 60*time.Second {
 		ist.connectWarn = time.Now()
 		ist.log.Warn("connect_failed", "remote", remote,
 			"attempt", attempt,
-			"retry_after_s", float64(ist.cfg.Timer)/1000,
+			"retry_after_s", ist.t0.Seconds(),
 			"err", dialErr.Error())
+		// 重拨失败：重置 T0 窗口，下个整周期再试（§T0）
+		ist.mu.Lock()
+		ist.downAt = time.Now()
+		ist.mu.Unlock()
 	}
 }
 
 func sendRound(ist *instanceState, shmData []byte) {
-	// Link flagged dead by runReceiver (t2 timeout / recv error) — reconnect now.
+	// Link flagged dead (t2 timeout / recv error / initial-connect failure) —
+	// reconnect only after T0 elapsed since the link went down (§T0, 图 814).
 	if ist.connDead.Load() {
 		ist.mu.Lock()
-		reason := ist.deadReason
+		due := time.Since(ist.downAt) >= ist.t0
 		ist.mu.Unlock()
-		ist.reconnectAfterError(reason, false)
+		if !due {
+			return
+		}
+		ist.reconnectAfterError()
 		return
 	}
 
@@ -730,8 +743,9 @@ func sendRound(ist *instanceState, shmData []byte) {
 		}
 
 		if err := ist.writeFrame(conn, pkt); err != nil {
-			// Connection broken — reconnect via the single reconnect path
-			ist.reconnectAfterError("send_error", true)
+			// Connection broken — enter the T0 reconnect flow (§T0)
+			atomic.AddUint64(&ist.stats.sendErrors, 1)
+			ist.markConnDead(conn, "send_error")
 			// If reconnect failed, skip remaining subgroups this round
 			return
 		}
@@ -992,11 +1006,12 @@ func startHandler(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolR
 			instID = cfg.Name
 		}
 		addr := net.JoinHostPort(cfg.IP, strconv.Itoa(cfg.Port))
-		conn, err := net.Dial("tcp", addr)
-		if err != nil {
-			log.Error("connect_failed", "inst", instID, "remote", addr, "attempt", 1, "err", err.Error())
-			lastErr = fmt.Sprintf("CONNECT_FAILED: connect to %s failed: %v", addr, err)
-			break
+		// T0（§T0，图 814）：首连失败不终止启动——实例以未连接态创建，
+		// sendRound 按 t0 周期后台重拨，目标就绪后自动建链。
+		conn, dialErr := net.Dial("tcp", addr)
+		if dialErr != nil {
+			log.Warn("connect_failed", "inst", instID, "remote", addr,
+				"attempt", 1, "t0_s", cfg.T0, "err", dialErr.Error())
 		}
 
 		inst := &instanceState{
@@ -1007,8 +1022,13 @@ func startHandler(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolR
 			ptKeys:      ptKeys,
 			lastSeen:    lastSeen,
 			ka:          newKAClock(cfg.T1, cfg.T2),
+			t0:          time.Duration(cfg.T0) * time.Second,
 			log:         log.With("inst", instID),
 			connectedAt: time.Now(),
+			downAt:      time.Now(),
+		}
+		if conn == nil {
+			inst.connDead.Store(true)
 		}
 
 		for shmID, addr := range shmIDs {
@@ -1021,7 +1041,9 @@ func startHandler(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolR
 
 	if lastErr != "" {
 		for _, ist := range instancesState {
-			ist.conn.Close()
+			if ist.conn != nil {
+				ist.conn.Close()
+			}
 		}
 		unix.Munmap(shmData)
 		unix.Close(shmFd)
