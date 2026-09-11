@@ -260,7 +260,7 @@ def _make_port_conflict_config():
 
 def _make_modified_config(
     instance_id: str = "c4_teststoprestart",
-    port: int = 9001,
+    port: int = 19001,
     include_old_points: bool = True,
 ):
     """

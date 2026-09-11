@@ -329,7 +329,7 @@ class TestStopRestart:
         iid = "c4_testtc9"
         isolated_shm(iid)
         old_port = 9000
-        new_port = 9001
+        new_port = 19001
 
         config = _make_standard_config(iid, old_port)
         config_path, _ = prepare_environment(config, iid)
@@ -342,7 +342,7 @@ class TestStopRestart:
         resp = start_asfp2_server.call_tool("stop", {})
         _assert_mcp_success(resp)
 
-        # 修改配置: port 9001, 保留旧 point + 新增 addr=2000
+        # 修改配置: port 19001, 保留旧 point + 新增 addr=2000
         modified_config = _make_modified_config(iid, new_port, include_old_points=True)
         modified_path = _prepare_config_with_shm(modified_config, iid, isolated_shm)
 
@@ -350,7 +350,7 @@ class TestStopRestart:
         resp = start_asfp2_server.call_tool("start", {"instance_id": iid, "config_path": modified_path})
         _assert_mcp_success(resp)
 
-        # 验证: 新端口 9001 监听，旧端口 9000 释放
+        # 验证: 新端口 19001 监听，旧端口 9000 释放
         _assert_port_listening(new_port)
         wait_port_released(old_port)
 

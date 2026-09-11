@@ -283,23 +283,23 @@ def wait_port_released(port: int, timeout: float = 3.0, interval: float = 0.1):
 - **前置**：已按 §3.1 标准配置完成 prepare_environment，`start` 调用成功（端口 9000，addr=1000,1001）
 - **操作**：
   1. 调用 `stop` → 确认返回 `"success"`
-  2. 修改配置：将 port 从 9000 改为 **9001**，保留原有 2 个 point（addr=1000,1001），
+  2. 修改配置：将 port 从 9000 改为 **19001**，保留原有 2 个 point（addr=1000,1001），
      新增一个 point（addr=2000, shm_id=0）。通过 `prepare_environment` 写入新配置文件
   3. 启动 `c4_shm_manager` → `adjust_shm` → 关闭（会为新 point 分配 shm_id，已有点 shm_id 不变）
   4. 调用 `start`，传入 instance_id 和新 config_path 参数
-  5. 验证**端口 9001** 已监听（`socket.create_connection`）
+  5. 验证**端口 19001** 已监听（`socket.create_connection`）
   6. 验证**端口 9000** 已释放（`wait_port_released`）
   7. 验证**旧 point（addr=1000,1001）数据流**：
      a. 记录 shm_id=1（addr=1000）和 shm_id=2（addr=1001）的 `write_seq` 为 `seq_before`
-     b. 运行 `asfp2_client -s 127.0.0.1 -p 9001 -b 1000 -e 1001 -t 3 -d 16`
+     b. 运行 `asfp2_client -s 127.0.0.1 -p 19001 -b 1000 -e 1001 -t 3 -d 16`
      c. 验证 `write_seq > seq_before`
   8. 验证**新 point（addr=2000）数据流**：
      a. 解析配置文件，找到 addr=2000 分配的 `shm_id`（§5.8），记录其 `write_seq` 为 `seq_before`
-     b. 运行 `asfp2_client -s 127.0.0.1 -p 9001 -b 2000 -e 2000 -t 3 -d 16`
+     b. 运行 `asfp2_client -s 127.0.0.1 -p 19001 -b 2000 -e 2000 -t 3 -d 16`
      c. 验证 `write_seq > seq_before`
 - **预期**：
   - `start` 返回 `"success"`
-  - 新端口 9001 监听，旧端口 9000 释放
+  - 新端口 19001 监听，旧端口 9000 释放
   - 旧 point（addr=1000,1001）在新端口上数据正常写入
   - 新 point（addr=2000）数据正常写入
 - **说明**：验证 C4_FUN_00058 的核心语义——"重启时 MCP 服务自动重新读取配置文件，
@@ -386,7 +386,7 @@ asfp2_client -s 127.0.0.1 -p <port> -b <begin_addr> -e <end_addr> -t <count> -d 
 - 每个测试用例使用独立的 `instance_id`（如 `c4_testtc1`、`c4_testtc2`），确保共享内存路径不冲突
 - TC1–TC6 均使用标准配置 port 9000；function-scoped teardown 确保端口在用例间释放，顺序执行无冲突
 - TC7 PORT_CONFLICT 配置也使用 port 9000，依赖 TC 间顺序执行和 teardown 释放
-- TC9 配置变更后使用 port 9001，不与其他 TC 冲突
+- TC9 配置变更后使用 port 19001（避开生产环境 hnals_wt1 常驻的 9001），不与其他 TC 冲突
 - fixture teardown 中清理共享内存、关闭 SUT 进程、删除临时配置文件
 
 ### 5.8 shm_id 查找（TC9）
