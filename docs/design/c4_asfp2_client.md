@@ -771,7 +771,7 @@ c4-agent 的 journald——与部署设计「日志（journald）」一致，不
 | `connected` | info | inst、remote、attempt、elapsed_ms | TCP 连接建立（重连成功）；初次连接由 `instance_started` 覆盖 |
 | `disconnected` | info | inst、remote、reason、duration_s | 连接断开。reason：`send_error`（数据发送失败）/ `t2_timeout`（T2 应答超时）/ `recv_error`（接收侧致命错误，EOF/RST） |
 | `stats_periodic` | info | inst、packets_sent、points_sent、smart_skipped、encode_skipped、send_errors、reconnects | 每 `STATS_INTERVAL` 打印发送计数快照 |
-| `connect_failed` | warning | inst、remote、attempt、retry_after_s、err | 拨号失败进入重连；**限频：首条 + 每 60s 一条**（重连本身无退避，为既有行为）；启动期连接失败为 err 且中止 start |
+| `connect_failed` | warning | remote、attempt、retry_after_s、err（启动期为 inst、remote、t0_s、err） | 拨号未成功，按 §T0 周期后台重拨；**限频：首条 + 每 60s 一条**。⚠️ 仅记日志——业务层网络错误不作为 MCP tool 错误返回 Agent（§2 工具契约） |
 | `encode_skipped` | warning | inst、key、shm_id、addr、type、reason | block 不可编码跳过，同类限频（见 9.6） |
 | `shm_lost` | **crit** | inst、err | 共享内存段不可用，转发链路中断，实例停止，需重新 start（看门狗与统计同周期；=0 时固定 60s） |
 | `panic_recovered` | err | inst、goroutine、err | goroutine panic 恢复（runSender / runReceiver / stats） |
@@ -787,7 +787,7 @@ c4-agent 的 journald——与部署设计「日志（journald）」一致，不
 1. **数据面不逐点/逐包**：默认仅周期统计；smart 模式的无变化跳过计数并入 `stats_periodic`，
    不产生独立日志；逐包与 KeepAlive 明细在 debug 级；
 2. **限频**：`encode_skipped` 首条立即输出，其后每周期汇总一条（计数见 `stats_periodic`）；
-   `connect_failed` 限频为首条 + 每 60s 一条（重连本身按 timer 周期重试、无退避，为既有行为）；
+   `connect_failed` 限频为首条 + 每 60s 一条（重连本身按 §T0 周期重试）；
 3. **禁止记录**：点位业务值、完整报文 hex（debug 下 raw 摘要 ≤32 字节）；
 4. **验收**：单实例转发全生命周期可仅凭 `journalctl -u c4-agent | grep hnals_center` 还原；
    `journalctl -u c4-agent -p warning` 即可看到全部异常（crit/err/warning，PRIORITY 原生过滤）；

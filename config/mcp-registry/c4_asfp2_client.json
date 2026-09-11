@@ -36,7 +36,7 @@
       "t0": {
         "type": "integer",
         "default": 30,
-        "description": "连接超时（秒）"
+        "description": "连接/重连定时器（秒）：断链或首连失败后按此周期后台重拨，连接建立后停止（ASFP2 §T0）"
       },
       "t1": {
         "type": "integer",
