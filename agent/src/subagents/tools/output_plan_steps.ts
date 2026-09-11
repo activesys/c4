@@ -2,6 +2,7 @@
 // LLM 提供 deviceInfo（info-gatherer 产出），工具确定性生成 ServiceStep[]
 // 协议映射、id 生成（abbr 记忆）、默认字段填充、运行时强校验全部由 Registry 驱动
 
+import { readFileSync } from "node:fs";
 import { tool } from "langchain";
 import { z } from "zod";
 import type { McpServiceRegistry } from "../../registry/registry.js";
@@ -485,9 +486,66 @@ function validate_runtime_input(
 
 // ── 工厂函数 ──────────────────────────────────────────────
 
+// 增量继承（func_test_case 用例 16/21/22）：devices/forward_targets 命中已接入实例时，
+// 从现有配置继承缺失字段（port/ip 等），点表仅保留新增 addr——已接入实例的
+// 必填字段不再要求用户重复提供，LLM 的自然增量表述得以通过强校验。
+function inheritExistingFields(
+    input: z.infer<typeof planStepsInputSchema>,
+    registry: McpServiceRegistry,
+    site_abbr: string,
+    config: Record<string, unknown> | null,
+): void {
+    if (!config) return;
+    const byId = new Map<string, { inst: Record<string, unknown>; st: string }>();
+    const byName = new Map<string, { inst: Record<string, unknown>; st: string }>();
+    for (const [st, list] of Object.entries(config)) {
+        if (st === "c4_shm_manager" || !Array.isArray(list)) continue;
+        for (const inst of list as Record<string, unknown>[]) {
+            const pair = { inst, st };
+            if (typeof inst["id"] === "string") byId.set(String(inst["id"]), pair);
+            if (typeof inst["name"] === "string") byName.set(String(inst["name"]), pair);
+        }
+    }
+    const inherit = (item: Record<string, unknown>) => {
+        // 匹配优先级：推导 id（{site_abbr}_{abbr}）→ 实例 name 精确匹配（增量轮 LLM 常缺 abbr）
+        const abbr = (item["abbr"] as string) || sanitize_identifier(String(item["name"] ?? ""));
+        const id = abbr ? (site_abbr ? `${site_abbr}_${abbr}` : abbr) : "";
+        const hit =
+            (id && byId.get(id)) ||
+            (item["name"] !== undefined ? byName.get(String(item["name"])) : undefined);
+        if (!hit) return;
+        const ex = hit.inst;
+        // 协议以实例所属服务为准强制覆盖——实例的服务类型即协议事实源，
+        // LLM 记忆缺失时的协议猜测（如 modbus）不得污染增量操作
+        const entry = registry.get_entry(hit.st);
+        const proto = entry?.protocols?.[0]?.protocol;
+        if (proto) item["protocol"] = normalize_protocol(proto);
+        for (const [k, v] of Object.entries(ex)) {
+            if (k === "id" || k === "name" || k === "points") continue;
+            if (item[k] === undefined && v !== undefined) item[k] = v;
+        }
+        const have = new Set(
+            (Array.isArray(ex["points"]) ? (ex["points"] as Record<string, unknown>[]) : [])
+                .map((p) => p["addr"]),
+        );
+        if (Array.isArray(item["points"]) && (item["points"] as unknown[]).length > 0) {
+            (item as Record<string, unknown>)["points"] = (
+                item["points"] as Record<string, unknown>[]
+            ).filter((p) => !have.has(p["addr"]));
+        }
+    };
+    for (const dev of input.devices ?? []) {
+        inherit(dev as unknown as Record<string, unknown>);
+    }
+    for (const ft of input.forward_targets ?? []) {
+        inherit(ft as unknown as Record<string, unknown>);
+    }
+}
+
 export function createOutputPlanStepsTool(
     registry: McpServiceRegistry,
     site?: { name: string; abbr: string } | null,
+    configPath?: string,
 ) {
     const fallback_site_abbr = site?.abbr ?? "";
     return tool(
@@ -509,7 +567,86 @@ export function createOutputPlanStepsTool(
                 normalize_shape(ft as Record<string, unknown>);
             }
 
+            // 增量继承：命中已接入实例时补齐缺失字段、点表裁剪为新增 addr
+            let current_config: Record<string, unknown> | null = null;
+            if (configPath) {
+                try {
+                    current_config = JSON.parse(
+                        readFileSync(configPath, "utf-8"),
+                    ) as Record<string, unknown>;
+                } catch {
+                    current_config = null;
+                }
+            }
+            inheritExistingFields(
+                input,
+                registry,
+                input.site?.abbr || fallback_site_abbr || "",
+                current_config,
+            );
+
             if (input.changes && input.changes.length > 0) {
+                // 存在性校验（func_test_case 用例 19）：delete 目标（实例/点）必须在当前配置中
+                // 存在，不存在 → 可读错误（附当前点表），不产出任何步骤
+                if (current_config) {
+                    for (const c of input.changes) {
+                        const inst = c.instance as Record<string, unknown>;
+                        const inst_id = String(inst["id"] ?? "");
+                        // service_type 以实例真实归属为准（LLM 记忆缺失时会猜错协议/服务类型）：
+                        // 按 instance.id 全局解析并覆盖
+                        if (inst_id) {
+                            for (const [st, list] of Object.entries(current_config)) {
+                                if (st === "c4_shm_manager" || !Array.isArray(list)) continue;
+                                if (list.some((i) => i["id"] === inst_id)) {
+                                    c.service_type = st;
+                                    break;
+                                }
+                            }
+                        }
+                        if (c.action !== "delete") continue;
+                        const svc_instances =
+                            (current_config[c.service_type] as Record<string, unknown>[] | undefined) ?? [];
+                        const existing = svc_instances.find((i) => i["id"] === inst_id);
+                        if (!existing) {
+                            const known =
+                                svc_instances.map((i) => String(i["id"])).join(", ") || "（无已接入实例）";
+                            return JSON.stringify({
+                                success: false,
+                                error: `删除失败: ${c.service_type} 中不存在实例 "${inst_id}"。当前已接入: ${known}`,
+                            });
+                        }
+                        const step_points = Array.isArray(c.points) ? c.points : [];
+                        if (step_points.length > 0) {
+                            const pts =
+                                (existing["points"] as Record<string, unknown>[] | undefined) ?? [];
+                            const exists = (p: Record<string, unknown>) => {
+                                const mk = String(p["id"] ?? p["key"] ?? "");
+                                const addr = p["addr"];
+                                return pts.some((q) => {
+                                    const qk = String(q["id"] ?? q["key"] ?? "");
+                                    return (
+                                        (mk !== "" && qk === mk) ||
+                                        (addr !== undefined && q["addr"] === addr)
+                                    );
+                                });
+                            };
+                            const missing = step_points
+                                .map((p) => p as Record<string, unknown>)
+                                .filter((p) => !exists(p));
+                            if (missing.length > 0) {
+                                const table =
+                                    pts.map((q) => `${q["addr"]}:${q["id"] ?? q["key"] ?? "?"}`).join(", ") ||
+                                    "（空）";
+                                return JSON.stringify({
+                                    success: false,
+                                    error:
+                                        `删除失败: ${inst_id} 不存在要删除的点` +
+                                        `（${missing.map((m) => JSON.stringify(m)).join("; ")}）。当前点表: ${table}`,
+                                });
+                            }
+                        }
+                    }
+                }
                 for (const c of input.changes) {
                     const inst = c.instance as Record<string, unknown>;
                     const inst_id = inst["id"];
@@ -591,6 +728,9 @@ export function createOutputPlanStepsTool(
                 "将接入方案/变更请求转化为增量 MCP 服务配置步骤。" +
                 "新增接入：输入 devices（info-gatherer 产出，含 abbr/协议/平铺的实例字段）、可选的 site 和 forward_targets。" +
                 "修改/删除：输入 changes（action=modify/delete + 目标实例 id + 变更字段）。" +
+                "增量语义：对已接入设备/转发目标再次 output devices/forward_targets 时，自动继承现有配置" +
+                "（端口等无需重复提供）并仅合并新增点；changes 中 action=delete 且带 points → 仅删除这些点" +
+                "（实例保留，转发侧级联删除）；delete 不带 points → 删除整个实例（含其全部转发点）。" +
                 "内部自动完成：协议→服务类型映射、instance.id 生成（{site_abbr}_{abbr}）、默认字段填充、运行时强校验、转发目标映射。" +
                 "调用时机：用户确认方案后。",
             schema: planStepsInputSchema,

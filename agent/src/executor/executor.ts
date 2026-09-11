@@ -190,6 +190,9 @@ export async function merge_config_from_steps(
     await fs.writeFile(config_path + ".bak", backup_raw, "utf-8");
 
     // ── Step 4: 处理 steps ──
+    // 撞名去重的改名传播表（writer instance_id → 旧点id → 新点id）：
+    // writer 点去重后，同批次 reader 转发点的 key 必须跟随新 id（func_test_case 用例 10）
+    const renames = new Map<string, Map<string, string>>();
     for (const step of steps) {
         const svc_type = step.service_type;
         if (svc_type === "c4_shm_manager") {
@@ -207,12 +210,37 @@ export async function merge_config_from_steps(
         }
         const instances = config[svc_type] as MCPInstanceConfig[];
 
+        // 转发点引用校验（func_test_case 用例 18）：reader 点 key 必须引用已存在的
+        // writer 采集点（本批次先处理或既有配置），防止转发侧独立写入造成数据错配
+        const entry_r = registry?.get_entry(svc_type);
+        if (entry_r?.role === "reader" && Array.isArray(step.points)) {
+            for (const p of step.points) {
+                const k = point_match_key(p);
+                const dot = k.indexOf(".");
+                if (dot <= 0) continue;
+                const writer_id = k.slice(0, dot);
+                const pid = k.slice(dot + 1);
+                const exists = Object.entries(config).some(([st2, list2]) => {
+                    if (st2 === "c4_shm_manager" || !Array.isArray(list2)) return false;
+                    return (list2 as MCPInstanceConfig[]).some(
+                        (i2) => i2.id === writer_id &&
+                            (i2.points ?? []).some((p2) => point_match_key(p2) === pid),
+                    );
+                });
+                if (!exists) {
+                    throw new Error(
+                        `转发点 ${k} 引用的采集点不存在（${writer_id} 上没有点 "${pid}"），请先确认采集侧点表`,
+                    );
+                }
+            }
+        }
+
         switch (step.action) {
             case "add":
-                await handle_add(step, instances, config, registry, warnings);
+                await handle_add(step, instances, config, registry, warnings, renames);
                 break;
             case "modify":
-                handle_modify(step, instances, warnings);
+                handle_modify(step, instances, warnings, renames);
                 break;
             case "delete":
                 handle_delete(step, instances, config, registry, warnings);
@@ -313,6 +341,7 @@ async function handle_add(
     config: SystemConfig,
     registry: RegistryLookup | undefined,
     warnings: string[],
+    renames?: Map<string, Map<string, string>>,
 ): Promise<void> {
     const instance_id = step.instance["id"] as string | undefined;
     if (!instance_id || typeof instance_id !== "string") {
@@ -320,11 +349,40 @@ async function handle_add(
     }
     validate_identifier(instance_id, "instance.id");
 
+    // 有效实例 id：同 id 且端口相同（或无端口语义）→ 合并 points（增量加点）；
+    // 同 id 但端口不同 → 语义是不同的转发连接/监听，生成带序号的新实例 id，
+    // 禁止把用户指定的新端口静默并入旧实例（func_test_case 用例 21：9901 被并入 9900 实例）
+    let effective_id = instance_id;
+    {
+        const want_raw = (step.instance as Record<string, unknown>)["port"];
+        const want_port = want_raw === undefined ? undefined : Number(want_raw);
+        for (let guard = 1; guard <= 50; guard++) {
+            const existing_same = instances.find((i) => i.id === effective_id);
+            if (!existing_same) break;
+            const have_raw = (existing_same as Record<string, unknown>)["port"];
+            const have_port = have_raw === undefined ? undefined : Number(have_raw);
+            if (want_port === undefined || have_port === undefined || have_port === want_port) break;
+            effective_id = `${instance_id}_${guard}`;
+        }
+    }
+
     // 检查 instance.id 是否与现有冲突：若已存在同名实例（如追加设备时转发目标已存在），
     // 合并 points（追加新 point、更新已有 point），而非报错。
     for (const existing of instances) {
-        if (existing.id === instance_id) {
+        if (existing.id === effective_id) {
             for (const pt of step.points) {
+                // reader 点 key 跟随同批次 writer 撞名改名（func_test_case 用例 10）
+                const pt_rec_r = pt as unknown as Record<string, unknown>;
+                const rkey = typeof pt_rec_r["key"] === "string" ? (pt_rec_r["key"] as string) : "";
+                const dot = rkey.indexOf(".");
+                if (dot > 0 && renames) {
+                    const prefix = rkey.slice(0, dot);
+                    const pid = rkey.slice(dot + 1);
+                    const new_id = renames.get(prefix)?.get(pid);
+                    if (new_id) {
+                        pt_rec_r["key"] = `${prefix}.${new_id}`;
+                    }
+                }
                 const match_key = point_match_key(pt);
                 const existing_idx = existing.points.findIndex(
                     (p) => point_match_key(p) === match_key,
@@ -332,17 +390,65 @@ async function handle_add(
                 if (existing_idx >= 0) {
                     const existing_rec = existing.points[existing_idx] as unknown as Record<string, unknown>;
                     const pt_rec = pt as unknown as Record<string, unknown>;
-                    existing.points[existing_idx] = {
-                        ...existing_rec,
-                        ...pt_rec,
-                        shm_id: existing_rec["shm_id"],
-                    } as unknown as ServicePoint;
+                    // 撞名保护（func_test_case 用例 10）：同名点但业务地址不同 → 独立新点
+                    // （追加序号去重）。禁止覆盖——覆盖会改写既有点 addr 造成数据损坏。
+                    if (
+                        existing_rec["addr"] !== pt_rec["addr"] &&
+                        typeof pt_rec["id"] === "string" && pt_rec["id"].length > 0
+                    ) {
+                        const base = String(pt_rec["id"]);
+                        let seq = 2;
+                        let cand = `${base}_${seq}`;
+                        const taken = (k: string) =>
+                            existing.points.some((p) => point_match_key(p) === k);
+                        while (taken(cand)) {
+                            seq += 1;
+                            cand = `${base}_${seq}`;
+                        }
+                        pt_rec["id"] = cand;
+                        if (renames && typeof instance_id === "string") {
+                            let m = renames.get(instance_id);
+                            if (!m) {
+                                m = new Map<string, string>();
+                                renames.set(instance_id, m);
+                            }
+                            m.set(base, cand);
+                        }
+                        existing.points.push(
+                            { ...pt, id: cand, shm_id: 0 } as unknown as ServicePoint,
+                        );
+                        warnings.push(
+                            `add: 点 "${base}" 撞名且地址不同（addr ` +
+                            `${String(existing_rec["addr"])}→${String(pt_rec["addr"])}），去重为 "${cand}"`,
+                        );
+                    } else {
+                        existing.points[existing_idx] = {
+                            ...existing_rec,
+                            ...pt_rec,
+                            shm_id: existing_rec["shm_id"],
+                        } as unknown as ServicePoint;
+                    }
                 } else {
+                    // 地址冲突检查（func_test_case 用例 18）：新增点 addr 与已有点相同 → 可读拒绝
+                    const rec2 = pt as unknown as Record<string, unknown>;
+                    if (typeof rec2["addr"] === "number") {
+                        const clash = existing.points.find(
+                            (p) =>
+                                (p as unknown as Record<string, unknown>)["addr"] === rec2["addr"],
+                        );
+                        if (clash) {
+                            const cid = (clash as unknown as Record<string, unknown>)["id"];
+                            throw new Error(
+                                `地址 ${rec2["addr"]} 已被点 "${cid}" 占用` +
+                                `（${step.service_type}.${effective_id}），请更换地址或先删除原点`,
+                            );
+                        }
+                    }
                     existing.points.push({ ...pt, shm_id: pt.shm_id ?? 0 });
                 }
             }
             warnings.push(
-                `add: ${step.service_type}.${instance_id} 已存在，合并 points`,
+                `add: ${step.service_type}.${effective_id} 已存在，合并 points`,
             );
             return;
         }
@@ -359,7 +465,7 @@ async function handle_add(
         validate_identifier(id, "point.id");
         if (point_ids.has(id)) {
             throw new Error(
-                `point.id "${id}" 在 ${step.service_type}.${instance_id} 中重复`,
+                `point.id "${id}" 在 ${step.service_type}.${effective_id} 中重复`,
             );
         }
         point_ids.add(id);
@@ -381,7 +487,7 @@ async function handle_add(
             if (prev_id !== undefined) {
                 throw new Error(
                     point_duplicate_error(
-                        `${step.service_type}.${instance_id}`,
+                        `${step.service_type}.${effective_id}`,
                         [
                             { identity: ikey, id: prev_id },
                             { identity: ikey, id: this_id },
@@ -395,7 +501,7 @@ async function handle_add(
 
     // 构建实例配置：合并 instance 字段 + points
     const new_instance: MCPInstanceConfig = {
-        id: instance_id,
+        id: effective_id,
         name: (step.instance["name"] as string) || instance_id,
         points: step.points.map((pt) => ({ ...pt, shm_id: pt.shm_id ?? 0 })),
     };
@@ -450,6 +556,7 @@ function handle_modify(
     step: ServiceStep,
     instances: MCPInstanceConfig[],
     warnings: string[],
+    renames?: Map<string, Map<string, string>>,
 ): void {
     const instance_id = step.instance["id"] as string | undefined;
     if (!instance_id || typeof instance_id !== "string") {
@@ -490,6 +597,16 @@ function handle_modify(
         }
         for (const step_pt of step.points) {
             const rec = step_pt as unknown as Record<string, unknown>;
+            const rkey_m = typeof rec["key"] === "string" ? (rec["key"] as string) : "";
+            const dot_m = rkey_m.indexOf(".");
+            if (dot_m > 0 && renames) {
+                const prefix_m = rkey_m.slice(0, dot_m);
+                const pid_m = rkey_m.slice(dot_m + 1);
+                const new_id_m = renames.get(prefix_m)?.get(pid_m);
+                if (new_id_m) {
+                    rec["key"] = `${prefix_m}.${new_id_m}`;
+                }
+            }
             const id = rec["id"];
             if (typeof id === "string" && id.length > 0) {
                 validate_identifier(id, "point.id");
@@ -508,6 +625,21 @@ function handle_modify(
                     shm_id: existing_rec["shm_id"],
                 } as unknown as ServicePoint;
             } else {
+                // 地址冲突检查（func_test_case 用例 18）：新增点 addr 与已有点相同 → 可读拒绝
+                const rec2 = step_pt as unknown as Record<string, unknown>;
+                if (typeof rec2["addr"] === "number") {
+                    const clash = target.points.find(
+                        (p) =>
+                            (p as unknown as Record<string, unknown>)["addr"] === rec2["addr"],
+                    );
+                    if (clash) {
+                        const cid = (clash as unknown as Record<string, unknown>)["id"];
+                        throw new Error(
+                            `地址 ${rec2["addr"]} 已被点 "${cid}" 占用` +
+                            `（${step.service_type}.${instance_id}），请更换地址或先删除原点`,
+                        );
+                    }
+                }
                 // 新 point 追加，shm_id = 0
                 target.points.push({ ...step_pt, shm_id: step_pt.shm_id ?? 0 });
                 warnings.push(
@@ -540,6 +672,84 @@ function handle_delete(
     }
 
     const key_prefix = `${instance_id}.`;
+
+    // 点级删除（func_test_case 用例 17/19）：delete 步骤带 points 时仅删除匹配点，实例保留。
+    // 匹配规则：point_match_key（id/key）或 addr 任一命中；未命中 → 可读错误（附当前点表）。
+    const step_points = Array.isArray(step.points) ? step.points : [];
+    if (step_points.length > 0) {
+        const target = instances.find((inst) => inst.id === instance_id);
+        if (!target) {
+            throw new Error(
+                `delete 目标不存在: ${step.service_type} 中找不到 id="${instance_id}"`,
+            );
+        }
+        const removed_ids: string[] = [];
+        for (const pt of step_points) {
+            const rec = pt as unknown as Record<string, unknown>;
+            const mk = point_match_key(pt);
+            const addr = typeof rec["addr"] === "number" ? rec["addr"] : undefined;
+            const idx = target.points.findIndex((p) => {
+                const prec = p as unknown as Record<string, unknown>;
+                if (mk && point_match_key(p) === mk) return true;
+                if (addr !== undefined && prec["addr"] === addr) return true;
+                return false;
+            });
+            if (idx < 0) {
+                const table = target.points
+                    .map((p) => {
+                        const r = p as unknown as Record<string, unknown>;
+                        return `${r.addr}:${r.id ?? r.key ?? "?"}`;
+                    })
+                    .join(", ");
+                const want = [
+                    mk ? `点名/键 "${mk}"` : "",
+                    addr !== undefined ? `地址 ${addr}` : "",
+                ]
+                    .filter(Boolean)
+                    .join(" 或 ");
+                throw new Error(
+                    `删除失败: ${step.service_type}.${instance_id} 不存在 ${want} 的点。当前点表: ${table}`,
+                );
+            }
+            const removed = target.points.splice(idx, 1)[0] as unknown as Record<string, unknown>;
+            if (typeof removed["id"] === "string") {
+                removed_ids.push(removed["id"]);
+            }
+            warnings.push(
+                `delete: 从 ${step.service_type}.${instance_id} 移除点 ${removed["id"] ?? removed["addr"]}`,
+            );
+        }
+        // 级联：移除 Reader 中 key === `${instance_id}.${removed_id}` 的转发点
+        for (const [st, svc_instances] of Object.entries(config)) {
+            if (st === "c4_shm_manager" || !Array.isArray(svc_instances)) {
+                continue;
+            }
+            const entry = registry?.get_entry(st);
+            if (entry?.role !== "reader") {
+                continue;
+            }
+            for (const inst of svc_instances as MCPInstanceConfig[]) {
+                if (!Array.isArray(inst.points)) {
+                    continue;
+                }
+                const before_n = inst.points.length;
+                inst.points = inst.points.filter((p) => {
+                    const k = (p as unknown as Record<string, unknown>)["key"];
+                    return !(
+                        typeof k === "string" &&
+                        removed_ids.some((id) => k === `${instance_id}.${id}`)
+                    );
+                });
+                if (inst.points.length < before_n) {
+                    warnings.push(
+                        `delete: 从 ${st}.${inst.id} 级联移除 ${before_n - inst.points.length} 个转发点`,
+                    );
+                }
+            }
+        }
+        return;
+    }
+
     instances.splice(idx, 1);
 
     // 若删除后该 service_type 数组为空，从 shm_manager 分类中移除
@@ -762,6 +972,27 @@ export async function execute_stop_and_start(
     }
 
     // ── Phase 3: Start ──
+    const dumpSections = (tag: string, raw: string) => {
+        try {
+            const d = JSON.parse(raw) as Record<string, unknown>;
+            const parts = Object.keys(d)
+                .filter((k) => k !== "c4_shm_manager")
+                .map((k) => {
+                    const list = d[k];
+                    const ids = Array.isArray(list)
+                        ? (list as Record<string, unknown>[]).map((i) => String(i["id"])).join("+")
+                        : "?";
+                    return `${k}[${ids}]`;
+                });
+            console.error(`[SS_DEBUG] ${tag}: ${parts.join(" | ")}`);
+        } catch {
+            console.error(`[SS_DEBUG] ${tag}: <读取失败>`);
+        }
+    };
+    try {
+        dumpSections("pre-start", await fs.readFile(config_path, "utf-8"));
+    } catch { /* 诊断失败不影响主流程 */ }
+
     const started: string[] = [];
     const failed: StopStartResult["failed_services"] = [];
 
@@ -783,6 +1014,10 @@ export async function execute_stop_and_start(
             });
         }
     }
+
+    try {
+        dumpSections("post-start", await fs.readFile(config_path, "utf-8"));
+    } catch { /* 诊断失败不影响主流程 */ }
 
     const success = failed.length === 0;
     return {
@@ -937,6 +1172,10 @@ export class ShmManagerClientAdapter implements ShmManagerClient {
     }
 }
 
+// 数据服务 stdio 客户端缓存（service_type → adapter）：跨执行轮复用同一进程，
+// 保证 Stop-Start 作用于持有监听端口的真实进程（func_test_case 用例 16/17）
+const runtimeDataClients = new Map<string, McpServiceClientAdapter>();
+
 export async function runRuntimeStopStart(
     shmMultiClient: MultiServerMCPClient,
     shmServerName: string,
@@ -975,6 +1214,11 @@ export async function runRuntimeStopStart(
 
     const dataClients: McpServiceClientAdapter[] = [];
     for (const svcType of dataServiceTypes) {
+        const cached = runtimeDataClients.get(svcType);
+        if (cached) {
+            dataClients.push(cached);
+            continue;
+        }
         const entry = registry.get_entry(svcType);
         if (!entry) continue;
 
@@ -993,15 +1237,15 @@ export async function runRuntimeStopStart(
                 await multiClient.close();
                 continue;
             }
-            dataClients.push(
-                new McpServiceClientAdapter(
-                    mcpClient as MCPClientHandle,
-                    svcType,
-                    instanceId,
-                    configPath,
-                    multiClient,
-                ),
+            const adapter = new McpServiceClientAdapter(
+                mcpClient as MCPClientHandle,
+                svcType,
+                instanceId,
+                configPath,
+                multiClient,
             );
+            runtimeDataClients.set(svcType, adapter);
+            dataClients.push(adapter);
         } catch {
             continue;
         }

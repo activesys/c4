@@ -119,7 +119,7 @@ export async function createSuperWorker(
         txtParserTool,
         createOutputDeviceInfoTool(registry, config),
         createOutputAccessPlanTool(registry),
-        createOutputPlanStepsTool(registry, config.site),
+        createOutputPlanStepsTool(registry, config.site, config.configPath),
         createQueryRegistryTool(registry),
         createQueryAbbrRegistryTool({
             configPath: config.configPath,
@@ -203,7 +203,12 @@ async function persist_abbr_registry(
                     description: name,
                 });
             } else if (step.action === "delete") {
-                next = delete_entry(next, id);
+                // 点级删除（delete 带 points）不删设备记忆条目——仅整机删除才移除
+                //（func_test_case 用例 17：删点后记忆丢失会导致后续增量操作全部被闸门挡下）
+                const step_points = Array.isArray(step.points) ? step.points : [];
+                if (step_points.length === 0) {
+                    next = delete_entry(next, id);
+                }
             }
         }
         await save_abbr_registry(next, registry_path);
@@ -941,7 +946,9 @@ export async function createC4Agent(
                                 })),
                                 abort_reason: ssr.abort_reason ?? null,
                             });
-                            if (!(ssr.abort_reason && /配置类错误/.test(ssr.abort_reason))) {
+                            const need_rollback =
+                                !ssr.success || ssr.failed_services.length > 0;
+                            if (!(ssr.abort_reason && /配置类错误/.test(ssr.abort_reason)) && !need_rollback) {
                                 await persist_abbr_registry(
                                     planSteps,
                                     planDeviceInfo,
@@ -982,6 +989,29 @@ export async function createC4Agent(
                                     type: "error" as const,
                                     message: `部分服务启动失败: ${names}（${reasons}）${portHint}`,
                                 };
+                            }
+                            if (need_rollback) {
+                                // 回滚（func_test_case 用例 23/24）：恢复 merge 前备份（config.json.bak）
+                                // 并按原配置重启服务——禁止半接入态残留
+                                try {
+                                    const bakRaw = fs.readFileSync(config.configPath + ".bak", "utf-8");
+                                    fs.writeFileSync(config.configPath, bakRaw, "utf-8");
+                                    await runRuntimeStopStart(
+                                        config.mcpManager.getMultiClient(),
+                                        "shm",
+                                        config.instanceId,
+                                        config.configPath,
+                                        config.registry as any,
+                                    );
+                                    yield {
+                                        type: "text" as const,
+                                        content:
+                                            "检测到服务启动失败，已回滚到变更前配置并恢复原服务。",
+                                    };
+                                } catch (rbErr: unknown) {
+                                    const rbMsg = rbErr instanceof Error ? rbErr.message : String(rbErr);
+                                    log?.error(conversation, `回滚失败: ${rbMsg}`);
+                                }
                             }
                             config.state?.setPhase("idle");
                             log?.phase(conversation, "idle");

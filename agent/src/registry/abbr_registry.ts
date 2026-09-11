@@ -98,7 +98,44 @@ export async function load_abbr_registry(
         }
     }
 
+    // config.json 是权威、记忆库是派生数据（失败回滚/点级删除等都可能造成失步）：
+    // 每次加载按 config 实例集合对齐——config 有而记忆无 → 补建；
+    // 记忆有而 config 无（回滚残留）→ 移除；名称/服务类型漂移 → 校正。
+    if (config_json) {
+        const config_entries = rebuild_entries(config_json, site_abbr);
+        if (config_entries.length > 0 || _config_has_data_sections(config_json)) {
+            const byId = new Map(parsed.entries.map((e) => [e.id, e]));
+            for (const ce of config_entries) {
+                const ex = byId.get(ce.id);
+                if (!ex) {
+                    byId.set(ce.id, ce);
+                } else if (
+                    ex.name !== ce.name ||
+                    ex.service_type !== ce.service_type ||
+                    ex.role !== ce.role
+                ) {
+                    Object.assign(ex, {
+                        name: ce.name,
+                        service_type: ce.service_type,
+                        role: ce.role,
+                        description: ce.description,
+                    });
+                }
+            }
+            if (config_entries.length === 0) {
+                byId.clear();
+            }
+            parsed.entries = [...byId.values()];
+        }
+    }
+
     return parsed;
+}
+
+function _config_has_data_sections(config: SystemConfig): boolean {
+    return Object.entries(config).some(
+        ([k, v]) => k !== "c4_shm_manager" && Array.isArray(v),
+    );
 }
 
 export async function save_abbr_registry(
@@ -296,7 +333,13 @@ function _descriptions_match(description: string, entry: AbbrEntry): boolean {
 }
 
 function _normalize(text: string): string {
-    return text.trim().toLowerCase().replace(/\s+/g, "");
+    // 设备命名分隔符归一：「1#风机」「1号风机」「1 风机」视为同一设备——
+    // 用户删除/修改时常用「号」而接入时记忆库存的是「#」（func_test_case 用例 25/26）
+    return text
+        .trim()
+        .toLowerCase()
+        .replace(/\s+/g, "")
+        .replace(/[＃#号]/g, "");
 }
 
 function _contains(haystack: string, needle: string): boolean {
