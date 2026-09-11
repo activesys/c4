@@ -348,18 +348,19 @@ class TestStart:
         _assert_mcp_error(resp, "SHM_CORRUPTED")
 
     # ──────────────────────────────────────────────
-    #  TC11: 连接失败 — 原子性回滚
+    #  TC11: 连接失败 — T0 后台重拨
     # ──────────────────────────────────────────────
 
-    def test_tc11_atomic_rollback(
+    def test_tc11_t0_background_redial(
         self, mcp, prepare_environment, asfp2_servers, isolated_shm
     ):
         """
-        前置：部分不可达配置（§3.4）。asfp2_server -p 9901 & 已监听。
+        前置：部分不可达配置（§3.4，不可达实例 t0=5）。asfp2_server -p 9901 & 已监听。
         操作：调用 start。
         预期：
-          - 返回 isError: true，CONNECT_FAILED
-          - 可达实例（port 9901）的连接被 tear down → asfp2_server 侧无活跃连接
+          - 返回 "success"（连接失败不使 start 失败，§T0）
+          - 可达实例（port 9901）正常建链转发；不可达实例不阻塞启动
+          - stop 可正常回收（未连接实例与已连接实例均无残留）
         """
         instance_id = "c4_tc11"
         isolated_shm(instance_id)
@@ -370,5 +371,10 @@ class TestStart:
         assert iid == instance_id
 
         resp = mcp.call_tool(
-            "start", {"instance_id": instance_id, "config_path": config_path},        )
-        _assert_mcp_error(resp, "CONNECT_FAILED")
+            "start", {"instance_id": instance_id, "config_path": config_path},
+        )
+        _assert_mcp_success(resp)
+
+        # stop 可正常回收（含未连接的后台重拨实例）
+        resp = mcp.call_tool("stop", {})
+        _assert_mcp_success(resp)

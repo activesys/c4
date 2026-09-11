@@ -56,8 +56,8 @@ Go 编译的 `c4_asfp2_client` 二进制，通过 MCP stdio JSON-RPC 协议控�
 ### 2.4 连接验证
 
 - **成功**：`start` 返回 `"success"` → SUT 的 TCP Dial 已成功（`asfp2_server` 侧可见连接）
-- **CONNECT_FAILED**：使用不可达 IP（192.0.2.0/24 TEST-NET-1）→ 验证返回错误码
-- **原子性**：部分实例成功、部分失败 → 全部回滚 → `asfp2_server` 侧无残留连接
+- **连接失败（T0 后台重拨）**：使用不可达 IP（192.0.2.0/24 TEST-NET-1）→ `start` 仍返回 `"success"`，实例以未连接态创建并按 `t0` 周期后台重拨（asfp2 §T0，图 814）
+- **原子性**：SHM/配置类致命错误（SHM_OPEN_FAILED / SHM_ID_NOT_ASSIGNED / SHM_CORRUPTED / CONFIG_PARSE_ERROR）→ 全部回滚；连接失败不触发回滚
 
 ---
 
@@ -184,13 +184,14 @@ writer_points=2，max_points=4。pt_a → shm_id=1，pt_b → shm_id=2。
 - **操作**：调用 `start`
 - **预期**：`isError: true`，`SHM_CORRUPTED`
 
-### TC11: 连接失败 — 原子性回滚
+### TC11: 连接失败 — T0 后台重拨
 
-- **前置**：部分不可达配置（§3.4）。`asfp2_server -p 9901 &` 已监听
+- **前置**：部分不可达配置（§3.4，不可达实例 t0=5）。`asfp2_server -p 9901 &` 已监听
 - **操作**：调用 `start`
 - **预期**：
-  - 返回 `isError: true`，`CONNECT_FAILED`
-  - 可达实例（port 9901）的连接被 tear down → `asfp2_server` 侧无活跃连接
+  - 返回 `"success"`（连接失败不使 start 失败，§T0）
+  - 可达实例（port 9901）正常建链转发；不可达实例不阻塞启动
+  - `stop` 可正常回收（未连接实例与已连接实例均无残留）
 
 ---
 
@@ -199,7 +200,7 @@ writer_points=2，max_points=4。pt_a → shm_id=1，pt_b → shm_id=2。
 ### 5.1 连接验证
 
 - 通过 `asfp2_server` 的 stdout 输出确认连接（输出 "client connected" 等类似信息）
-- 原子性验证（TC11）：检查 `asfp2_server` 侧连接在 SUT 失败后断开了
+- 原子性验证：SHM/配置类致命错误后无残留连接；TC11 中不可达实例不影响可达实例建链
 
 ### 5.2 SMH magic 修改（TC10）
 
