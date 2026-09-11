@@ -555,7 +555,7 @@ def start_asfp2_client():
 
 
 def _make_standard_config(instance_id: str = "c4_teststoprestart"):
-    """§3.1 标准配置：mock_writer + 单客户端 port=9900，2 points。
+    """§3.1 标准配置：mock_writer + 单客户端 port=19900，2 points。
 
     c4_modbus_client 为 mock 写者，c4_asfp2_client 为被测读端。
     """
@@ -588,7 +588,7 @@ def _make_standard_config(instance_id: str = "c4_teststoprestart"):
             {
                 "name": "停止重启测试客户端",
                 "ip": "127.0.0.1",
-                "port": 9900,
+                "port": 19900,
                 "t0": 30,
                 "t1": 0,
                 "t2": 0,
