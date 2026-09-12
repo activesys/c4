@@ -243,12 +243,17 @@ cd agent/frontend && npm ci && npm run build   # tsc --noEmit && vite build → 
 ~/.local/c4/                         # 运行时数据（c4 专用账户可写）
 ├── agent.json                       # Agent 权威配置（启动必读）
 ├── config.json                      # MCP 全量配置（数据路径权威数据源）
-├── config.json.bak                  # config.json 备份（原子写入前的快照）
+├── config.json.prev.1~.3            # config.json 滚动历史（保留最近 3 版，回滚用）
+├── pending_change.json              # 配置事务标记（变更期间存在，完成即删除）
 ├── abbr_registry.json               # 场站缩写记忆库（可重建派生数据）
 ├── state/                           # 状态（当前内存态，重启重建；filesystem 持久化待实现，见 §10）
 └── logs/                            # 预留目录，当前未使用（运行日志见 /var/log/c4/agent 与 agent.md §5.2）
 
-/dev/shm/{instance_id}               # POSIX 共享内存（tmpfs，进程退出后回收）
+/run/c4/                             # MCP 服务 Unix socket（tmpfs，由单元 RuntimeDirectory=c4 提供）
+├── c4_shm_manager.sock              # 每服务一个 socket 文件，0660 c4:c4
+└── ...
+
+/dev/shm/{instance_id}               # POSIX 共享内存（tmpfs，整机重启自动清零；卸载由卸载脚本 shm_unlink）
 ```
 
 **权限约定**（对应 C4_RS_00015 最小权限）：
@@ -262,14 +267,15 @@ cd agent/frontend && npm ci && npm run build   # tsc --noEmit && vite build → 
 
 > **账户名约定**：上表及全文中的 `c4` 仅为**示例账户名**，并非硬性要求。代码不校验账户名（`agent/src/index.ts` 无 `getuid`/用户检查，仅用 `node:os` 的 `homedir()` 展开 `~`），因此**任意专用非 root 账户**均可运行，运行时目录自动落到该账户自己的 `$HOME/.local/c4/`。只需保证 systemd 的 `User=`、`--config-dir` 与 `agent.json` 内路径三者指向同一账户。
 
-> **注册表位置说明**：`mcp-registry/` 是随包分发的只读静态数据（描述本版本内置 MCP 服务的能力、`config_schema`、`binary_path`），不属于实例私有运行时数据，故置于系统级只读目录 `/usr/local/etc/c4/mcp-registry/`（`root:c4 0555`），而非 `~/.local/c4`。未来实现「运行期注册新 MCP 服务」（C4_FUN_00079）时，将分层为系统只读层 + 用户可写层（`~/.local/c4/mcp-registry/`），Agent 合并加载，见 §10。
+> **注册表位置说明**：`mcp-registry/` 是随包分发的只读静态数据（描述本版本内置 MCP 服务的能力、`config_schema`、`binary_path`），不属于实例私有运行时数据，故置于系统级只读目录 `/usr/local/etc/c4/mcp-registry/`（`root:c4 0555`），而非 `~/.local/c4`。MCP 服务集合是部署期静态决策（安装 systemd 单元需 root，运行期注册不可行，见 c4_architecture.md §3.1.1），注册表保持单层只读，无用户可写层。新增 MCP 服务的接入流程：以 root 账户安装服务二进制与 systemd 单元并启用（enable），如该服务非内置协议则同时向 `/usr/local/etc/c4/mcp-registry/` 分发其注册表 JSON（root:c4 0555），完成后重启 c4-agent——Agent 的服务清单在启动时建立，重启后经 Unix socket 发现并接入新服务。
 
 ### 5.2 裸机部署（默认）
 
-1. 安装系统级程序文件（§5.1 中 `/usr/local/` 部分）。
-2. 创建专用非 root 账户（示例名 `c4`，任意名称均可，C4_RS_00015）。
-3. 由管理员以 root 一次性生成 `~/.local/c4/agent.json`（或首次启动向导 C4_FUN_00080 引导生成）。
-4. 通过 systemd 以 `c4` 账户启动 Agent（守护进程，C4_RS_00014）。
+1. 创建专用非 root 账户（示例名 `c4`，任意名称均可，C4_RS_00015）。
+2. 安装系统级程序文件（§5.1 中 `/usr/local/` 部分）：MCP 二进制装入 `/usr/local/bin/`，Agent 运行时装入 `/usr/local/lib/c4/`。
+3. 安装全部 systemd 单元文件：`c4-agent.service` + 每个 MCP 服务一个单元（`c4-shm-manager`、`c4-asfp2-server`、`c4-asfp2-client`、`c4-modbus-client`、`c4-iec104-client`、`c4-influxdb-client`），单元定义见 §6.5。
+4. 由管理员以 root 一次性生成 `~/.local/c4/agent.json`（或首次启动向导 C4_FUN_00080 引导生成）。必须先于 c4-agent 启动——Agent 无 agent.json 可读时会反复崩溃重启。
+5. `systemctl enable --now` 全部 MCP 服务单元（方案 A：部署期静态进程集合，开机自启、常驻运行，未收到 Agent 的 start 指令前零实例；`--now` 使各服务的 Unix socket 立即进入监听），随后 enable + start `c4-agent`。Agent 不启动任何 MCP 进程——它作为 MCP 客户端连接各服务的 Unix socket。
 
 ### 5.3 容器部署（可选）
 
@@ -294,7 +300,7 @@ sudo rpm -ivh c4-<version>.x86_64.rpm
 sudo dpkg -i c4_<version>_amd64.deb
 ```
 
-包管理器 `%post` / `postinst` 脚本自动完成：创建 `c4` 账户 → 生成目录骨架 → 安装 systemd 单元 →（可选）引导首次配置。
+包管理器 `%post` / `postinst` 脚本自动完成（流程与 §5.2 一致）：创建专用非 root 账户 `c4` → 安装 MCP 二进制到 `/usr/local/bin/` → 安装 Agent 运行时到 `/usr/local/lib/c4/`（同 §5.2 步骤 2）→ 生成目录骨架 → 安装全部 systemd 单元（c4-agent + 每个 MCP 服务一个）→ 生成 `~/.local/c4/agent.json` → `systemctl enable --now` 全部 MCP 单元 → enable + start `c4-agent` →（可选）引导首次配置。
 
 **自包含 tar.gz 方式**：
 
@@ -303,21 +309,48 @@ sudo tar -xzf c4-<version>.tar.gz -C /usr/local
 sudo /usr/local/lib/c4/scripts/install.sh   # 等效 postinst
 ```
 
-### 6.2 删除
+### 6.2 删除（卸载）
 
 ```bash
-sudo systemctl stop c4-agent && sudo systemctl disable c4-agent
+# 1. 停止并禁用全部单元（c4-agent + 全部 MCP 服务单元）
+for u in c4-agent c4-shm-manager c4-asfp2-server c4-asfp2-client \
+         c4-modbus-client c4-iec104-client c4-influxdb-client; do
+  sudo systemctl stop "$u" && sudo systemctl disable "$u"
+done
+# 2. 卸载包（移除二进制、Agent 运行时、单元文件与 /usr/local/etc/c4/）
 sudo rpm -e c4        # 或 dpkg -r c4
 ```
 
-删除行为约定：
+卸载行为约定：
 
-- 卸载程序文件与系统配置（`/usr/local/{bin,lib,etc}/c4/`）。
+- 卸载程序文件与系统配置（`/usr/local/{bin,lib,etc}/c4/` 与全部 systemd 单元文件）。
+- **共享内存**：运行期永不销毁（见 [c4_shm_manager.md](c4_shm_manager.md) §1.1）——普通卸载与 `--purge` 均由卸载脚本对实例段执行 `shm_unlink`（删除 `/dev/shm/{instance_id}`）；未执行卸载脚本时残留段在整机重启后由 tmpfs 自动清零。
 - `agent.env` 含敏感密钥：**默认保留**，仅 `--purge` 时删除。
-- **保留** `~/.local/c4/` 运行时数据（agent.json / config.json / abbr_registry.json），供重装后恢复（用户可选 `--purge` 一并删除）。
-- 共享内存 `/dev/shm/{instance_id}` 由进程退出自动回收，卸载时无需处理。
+- **保留** `/home/c4/.local/c4/` 运行时数据（agent.json / config.json / abbr_registry.json），供重装后恢复（用户可选 `--purge` 一并删除；`shm_unlink` 处理同上条，`--purge` 与普通卸载均执行）。
 
-### 6.3 升级
+### 6.3 shm 损坏恢复
+
+shm 段 magic/版本校验失败或损坏时（数据服务返回 `SHM_CORRUPTED`），C4 运行时代码只拒绝并报告，
+不做自愈、不重建；恢复经以下外部手段之一。两种方式均保持安装完整，操作范围仅限恢复本身。
+
+**方式一：清理脚本 `c4-shm-recover`（部署包工件，随包提供，root 执行）**
+
+动作序列：
+
+1. 停止受影响的数据路径单元（`c4-asfp2-server` / `c4-asfp2-client` / `c4-modbus-client` /
+   `c4-iec104-client` / `c4-influxdb-client` 中受影响者）。
+2. 删除损坏的共享内存段（对 `/dev/shm/c4_<instance_id>` 执行 `shm_unlink`）。
+3. 重启上述单元。单元重启后 Agent 检测到重连，自动按恢复瀑布重新收敛：
+   `create_shm` 重建全新段 → `adjust_shm` 重新分配 → `start`。
+
+**方式二：整机重启**
+
+`/dev/shm` 为 tmpfs，重启后自动清零，Agent 启动瀑布自收敛
+（`create_shm` → `adjust_shm` → `start`），效果与方式一等价。
+
+**恢复后注意**：旧快照全部作废，点位显示"暂无数据"直至新数据写入；恢复完成后应重新对点核验。
+
+### 6.4 升级
 
 | 升级对象 | 策略 | 依据 |
 |---------|------|------|
@@ -329,10 +362,17 @@ sudo rpm -e c4        # 或 dpkg -r c4
 
 1. 备份 `~/.local/c4/agent.json` 与 `config.json`。
 2. 替换 `/usr/local/` 程序文件。
-3. `systemctl restart c4-agent`（Agent 启动时执行无条件 Stop-Start 恢复，见 agent.md §3.2.3）。
+3. `systemctl restart c4-agent`（Agent 启动后按 c4_architecture.md §3.1.2 瀑布流程收敛（不中断已运行 MCP 数据路径，C4_RS_00252），见 agent.md §3.2.3）。
 4. 校验 `GET /api/services` 返回 200，服务进程恢复。
 
-### 6.4 服务管理（systemd）
+### 6.5 服务管理（systemd）
+
+每个组件一个 systemd 单元：`c4-agent`（Agent）+ 每个 MCP 服务一个单元
+（`c4-shm-manager`、`c4-asfp2-server`、`c4-asfp2-client`、`c4-modbus-client`、
+`c4-iec104-client`、`c4-influxdb-client`）。MCP 服务是独立系统服务，由 systemd 拉起、
+常驻运行；Agent 是 MCP 客户端，经 Unix socket 连接各服务，与 MCP 服务无父子进程关系。
+
+**Agent 单元**（`c4-agent.service`）：
 
 ```ini
 [Unit]
@@ -344,8 +384,10 @@ User=c4
 Group=c4
 # 注意：--config-dir 必须与 User= 的 home 一致（/home/<账户>/.local/c4），换账户名需同步修改
 ExecStart=/usr/local/lib/c4/agent/node/bin/node /usr/local/lib/c4/agent/dist/index.js --config-dir /home/c4/.local/c4
-Restart=on-failure
+Restart=always
 RestartSec=5
+StartLimitIntervalSec=0
+RuntimeDirectory=c4
 # 环境变量：DEEPSEEK_API_KEY 经 EnvironmentFile 注入
 EnvironmentFile=/usr/local/etc/c4/agent.env
 NoNewPrivileges=true
@@ -359,20 +401,58 @@ CapabilityBoundingSet=
 WantedBy=multi-user.target
 ```
 
+**MCP 服务单元**（每服务一个，示例 `c4-shm-manager.service`）：
+
+```ini
+[Unit]
+Description=C4 shm manager
+After=network.target
+# 数据路径单元可选择性附加（防御性启动排序，不承载正确性——见 c4_architecture.md §3.1.1）：
+# Wants=c4-shm-manager.service
+# After=c4-shm-manager.service
+
+[Service]
+User=c4
+Group=c4
+ExecStart=/usr/local/bin/c4_shm_manager
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=0
+RuntimeDirectory=c4
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+ReadWritePaths=/home/c4/.local/c4 /dev/shm
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target
+```
+
+单元要点：
+
+- **`Restart=always` + `StartLimitIntervalSec=0`**：所有单元一律 always——异常退出必须自动拉起（C4_RS_00240）；不设启动频率限制，单元抖动（flapping）不允许演变为永久停机。代价是持续故障的单元会停留在 failed/重启循环，需运维按下方 runbook 介入。
+- **`RuntimeDirectory=c4`**：systemd 在单元启动时创建 `/run/c4`（tmpfs）、停止时清理——MCP 服务 Unix socket 文件（`/run/c4/<service>.sock`）的宿主目录由此提供。
+- **无 socket 单元**：不使用 socket activation（设计决策，见 c4_architecture.md §3.1.1），socket 由 MCP 服务进程自身监听。
+- **`User=c4`**：全部单元以同一专用非 root 账户运行（C4_RS_00015）。
+- **启用策略（方案 A）**：部署时 `systemctl enable` 全部 MCP 单元，开机自启、常驻运行；未使用的服务以零实例状态常驻（仅监听 socket，不运行数据路径）。MCP 服务集合是部署期静态决策，运行期不做进程级按需启停。
+
+**运维 runbook（单元进入 failed 状态）**：持续故障的单元进入 failed 状态后不会自行恢复，
+需要人工 `sudo systemctl reset-failed <unit> && sudo systemctl start <unit>`；
+Agent 对此只能告警（Web 通知），无权也不应代替运维复位单元。
+
 **常用运维命令**：
 
 ```bash
-# 启动
+# 启动 / 停止 / 重启（全部单元同型，替换单元名即可）
 sudo systemctl start c4-agent
+sudo systemctl stop c4-shm-manager
+sudo systemctl restart c4-modbus-client
 
-# 设置开机自启
-sudo systemctl enable c4-agent
-
-# 停止
-sudo systemctl stop c4-agent
-
-# 重启
-sudo systemctl restart c4-agent
+# 设置开机自启（部署时对全部单元执行，见 §5.2）
+sudo systemctl enable c4-agent c4-shm-manager c4-asfp2-server c4-asfp2-client \
+                     c4-modbus-client c4-iec104-client c4-influxdb-client
 
 # 查看状态
 systemctl status c4-agent
@@ -381,15 +461,17 @@ systemctl status c4-agent
 journalctl -u c4-agent -f
 
 # 查看最近 200 条日志
-journalctl -u c4-agent -n 200
+journalctl -u c4-modbus-client -n 200
+
+# 单元进入 failed 后的人工复位
+sudo systemctl reset-failed c4-asfp2-client
 ```
 
 **进程模型**：
 
-- systemd 只管理 **Agent**（`c4-agent`）一个单元。
-- Agent 通过 stdio 按需 spawn MCP 服务子进程（c4_shm_manager 及各数据路径服务），其生命周期由 Agent 内部管理（启动/停止/重启，见 agent.md §3.2.3）。
-- MCP 服务**无独立 systemd 单元**；运维人员只操作 `c4-agent`，不应手动启停单个 MCP 服务。
-- 停止 Agent（`systemctl stop`）时，Agent 的 SIGTERM 处理会关闭 MCP manager，MCP 子进程随之一并终止。
+- systemd 管理每个组件一个单元：`c4-agent` + 6 个 MCP 服务单元，进程生命周期全部归 systemd（常驻、重启、升级）。
+- Agent 与 MCP 服务之间无父子进程关系：停止 Agent（`systemctl stop c4-agent`）不影响任何 MCP 进程及其数据路径；停止某个 MCP 单元只停该服务的数据路径，实例由 Agent 在服务恢复后依配置重新拉起。
+- 数据路径实例的生命周期归 Agent 经 MCP 工具管理（start / stop / Stop-Start 协议），与进程生命周期解耦（见 c4_architecture.md §3.1.1 生命周期双层模型）。
 
 ---
 
@@ -400,6 +482,7 @@ journalctl -u c4-agent -n 200
 | 文件 | 位置 | 属主 | 说明 |
 |------|------|------|------|
 | `agent.json` | `~/.local/c4/agent.json` | c4 | Agent 权威配置，启动必读，缺失则 FATAL 退出 |
+| `*.service` | `/usr/lib/systemd/system/` | root:root | systemd 单元：`c4-agent.service` + 每个 MCP 服务一个单元（`c4-shm-manager` 等 6 个），定义见 §6.5 |
 | `mcp-registry/*.json` | `/usr/local/etc/c4/mcp-registry/` | root:c4 | MCP 服务注册信息（`binary_path` 指向 `/usr/local/bin/`） |
 | `agent.env` | `/usr/local/etc/c4/agent.env` | root:c4 | `DEEPSEEK_API_KEY` 等敏感环境变量，`chmod 640` |
 
@@ -426,17 +509,20 @@ journalctl -u c4-agent -n 200
 | 文件 | 生命周期 | 说明 |
 |------|---------|------|
 | `config.json` | 首次接入创建，跨重启永久 | MCP 全量配置，数据路径权威数据源（agent.md §3.2） |
-| `config.json.bak` | 随 config.json 更新 | 原子写入前的快照，损坏时恢复 |
+| `config.json.prev.1~.3` | 随 config.json 更新（滚动 3 版） | 变更事务回滚源（c4_architecture.md §3.1.2）；恢复前先校验 parse + schema |
+| `pending_change.json` | 变更事务期间 | 事务标记（变更描述、涉及服务、回滚源路径），成功或回滚后删除 |
 | `abbr_registry.json` | 可重建派生数据 | 场站缩写记忆库；丢失/损坏可从 config.json 重建 |
 | `state/` | 运行期 | 当前内存态（AgentStateTracker，重启重建）；filesystem 持久化待实现（见 §10） |
 | `logs/` | 运行期 | 预留，当前未使用；运行日志由双层日志承担（console 摘要 → journald + NDJSON 流水 → `/var/log/c4/agent`，见 agent.md §5.2） |
-| `/dev/shm/{instance_id}` | 进程生命周期 | POSIX 共享内存，进程退出回收 |
+| `/run/c4/` | 运行期（tmpfs） | MCP 服务 Unix socket（`<service>.sock`，0660 c4:c4），由单元 `RuntimeDirectory=c4` 提供 |
+| `/dev/shm/{instance_id}` | 运行期持久直至卸载 | POSIX 共享内存；运行期永不销毁，整机重启 tmpfs 自动清零，卸载由卸载脚本 `shm_unlink`（§6.2） |
 
 ---
 
 ## 8. 安全与最小权限
 
 - **专用非 root 账户**：Agent 与 MCP 服务以专用非 root 账户运行（示例名 `c4`，任意名称均可，C4_RS_00015、C4_FUN_00064）。
+- **Unix socket 权限**：MCP 服务 socket 文件 `/run/c4/<service>.sock` 权限 `0660`、属主 `c4:c4`——socket 文件权限构成 uid 粒度的鉴权边界（C4_RS_00015），未授权用户无法连接。注意该边界是**主机级、uid 粒度**：全部 C4 进程（Agent 与所有 MCP 服务）共享 uid `c4`，彼此之间不做服务级隔离；如需服务级隔离，后续可引入 `SO_PEERCRED` 对端校验。
 - **最小权限**：MCP 服务仅拥有执行其数据接入任务所需权限（C4_RS_00120）。
 - **敏感信息隔离**：`DEEPSEEK_API_KEY` 存于 `agent.env`（`chmod 640`），不写入 `agent.json`。
 - **目录权限**：程序目录只读（0555），运行时数据仅运行账户可写（0700），见 §5.1 权限表。
@@ -456,7 +542,7 @@ journalctl -u c4-agent -n 200
 | 前端资源可访问 | `curl http://127.0.0.1:9988/` | 返回 `index.html` |
 | Agent 就绪 | `curl http://127.0.0.1:9988/api/services` | HTTP 200 |
 | 共享内存 | `ls /dev/shm/` | 出现 `{instance_id}` 文件 |
-| 服务自启 | `systemctl enable c4-agent && reboot` | 重启后 Agent 自动恢复 |
+| 服务自启 | `systemctl enable c4-agent c4-shm-manager ...（全部单元，见 §5.2）&& reboot` | 重启后 Agent 与全部 MCP 服务单元自动拉起 |
 
 ---
 
@@ -469,4 +555,3 @@ journalctl -u c4-agent -n 200
 - 安装包签名（GPG/RPM 签名）与校验，配合许可密钥机制（C4_RS_00305）。
 - **Agent 运维流接入 journald 五级**：Agent 现为双层日志且均已实现——console 运维摘要（→ journald）+ NDJSON 流水（→ `/var/log/c4/agent`，自研 AgentLogger，非 winston；该依赖未使用，可移除）。待实现：运维流按五级（crit/err/warning/info/debug）以 `<N>` 前缀输出，与 MCP `internal/logger`（c4_asfp2_server.md §9）同约定，使 `journalctl -p` 跨 Agent 与 MCP 原生过滤。
 - **state filesystem 持久化**：当前状态为内存态（AgentStateTracker，重启重建），`state.backend`/`state.path` 字段已定义但未使用；需实现 filesystem 持久化，或明确改为内存态。
-- **运行期注册的注册表分层**（C4_FUN_00079 落地时）：当前仅随包内置服务，注册表单目录 `/usr/local/etc/c4/mcp-registry/`（只读）；实现运行期注册后需分层（系统只读 + 用户可写 `~/.local/c4/mcp-registry/`），并将 `mcp_registry.path` 改为多目录加载（`paths[]`）。

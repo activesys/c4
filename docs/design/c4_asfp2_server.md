@@ -523,17 +523,16 @@ ASFP2 接收端无独立的采集周期——写入频率取决于发送端的�
 **返回时机**：所有实例均已启动即返回 `"success"`，**不等待 net.Listen 成功**——监听结果
 记录到日志（见 [c4_architecture.md §3.3.1](c4_architecture.md)）。
 **首次调用**完成服务初始化。**在 `stop` 之后可再次调用**——`stop` 已释放共享内存，`start` 重新 `shm_open` + `mmap` 后加载最新配置并启动实例。与首次启动执行完全相同的流程。
-**若服务当前处于运行状态（已 start 且未 stop），返回 `ALREADY_RUNNING`。**
+**服务已在运行时，返回 `ALREADY_RUNNING`（isError=false），不重启实例、不中断数据路径。**
 
 **参数**：`instance_id`（string，必填）—— C4 实例标识符（即共享内存名，须匹配 `c4_[a-zA-Z0-9]+`）；`config_path`（string，必填）—— 配置文件 config.json 的绝对路径
 
-**返回值**：成功返回 `"success"`，失败返回 `isError: true`。
+**返回值**：实例此前未运行返回 `"success"`；服务已在运行返回 `ALREADY_RUNNING`（isError=false，正常结果，无动作）；失败返回 `isError: true`。
 
 **错误码**：
 
 | 错误码 | 含义 |
 |--------|------|
-| `ALREADY_RUNNING` | 服务当前处于运行状态，须先调用 `stop` |
 | `CONFIG_PATH_MISSING` | `config_path` 参数缺失或无法读取指定文件 |
 | `CONFIG_PARSE_ERROR` | 配置文件格式错误或 `c4_asfp2_server` 段缺失 |
 | `PORT_CONFLICT` | 配置中存在重复端口 |
@@ -572,13 +571,12 @@ ASFP2 接收端无独立的采集周期——写入频率取决于发送端的�
 
 | 场景 | 触发工具 | 处理方式 |
 |------|---------|---------|
-| `start` 在运行状态下再次调用 | `start` | 返回 `ALREADY_RUNNING` |
 | `start` 从未成功调用过时调用 `stop` | `stop` | 幂等，直接返回 `"success"` |
 | `config_path` 参数缺失 | `start` | 返回 `CONFIG_PATH_MISSING` |
 | 配置文件格式错误 | `start` | 返回 `isError: true` + `CONFIG_PARSE_ERROR` |
 | 端口重复（配置冲突） | `start` | 返回 `isError: true` + `PORT_CONFLICT` |
 | 单个端口被占用（非配置冲突） | 运行时 | 记录日志，该实例停止，不影响其余实例 |
-| 共享内存 magic 校验失败 | `start` | 返回 `SHM_CORRUPTED`，Agent 应重建共享内存后重试 |
+| 共享内存 magic 校验失败 | `start` | 返回 `SHM_CORRUPTED`，拒绝并报告，等待人工处理；恢复经外部手段（整机重启或清理脚本，见 c4_deployment.md shm 损坏恢复） |
 | 无法打开共享内存 | `start` | 返回 `SHM_OPEN_FAILED` |
 | ASFP2 Flag 不匹配 | 运行时 | 丢弃数据包，递增 parse_errors |
 | ASFP2 数据包格式错误（Length 不匹配/截断） | 运行时 | 丢弃数据包，递增 parse_errors，关闭连接 |
@@ -614,17 +612,18 @@ ASFP2 接收端无独立的采集周期——写入频率取决于发送端的�
 
 ### 9.2 输出通道（stderr → journald）
 
-本服务是 stdio MCP：**stdout 为 JSON-RPC 专用，任何日志禁止写 stdout**，一律写 stderr。
-Agent 以 `StdioClientTransport` 拉起本进程且未重定向 stderr（inherit），故 stderr 直接进入
-c4-agent 的 journald——与部署设计「日志（journald）」一致，不新增日志文件与轮转负担。
-运维入口：`journalctl -u c4-agent | grep <instance_id>`。
+本服务的传输层为 Unix domain socket（/run/c4/c4_asfp2_server.sock），MCP JSON-RPC 流量走
+socket，stdout/stderr 无协议负载，均可用于日志输出。本服务是独立 systemd 单元
+（c4-asfp2-server），日志输出直接进入本单元的 journald——与部署设计「日志（journald）」
+一致，不新增日志文件与轮转负担。
+运维入口：`journalctl -u c4-asfp2-server | grep <instance_id>`。
 
 ### 9.3 实现选型与统一入口
 
 - 采用标准库 `log/slog` + 自定义 Handler（Text → stderr），不引入第三方日志库；
 - **journald 原生级别**：Handler 在每行输出前拼 `<N>` 优先级前缀（crit=2 / err=3 / warning=4 /
-  info=6 / debug=7）。c4-agent 是 systemd 服务，stderr 进 journal 时 `SyslogLevelPrefix`（默认开启）
-  解析该前缀写入 `PRIORITY` 字段 → `journalctl -u c4-agent -p warning` 等原生级别过滤直接生效；
+  info=6 / debug=7）。服务单元 c4-asfp2-server 是 systemd 服务，日志进 journal 时 `SyslogLevelPrefix`（默认开启）
+  解析该前缀写入 `PRIORITY` 字段 → `journalctl -u c4-asfp2-server -p warning` 等原生级别过滤直接生效；
 - **单行约束**：前缀解析仅对行首生效，日志消息与字段值禁止含换行，业务字段一律走 slog attr；
 - 结构化取舍：`PRIORITY` 是唯一写入的原生 journal 字段，其余字段（inst、reason 等）以
   key=value 文本在行内，供 grep 与日志采集解析；JSON 格式与 `<N>` 前缀兼容（journal 剥离
@@ -688,8 +687,8 @@ c4-agent 的 journald——与部署设计「日志（journald）」一致，不
 2. **限频**：`parse_error`（任一原因共享一条额度）、`key_not_mapped`、`shm_write_failed`
    首条立即输出，其后不再重复——数量与分布见每周期 `stats_periodic`；
 3. **禁止记录**：点位业务值、完整报文 hex（debug 下 raw 摘要 ≤32 字节）；
-4. **验收**：单实例接入全生命周期可仅凭 `journalctl -u c4-agent | grep hnals_wt1` 还原；
-   `journalctl -u c4-agent -p warning` 即可看到全部异常（crit/err/warning，PRIORITY 原生过滤）；
+4. **验收**：单实例接入全生命周期可仅凭 `journalctl -u c4-asfp2-server | grep hnals_wt1` 还原；
+   `journalctl -u c4-asfp2-server -p warning` 即可看到全部异常（crit/err/warning，PRIORITY 原生过滤）；
    稳态 info 级别下每实例每分钟 ≤2 行（stats 1 行 + 事件 0~1 行）。
 
 ---

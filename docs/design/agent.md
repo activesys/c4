@@ -62,7 +62,7 @@ Agent 系统覆盖数据接入流程中 Agent 侧的全部职能：
 |------|------|------|------|
 | Agent 框架 | `deepagents` v1.11.1（LangChain/LangGraph） | `createAgent`（LangChain v1.5）| `createDeepAgent` + deepseek-chat 工具绑定不稳定，降级为扁平 `createAgent` |
 | LLM | `@langchain/deepseek` v1.1.5 | 同 | 已预置 `DEEPSEEK_API_KEY` |
-| MCP 客户端 | `@modelcontextprotocol/sdk` | 同 | Go MCP 服务使用 stdio 传输 |
+| MCP 客户端 | `@modelcontextprotocol/sdk` | 同 | MCP over Unix domain socket（`/run/c4/<service>.sock`）；Agent 是 MCP 客户端，只连接、从不拉起 MCP 进程 |
 | 服务端 | `express` v5 | 同 | 文件上传、REST API、SSE streaming |
 | 流式传输 | `streamMode="messages"`（Pregel） | `streamEvents({version:"v3"})` | v3 typed projections：`stream.messages` / `stream.output` |
 | 结构化输出 | — | `responseFormat: toolStrategy(schema)` | LangChain 内置 Zod 校验 + 自动重试 |
@@ -198,7 +198,7 @@ SuperWorker (createAgent)
          │                  │                  │
          ▼                  ▼                  ▼
     c4_shm_manager    c4_modbus_client    c4_iec104_client  ...
-       (Go,常驻)          (Go)               (Go)
+      (Go，常驻)         (Go，常驻)          (Go，常驻)
 ```
 
 ### 2.3 完整请求流程
@@ -559,42 +559,54 @@ function pickPlanFields(obj: Record<string, unknown>, configSchema: ConfigSchema
 step-decomposer 输出 AccessPlanSteps 后，后续操作全部是确定性代码逻辑，
 不需要 LLM 推理，因此不作为子代理——由 SuperWorker 的运行时直接调用：
 
-**mergeConfigFromSteps(steps, configPath)**：合并 + 备份 + 原子写入 config.json
+**mergeConfigFromSteps(steps, configPath)**：变更事务（c4_architecture.md §3.1.2 协议）+ 合并 +
+原子写入 config.json。任何修改前先写事务标记 pending_change.json，并把历史滚动到
+config.json.prev.1（回滚源，滚动保留 .prev.1~.3 三版）：
 
 ```
-1. 读取现有 ~/.local/c4/config.json：
-   - 不存在 → 创建空结构；新文件写入后也备份一份 config.json.bak
-   - 存在且有效 → 先复制当前内容到 config.json.bak（失败前快照）
-   - 存在但损坏（JSON 解析失败）→ 若 config.json.bak 存在则恢复之，否则创建空结构
-2. 逐一处理 AccessPlanSteps（add/modify/delete — 见 §3.2.1.6）
-3. 合并结果先写入 config.json.tmp，然后 rename() → config.json（原子写入）
+1. 写事务标记 pending_change.json（持久化：变更描述、涉及服务、回滚源路径），写后 fsync
+2. 复制 config.json → config.json.prev.1（滚动保留 .prev.1~.3 三版），拷贝后 fsync
+   - config.json 不存在 → 跳过复制（首次接入，无可回滚对象）
+3. 逐一处理 AccessPlanSteps（add/modify/delete — 见 §3.2.1.6）
+4. 合并结果先写入 config.json.tmp → fsync → 原子 rename() → 对父目录 fsync
+   （rename 原子性保证磁盘上的 config.json 任意瞬间要么旧完整、要么新完整）
+5. 成功 → 删除事务标记；失败 → 恢复 .prev + 报告失败（回滚序列见 executeStopAndStart）
 ```
 
 **executeStopAndStart()**：Stop-Start 安全协议。`stop` 是幂等操作（对已停止的服务调用
-仍返回 success），此属性是启动恢复（§3.2.3 无条件 Stop-Start）的基础。
+仍返回 success），此属性是启动恢复（§3.2.3）的基础。
 `config.json` 的绝对路径通过工具参数直接传递，不依赖 MCP roots/list 协议。
 
 ```
 Stop 阶段:
   for 每个数据路径 MCP 服务（不含 c4_shm_manager）: call stop()
   if 任一失败:                                  ← stop 不读 config，非 config 类失败
-    for 已停止的服务: call start(instance_id, config_path)     ← 回滚：只 restart，不恢复 config
-    abort 操作
+    恢复 config.json.prev.1 为 config.json
+    以恢复后的配置执行完整 Stop-Start 协议（stop → adjust_shm → start），
+    含 c4_shm_manager.adjust_shm——shm 分配表必须与恢复后的配置重新同步，
+    禁止只 restart 不调 adjust_shm（否则已回收的 shm 块与恢复后的点位错配）
+    报告失败，删除事务标记（变更作废，不续做）
 
 adjust_shm 阶段:
   call adjust_shm(instance_id, config_path)                  ← config.json 路径作为工具参数传入
-  if 失败:
-    if 错误码为 CONFIG_MISSING_SECTION / DUPLICATE_KEY / UNKNOWN_READER_KEY:
-      将 config.json.bak 恢复为 config.json      ← config 有问题，回退配置
-    for 已停止的服务: call start(instance_id, config_path)     ← 统一 restart
-    abort 操作
-  （SHM_NOT_CREATED / SHM_SYSCALL_FAILED 等非 config 类失败：
-    不恢复 config，后续用户解决 shm 问题后只需重试 adjust_shm → start）
+  if 失败（config 类或 shm/系统类均同）:
+    恢复 config.json.prev.1 为 config.json
+    以恢复后的配置执行完整 Stop-Start 协议（含 adjust_shm，同上）
+    报告失败，删除事务标记
 
 Start 阶段:
   for 每个 MCP 服务: call start(instance_id, config_path)    ← config.json 路径作为工具参数传入
-  部分失败 → 不回滚已成功的，只报告哪些失败
+  部分失败 → 恢复 .prev + 完整 Stop-Start 回滚（含 adjust_shm）+ 报告失败
 ```
+
+事务失败与崩溃同语义：已开始的变更一律作废回滚、不续做（§3.1.2 崩溃恢复语义），
+恢复 .prev 后必须以恢复的配置重跑完整 Stop-Start（含 adjust_shm），使 shm 与配置一致。
+
+**单飞规则**：config.json 变更是单飞操作——进程级配置事务互斥锁自写入 pending_change.json
+起持有，至删除事务标记释放。并发配置变更请求在会话层直接拒绝，向用户提示
+「有配置变更正在执行，请稍后重试」；只读操作（点位查询、状态展示）不持锁；
+启动恢复瀑布（§3.2.3）持同一把锁直至收敛完成。每个 C4 实例仅一个 Agent 进程，
+且只有 Agent 写 config.json，进程内异步互斥锁已足够。
 
 **调用时机**：SuperWorker 收到 step-decomposer 的 AccessPlanSteps 后，直接调用这两个函数，
 执行结果返回 SuperWorker，由 SuperWorker 以非技术语言告知用户。
@@ -1227,9 +1239,9 @@ SuperWorker 是所有错误的唯一出口——子代理失败时 SuperWorker �
 | info-gatherer | 收集时缺少必要信息 | 逐个询问用户补齐："找到了风速、温度共 2 个数据点，但缺少设备 IP 地址，请提供。" |
 | **plan-generator** | 未找到支持的服务类型 | "无法找到匹配的 MCP 服务。请确认设备的通信方式，或检查是否已部署对应的 MCP 服务。" |
 | **step-decomposer** | output_plan_steps 校验失败 | 重试一次。仍失败："配置生成遇到问题，请重新描述需求。不需要您提供技术细节，只需说明要接入哪个设备、转发到哪个系统。" |
-| **执行模块** | stop 失败 | 回滚。放弃操作。"无法停止现有服务，接入请求已取消。当前运行的数据采集未受影响。" |
-| 执行模块 | adjust_shm 失败（config 类：配置冲突/缺失） | 回退 config.json.bak → start 恢复。"接入方案中的配置与现有配置冲突，请调整后重试。" |
-| 执行模块 | adjust_shm 失败（非 config 类：shm/系统错误） | start 恢复（不回退 config）。"数据管道调整遇到系统问题，请稍后重试。已接入的设备不受影响。" |
+| **执行模块** | stop 失败 | 回滚（恢复 config.json.prev.1 → 完整 Stop-Start 含 adjust_shm）。放弃操作。"无法停止现有服务，接入请求已取消。当前运行的数据采集未受影响。" |
+| 执行模块 | adjust_shm 失败（config 类：配置冲突/缺失） | 恢复 config.json.prev.1 → 完整 Stop-Start 回滚（含 adjust_shm）。"接入方案中的配置与现有配置冲突，请调整后重试。" |
+| 执行模块 | adjust_shm 失败（非 config 类：shm/系统错误） | 恢复 config.json.prev.1 → 完整 Stop-Start 回滚（含 adjust_shm）。"数据管道调整遇到系统问题，请稍后重试。已接入的设备不受影响。" |
 | 执行模块 | start 部分失败 | 已成功的保持运行，报告失败的服务："接入部分完成。以下服务未能启动：[列表]，其余正常运行。可以稍后重试。" |
 | **SuperWorker** | LLM 超时或不可达 | "服务暂时不可用，请稍后重试。" |
 
@@ -1262,51 +1274,60 @@ flowchart TD
 
 ### 3.2.3 Agent 启动与恢复
 
-Agent 每次启动无条件执行 Stop-Start 协议。不区分首次、正常重启还是崩溃恢复——
-统一路径覆盖所有场景，无需状态检测、无需恢复日志、无边界条件。
+Agent 启动后按 c4_architecture.md §3.1.2 的四级瀑布收敛：L0 确立 config.json 权威地位 →
+L1 连接 MCP 通道 → L2 按差异最小动作收敛实例 → L3 监控接续。收敛不做全量 Stop-Start——
+已运行的实例不打断，只有涉及已回滚事务的服务才执行完整 Stop-Start。
+
+> **设计变更**：旧版「每次启动无条件 Stop-Start」的前提（MCP 子进程随 Agent 终止、
+> 无状态可查）已随独立服务模型消除，收敛改为按差异最小动作（详见 c4_architecture.md §3.1.2）。
 
 ```
 Agent 启动
   │
-  ├─ 1. 启动 / 重连 c4_shm_manager
-  │     └─ MCP 连接（c4_shm_manager 自身处理 shm 新建或附加，见其 §1.3 崩溃恢复）
-  │
-  ├─ 2. 读取 ~/.local/c4/config.json
+  ├─ L0. config.json 健康：parse + schema 校验
   │     不存在 → 启动完成（无数据路径服务，等待用户首次接入）
+  │     pending_change.json 存在（上次变更未完成）→ 恢复 .prev，
+  │       向用户报告"上次接入变更未完成，已回滚，接入不成功"（变更作废，不续做）；
+  │       恢复 .prev 前先校验其 parse + schema（同架构文档 L0）
   │     存在但损坏（JSON 解析失败）：
-  │       ┌ config.json.bak 存在且有效 → 恢复之，覆盖 config.json，继续
-  │       └ config.json.bak 也不存在/损坏 → 清空，同"不存在"
-  │     存在且有效   → 继续
+  │       ┌ config.json.prev.1 存在且通过 parse + schema 校验 → 恢复之，覆盖 config.json，继续
+  │       └ config.json.prev.1 不可用（损坏/缺失）→ 不得覆盖 config.json，保留现状，
+  │         删除 pending_change.json（避免每次重启重入该分支），报告异常，等待人工介入；
+  │         首次接入尚无 .prev 的情形见架构文档 §3.1.2（保留新 config.json，
+  │         报告"上次变更结果未知，请核验"）
+  │     通过 → config.json 获得权威地位（期望状态声明）
   │
-  ├─ 3. 确保 config.json 中所有 MCP 服务的 MCP 传输可用（不含 c4_shm_manager）：
-  │     └─ 进程不存在 → spawn 进程 + 建立 MCP stdio 连接（不启动数据路径）
-  │        进程已存在 → MCP stdio 重连（不重启进程，数据路径不受影响）
+  ├─ L1. 连接：逐服务连 Unix socket（/run/c4/<service>.sock）+ MCP initialize
+  │     （不启动数据路径；MCP 服务均为常驻 systemd 单元，Agent 只连接、从不拉起进程）：
+  │     c4_shm_manager 是唯一的全局前置（硬前置）：其 socket 不可连 → 挂起全部
+  │       数据路径服务的收敛（start），退避等待重连，不得以 SHM_OPEN_FAILED
+  │       告警风暴的形式失败
+  │     其余服务：socket 不可连（服务重启中/未部署）→ 退避重试并标记降级，
+  │       不重启进程，不阻塞其余服务
   │
-  ├─ 4. 无条件执行 stop → c4_shm_manager.adjust_shm(instance_id, config_path) → start(instance_id, config_path)
-  │     · config_path 为 config.json 的绝对路径，作为工具参数直接传入
-  │     · 首次启动：shm 通过 adjust_shm 间接创建（create_shm），服务初始化
-  │     · 正常重启：config 与 shm 一致，adjust_shm 为 no-op；stop/start 重新加载
-  │     · 崩溃后：无论崩溃在 stop/adjust_shm/start 哪一步，全路径重走一致化三者
-  │     · stop 对已停止的服务是幂等操作（返回 success）
-  │     · 正常重启数据中断 < 5ms（c4_shm_manager §1.2），低频可接受
-  │     └─ 若任一服务 MCP 不可达：记录失败，继续处理其余服务
+  ├─ L2. 收敛（信任 MCP 契约返回，不做独立的状态探测）：
+  │     涉及已回滚事务的服务 → 完整 Stop-Start 协议（stop → adjust_shm → start，
+  │       以恢复后的配置执行，确定性全量重载；禁止只 restart 不调 adjust_shm）
+  │     其余服务 → start(instance_id, config_path)：
+  │       · config_path 为 config.json 的绝对路径，作为工具参数直接传入
+  │       · 首次接入：Agent 调用 c4_shm_manager 的 create_shm/adjust_shm 工具完成
+  │         shm 新建或附加——先 create_shm 创建共享内存，再经 adjust_shm 完成分配
+  │         （adjust_shm 依赖已存在的 shm，不承担创建）；非首次但 shm 缺失（如整机
+  │         重启后 tmpfs 清零）→ 先调 create_shm（幂等 create-or-attach）再 start
+  │         （同架构 §3.1.1 三层防线）
+  │       · success ＝ 此前为空白进程，实例已按当前配置拉起
+  │       · ALREADY_RUNNING ＝ 实例本就在运行 → 无动作，不重启实例、不中断数据路径
+  │       · 空配置段 ＝ 期望为零实例，start 幂等返回 success，不作为错误
+  │       └─ 若任一服务 MCP 不可达：记录失败并保持降级，继续处理其余服务
   │
-  └─ 5. Agent 就绪
+  └─ L3. 监控接续：重建周期监控，服务存活状态由连接状态推导（供页面展示与告警）；
+        Agent 就绪
 ```
 
-**崩溃场景自动覆盖**：
-
-| 崩溃时刻 | 启动后效果 |
-|----------|-----------|
-| 正常运行中 | stop→adjust_shm(no-op)→start，<5ms 中断 |
-| 更新 config 后，未执行 stop | adjust_shm 同步 config→shm，stop(idempotent)→start |
-| stop 阶段完成 | adjust_shm 同步，start 恢复 |
-| adjust_shm 完成 | start 恢复（stop 幂等不变） |
-| start 阶段中途 | stop(all)→adjust_shm(no-op)→start，全部一致 |
-
-> **统一路径原则**：config.json → shm → 服务状态三者由一次 Stop-Start 保证一致，
-> 不依赖任何时刻的状态快照或判断分支。代价是每次重启的短暂中断（< 5ms），
-> 换取零边界条件的恢复逻辑。
+> **契约信任原则**（同架构文档 §3.1.2）：Agent 信任 MCP 的同步契约返回——start/stop 的
+> success 即事实；运行期行为（连接建立、数据流动）由 L3 持续监控独立观测。
+> MCP 若违背契约（如返回 success 而实例未运行）属于 MCP 缺陷，经诊断/修复路径处理，
+> 不设计成 Agent 的运行时防御逻辑。
 
 ### 3.3 MCP Service Registry（C4_FUN_00017）
 
@@ -1372,7 +1393,7 @@ L2 完整 JSON 保留在注册表内存中，仅 step-decomposer 通过 `queryRe
     "addr/uid/fun/type/swap 为每个数据点的必要字段，缺一不可；swap=0 表示不交换"
   ],
   "error_mappings": {
-    // ……（错误码 → 用户可读消息，完整 8 条见实际 JSON：ALREADY_RUNNING/CONFIG_PARSE_ERROR/
+    // ……（错误码 → 用户可读消息，完整 7 条见实际 JSON：CONFIG_PARSE_ERROR/
     //      SHM_*/INVALID_POINT/CONNECT_FAILED 等）
   }
 }
@@ -1450,7 +1471,7 @@ Registry JSON 是服务包的一部分，与服务代码同仓库。Agent 不生
 
 | 交付物 | 生成者 | 部署位置 | 用途 |
 |--------|--------|---------|------|
-| MCP 服务二进制 | MCP 服务开发者编译 | `/usr/local/bin/` | Agent spawn 子进程 |
+| MCP 服务二进制 | MCP 服务开发者编译 | `/usr/local/bin/` | systemd 常驻服务进程（Agent 经 Unix socket 连接，不拉起进程） |
 | Registry JSON | MCP 服务开发者编写 | `/usr/local/etc/c4/mcp-registry/` | 注册表加载元数据 |
 
 JSON 中的 `binary_path` 字段指向二进制部署位置，是两者之间的关联键。
@@ -1507,7 +1528,9 @@ flowchart LR
 
 ### 3.4 MCP Client Bridge
 
-Agent 通过 `@modelcontextprotocol/sdk` 的 `StdioClientTransport` 连接 Go MCP 服务。
+Agent 通过 `@modelcontextprotocol/sdk` 连接 Go MCP 服务。传输层为 Unix domain socket
+（`/run/c4/<service>.sock`）；MCP 服务是常驻 systemd 单元，Agent 作为 MCP 客户端连接，
+从不拉起 MCP 进程。
 
 **工具转换与错误翻译**：`convertMcpTool` 将 MCP 工具包装为 LangChain `StructuredTool`。
 在执行结果进入 Agent 上下文之前，对已知错误码做**确定性翻译**。
@@ -1515,8 +1538,7 @@ Agent 通过 `@modelcontextprotocol/sdk` 的 `StdioClientTransport` 连接 Go MC
 
 ```typescript
 const ERROR_TRANSLATIONS: Record<string, string> = {
-  SHM_CORRUPTED:    "数据存储异常，请联系管理员检查共享内存状态",
-  SHM_ALREADY_EXISTS: "共享内存已存在，请重启 Agent 后重试",
+  SHM_CORRUPTED:    "数据存储异常，请联系管理员；恢复可经整机重启，或由管理员执行清理脚本",
   SHM_NOT_CREATED:  "共享内存尚未初始化，请先完成首次接入",
   SHM_SYSCALL_FAILED: "系统资源不足，共享内存操作失败，请联系管理员",
   CONFIG_MISSING_SECTION: "配置文件不完整，请重新描述接入需求",
@@ -1625,7 +1647,7 @@ info-gatherer 的工具通过路径打开文件读取，不传 base64（大文�
 #### 3.6.2 数据读取通道（c4_shm_manager `read_points` 工具）
 
 会话每个 tick 调用一次 `read_points`（c4_shm_manager.md §3.3，经既有 mcp/bridge 通道，
-stdio JSON-RPC），单次批量覆盖会话全部点（工具上限 1000 点，远超显示需求）。调用约定：
+Unix socket 上的 MCP JSON-RPC），单次批量覆盖会话全部点（工具上限 1000 点，远超显示需求）。调用约定：
 
 - **seqlock 重试在 MCP 侧**：单块 contention 计入应答 `errors` 数组；Agent 对该点立即
   重试一次，仍失败则沿用上次成功值并维持原状态标注（下一 tick 自然再试）；
@@ -1831,7 +1853,7 @@ c4/agent/                              # Agent 系统
 │   │   ├── loader.ts                 # 目录扫描
 │   │   └── types.ts
 │   ├── mcp/
-│   │   ├── bridge.ts                 # StdioClientTransport
+│   │   ├── bridge.ts                 # MCP over Unix domain socket 连接
 │   │   ├── tools.ts                  # convertMcpTool + 错误翻译层
 │   │   └── permission.ts
 │   ├── executor/
@@ -1970,7 +1992,8 @@ MCP 服务二进制路径不由 agent.json 统一指定——各 MCP 服务通�
 ~/.local/c4/                          # C4 专用账户数据目录（配置 + 状态 + 日志）
 ├── agent.json                    # Agent 自身配置
 ├── config.json                   # 数据路径 MCP 服务配置（Agent 生成/修改）
-├── config.json.bak               # config.json 备份（每次修改前自动生成，崩溃恢复用）
+├── config.json.prev.1~.3          # config.json 滚动历史（保留最近 3 版，回滚用）
+├── pending_change.json            # 配置事务标记（变更期间存在，完成即删除）
 ├── state/                        # 对话状态持久化
 │   └── (LangGraph checkpoint 文件)
 └── log/                          # Agent 日志
@@ -2001,7 +2024,7 @@ MCP 服务二进制路径不由 agent.json 统一指定——各 MCP 服务通�
 | `~/.local/c4/agent.json` | 固定位置 | Agent 自身运行时配置 | 运行账户（写入），Agent 启动时读取 |
 | `~/.local/c4/config.json` | `agent.json → shm_manager.config_path` | 数据路径 MCP 服务配置 | Agent（写入），MCP 服务（读取） |
 | `/usr/local/etc/c4/mcp-registry/` | `agent.json → mcp_registry.path` | MCP 服务注册 JSON | 安装包（root 预置），Agent 只读扫描 |
-| `/usr/local/bin/`（等） | Registry JSON `→ binary_path` | MCP 服务 Go 二进制 | 安装脚本（root 安装，一次性），Agent spawn 子进程 |
+| `/usr/local/bin/`（等） | Registry JSON `→ binary_path` | MCP 服务 Go 二进制 | 安装脚本（root 安装，一次性），systemd 常驻拉起 |
 | `~/.local/c4/state/` | `agent.json → state.path` | LangGraph 对话状态 | Agent（读写），用于跨重启保活 |
 | `logging.dir`（打包部署 `/var/log/c4/agent`） | `agent.json → logging.dir` | 结构化运行日志（NDJSON 每日文件） | Agent（写入，需 systemd 授权），运维人员（查看） |
 

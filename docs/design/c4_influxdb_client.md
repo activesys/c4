@@ -657,17 +657,16 @@ var index map[uint32]*PointMapping
 记录到日志，由各 goroutine 的写入循环（§4.5）异步处理。
 **首次调用**完成服务初始化。**在 `stop` 之后可再次调用**——`stop` 已释放共享内存，
 `start` 重新 `shm_open` + `mmap` 后加载最新配置并启动实例。与首次启动执行完全相同的流程。
-**若服务当前处于运行状态（已 start 且未 stop），返回 `ALREADY_RUNNING`。**
+**服务已在运行时，返回 `ALREADY_RUNNING`（isError=false），不重启实例、不中断数据路径。**
 
 **参数**：`instance_id`（string，必填）—— C4 实例标识符（即共享内存名，须匹配 `c4_[a-zA-Z0-9]+`）；`config_path`（string，必填）—— 配置文件 config.json 的绝对路径
 
-**返回值**：成功返回 `"success"`，失败返回 `isError: true`。
+**返回值**：实例此前未运行返回 `"success"`；服务已在运行返回 `ALREADY_RUNNING`（isError=false，正常结果，无动作）；失败返回 `isError: true`。
 
 **错误码**：
 
 | 错误码 | 含义 |
 |--------|------|
-| `ALREADY_RUNNING` | 服务当前处于运行状态，须先调用 `stop` |
 | `CONFIG_PATH_MISSING` | `config_path` 参数缺失或无法读取指定文件 |
 | `CONFIG_PARSE_ERROR` | 配置文件格式错误或 `c4_influxdb_client` 段缺失 |
 | `INVALID_CONFIG` | 配置字段非法——`url` 缺失或格式错误、`token`/`org`/`bucket` 缺失、`batch_size` ≤ 0、`flush_interval` < 0 |
@@ -710,13 +709,12 @@ var index map[uint32]*PointMapping
 
 | 场景 | 触发工具 | 处理方式 |
 |------|---------|---------|
-| `start` 在运行状态下再次调用 | `start` | 返回 `ALREADY_RUNNING` |
 | `stop` 在服务未运行（从未 start）时调用 | `stop` | 幂等：直接返回 `success`，不报错 |
 | `config_path` 参数缺失或无法读取指定文件 | `start` | 返回 `CONFIG_PATH_MISSING` |
 | 配置文件格式错误 | `start` | 返回 `isError: true` + `CONFIG_PARSE_ERROR` |
 | 配置字段非法（url/token/org/bucket 缺失或格式错、batch_size ≤ 0、flush_interval < 0） | `start` | 返回 `INVALID_CONFIG` |
 | point 配置非法（`type` 取值非法 / `measurement` 为空 / `field`·`tags` 键名违反 `[a-zA-Z_]+` / 同实例 shm_id 重复） | `start` | 返回 `INVALID_POINT`（消息指明字段与取值） |
-| 共享内存 magic 校验失败 | `start` | 返回 `SHM_CORRUPTED`，Agent 应重建共享内存后重试 |
+| 共享内存 magic 校验失败 | `start` | 返回 `SHM_CORRUPTED`，拒绝并报告，等待人工处理；恢复经外部手段（整机重启或清理脚本，见 c4_deployment.md shm 损坏恢复） |
 | 无法打开共享内存 | `start` | 返回 `SHM_OPEN_FAILED` |
 | 配置中存在 shm_id 未分配（=0） | `start` | 返回 `SHM_ID_NOT_ASSIGNED`——`c4_shm_manager` 必须先回填 |
 | HTTP 写入失败（网络错误 / 5xx / 429） | 运行时 | 指数退避重试（≤ `retries` 次，§4.5.3） |

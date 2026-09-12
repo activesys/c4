@@ -46,7 +46,7 @@ c4/
 - **Agent 不在实时数据路径中**：Agent 负责理解意图、规划方案、配置和监控 MCP 服务；
   MCP 服务负责确定性数据搬运。Agent 故障不影响已运行的 MCP 数据管道。
 - **c4_shm_manager 是每个 C4 实例的首个 MCP 服务**：负责 POSIX 共享内存的创建、扩容、
-  块分配回收和销毁。
+  块分配回收和销毁策略管理（运行期不销毁——销毁仅发生在整机重启与卸载脚本 `shm_unlink`）。
 - **MCP 服务之间通过 POSIX 共享内存交换数据**：零拷贝、纳秒级延迟。
 
 ## 关键文档
@@ -56,7 +56,7 @@ c4/
 | 架构设计 | `docs/design/c4_architecture.md` | 整体架构、共享内存布局、并发协议、配置格式 |
 | 共享内存管理 | `docs/design/c4_shm_manager.md` | 创建/扩容/分配算法、MCP 工具定义、交互时序、错误码 |
 | 功能规格 | `docs/specification/c4_function.md` | 功能点及其验收指导 |
-| 需求规格 | `docs/specification/c4_requirement.md` | 83 条形式化需求 |
+| 需求规格 | `docs/specification/c4_requirement.md` | 104 条形式化需求（功能 73 + 非功能 31） |
 | 项目概述 | `docs/specification/c4_description.md` | 架构、应用场景 |
 | ASFP2 协议 | `docs/specification/asfp2_specification.md` | 数据包格式、类型枚举 |
 

@@ -180,7 +180,7 @@ flowchart TB
 ```
 
 - **Agent**：基于 LLM 的推理核心。接收用户的自然语言指令和文档资料，理解意图，规划数据接入方案，通过 MCP 协议调度 MCP 服务，监控运行状态，诊断和修复问题。
-- **MCP 服务**：支持 [Model Context Protocol](https://modelcontextprotocol.io/) 的数据接入服务。每个 MCP 服务负责一种具体的数据接入工作（如 Modbus 采集、IEC104 采集、数据转发），由 Agent 按需启动和配置。新的协议支持通过新增 MCP 服务实现，遵循标准 MCP 接口。
+- **MCP 服务**：支持 [Model Context Protocol](https://modelcontextprotocol.io/) 的数据接入服务。每个 MCP 服务负责一种具体的数据接入工作（如 Modbus 采集、IEC104 采集、数据转发），由 Agent 连接并配置（进程为独立系统服务常驻运行）。新的协议支持通过新增 MCP 服务实现，遵循标准 MCP 接口。
 - **MCP 协议**：Agent 与 MCP 服务之间的通信协议，采用 Anthropic 的 Model Context Protocol 标准，实现 Agent 对 MCP 服务的工具调用（tool calling）和资源访问。
 
 ### 3.2 设计原则
@@ -189,7 +189,7 @@ flowchart TB
 |------|------|
 | **AI 在管道外** | Agent 负责理解、配置、监控，不进入实时数据路径。数据搬运由 MCP 服务以确定性方式执行。 |
 | **MCP 在管道内** | MCP 服务负责协议级的数据接入和转发，保证低延迟、高可靠、确定性。 |
-| **按需启动** | MCP 服务根据任务需要由 Agent 启动，任务完成后可停止，节约资源。 |
+| **独立服务** | MCP 服务为独立系统服务常驻运行，Agent 管理其数据路径实例的启停；Agent 故障不影响数据接入。 |
 | **渐进自主** | 常规操作自主执行，关键配置变更需人工审核。 |
 | **故障隔离** | Agent 故障不影响已运行的 MCP 数据管道。MCP 服务在 Agent 不可用期间继续自主运行，Agent 恢复后自动接续监控状态。 |
 
@@ -272,7 +272,7 @@ flowchart LR
     F -->|"恢复正常"| E
 ```
 
-MCP 服务按需启动，由 Agent 管理其完整生命周期。
+MCP 服务进程为独立系统服务常驻运行；Agent 管理其数据路径实例的完整生命周期。
 
 ## 6. C4 网络
 

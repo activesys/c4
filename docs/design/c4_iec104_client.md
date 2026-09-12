@@ -712,17 +712,16 @@ Reader 的本机序读取约定一致。
 记录到日志，由各 goroutine 的连接管理逻辑（§3.2、§4.8）异步处理（见 [c4_architecture.md §3.3.1](c4_architecture.md)）。
 **首次调用**完成服务初始化。**在 `stop` 之后可再次调用**——`stop` 已释放共享内存，
 `start` 重新 `shm_open` + `mmap` 后加载最新配置并启动实例。与首次启动执行完全相同的流程。
-**若服务当前处于运行状态（已 start 且未 stop），返回 `ALREADY_RUNNING`。**
+**服务已在运行时，返回 `ALREADY_RUNNING`（isError=false），不重启实例、不中断数据路径。**
 
 **参数**：`instance_id`（string，必填）—— C4 实例标识符（即共享内存名，须匹配 `c4_[a-zA-Z0-9]+`）；`config_path`（string，必填）—— 配置文件 config.json 的绝对路径
 
-**返回值**：成功返回 `"success"`，失败返回 `isError: true`。
+**返回值**：实例此前未运行返回 `"success"`；服务已在运行返回 `ALREADY_RUNNING`（isError=false，正常结果，无动作）；失败返回 `isError: true`。
 
 **错误码**：
 
 | 错误码 | 含义 |
 |--------|------|
-| `ALREADY_RUNNING` | 服务当前处于运行状态，须先调用 `stop` |
 | `CONFIG_PATH_MISSING` | `config_path` 参数缺失或无法读取指定文件 |
 | `CONFIG_PARSE_ERROR` | 配置文件格式错误或 `c4_iec104_client` 段缺失 |
 | `INVALID_CONFIG` | 实例级字段非法（`t2 ≥ t1`、`ioa_size` 非 1/2/3、`modules` 非 32768、`k`/`w` 超范围等），错误信息指明具体字段与取值 |
@@ -763,13 +762,12 @@ Reader 的本机序读取约定一致。
 
 | 场景 | 触发工具 | 处理方式 |
 |------|---------|---------|
-| `start` 在运行状态下再次调用 | `start` | 返回 `ALREADY_RUNNING` |
 | `start` 从未成功调用过时调用 `stop` | `stop` | 幂等，直接返回 `"success"` |
 | `config_path` 参数缺失 | `start` | 返回 `CONFIG_PATH_MISSING` |
 | 配置文件格式错误 | `start` | 返回 `isError: true` + `CONFIG_PARSE_ERROR` |
 | 实例级字段非法（t2≥t1、ioa_size 非 1/2/3、modules 非 32768 等） | `start` | 返回 `isError: true` + `INVALID_CONFIG` |
 | point 字段非法（addr 等） | `start` | 返回 `isError: true` + `INVALID_POINT`（消息指明字段与取值） |
-| 共享内存 magic 校验失败 | `start` | 返回 `SHM_CORRUPTED`，Agent 应重建共享内存后重试 |
+| 共享内存 magic 校验失败 | `start` | 返回 `SHM_CORRUPTED`，拒绝并报告，等待人工处理；恢复经外部手段（整机重启或清理脚本，见 c4_deployment.md shm 损坏恢复） |
 | 无法打开共享内存 | `start` | 返回 `SHM_OPEN_FAILED` |
 | 配置中存在 shm_id 未分配（=0） | `start` | 返回 `SHM_ID_NOT_ASSIGNED`——`c4_shm_manager` 必须先回填 |
 | TCP 连接失败（设备不可达/拒绝连接） | 运行时 | 记录日志 → t0 周期重连（§3.2） |

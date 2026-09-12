@@ -36,10 +36,11 @@ Agent 从 agent.json 读取 instance_id
 │  返回创建结果 → Agent                          │
 └───────────────────────────────────────────────┘
         │
-        │ Agent 通过 MCP 协议启动其他 MCP 服务
+        │ systemd 启动各 MCP 服务进程（常驻）；
+        │ Agent 通过 Unix socket 连接并以 MCP 工具交互
         ▼
 ┌───────────────────────────────────────────────┐
-│          其他 MCP 服务启动（Go）                 │
+│          其他 MCP 服务（Go，常驻）               │
 │  shm_open("/{id}", O_RDWR)      // 不传 O_CREAT│
 │  mmap                                         │
 │  校验 magic == 0xC4DA7A00                      │
@@ -51,12 +52,12 @@ Agent 从 agent.json 读取 instance_id
 flowchart TD
     A["Agent 从 agent.json 读取<br/>instance_id"] --> B["MCP 调用<br/>c4_shm_manager.create_shm"]
     B --> C["shm_open(/{id},<br/>O_CREAT|O_EXCL|O_RDWR)<br/>ftruncate + mmap<br/>初始化 Header +<br/>Data Block Array"]
-    C --> D["Agent 启动其他<br/>MCP 服务"]
+    C --> D["systemd 启动各 MCP 服务进程（常驻）<br/>Agent 经 Unix socket 以 MCP 工具交互"]
     D --> E["后续 MCP 服务<br/>shm_open(O_RDWR)<br/>mmap · 校验 magic"]
     E --> F["所有 MCP 服务运行<br/>读写共享内存"]
-    F --> G{"Agent 停止 MCP?"}
-    G -->|"是"| H["各 MCP 服务 munmap"]
-    H --> I["c4_shm_manager<br/>最后退出 → shm_unlink"]
+    F --> G["运行时永不销毁——<br/>创建一次后仅经 adjust_shm 增减分配"]
+    G --> H["整机重启：<br/>/dev/shm（tmpfs）自动清零"]
+    G --> I["卸载：由卸载脚本执行 shm_unlink<br/>（部署文档职责，见 c4_deployment.md §6.2）"]
 ```
 
 | 操作 | 说明 |
@@ -64,7 +65,7 @@ flowchart TD
 | 创建 | Agent 通过 MCP 工具调用 `c4_shm_manager`，命名规则 instance_id 即共享内存名（须匹配 `c4_[a-zA-Z0-9]+`） |
 | 附加 | 后续 MCP 服务以普通 `O_RDWR` 或 `O_RDONLY` 打开，校验 `magic` 后附加 |
 | 大小 | 无配置文件时默认 100k 点（≈3 MB）；配置文件存在时按 §2.2 算法计算，Agent 可通过 MCP 工具调整 |
-| 销毁 | `c4_shm_manager` 最后退出时 `shm_unlink`；进程异常退出由操作系统回收 |
+| 销毁 | 运行时永不销毁——创建一次后仅经 `adjust_shm` 增减分配；整机重启时 /dev/shm（tmpfs）自动清零；卸载时由卸载脚本执行 `shm_unlink`（部署文档职责，见 c4_deployment.md §6.2 卸载流程） |
 
 ### 1.2 扩容与块分配管理
 
@@ -80,14 +81,16 @@ Stop 阶段（stop/start 工具定义见 [c4_architecture.md §3.3.1](c4_archite
 
 ```
 Phase 1 - Stop：
-  a. Agent 向所有 MCP 进程下发 stop 指令
-  b. 每个 MCP 进程：
-     - 关闭所有监听端口和活跃连接
+  a. Agent 向各数据路径 MCP 服务下发 stop 指令——停止的是**数据路径实例**，
+     进程常驻不退出
+  b. 每个数据路径 MCP 服务：
+     - 关闭实例级数据路径（含数据路径监听端口）和活跃连接
      - 销毁实例状态
      - 向 Agent ack "success"
+  注：stop 只作用于数据路径实例，各 MCP 服务自身的 Unix socket 监听不受影响
 
 Phase 2 - adjust_shm：
-   a. Agent 确认所有 MCP 进程已停止 → 调用 c4_shm_manager.adjust_shm(instance_id, config_path)
+   a. Agent 确认所有实例级数据路径（含数据路径监听端口）已关闭 → 调用 c4_shm_manager.adjust_shm(instance_id, config_path)
    b. c4_shm_manager 内部：
        - 读取 adjust_shm 的 config_path 参数指定的配置文件
       - 读取配置文件，按 §2.2 算法计算所需点数 (required_points)
@@ -203,7 +206,7 @@ sequenceDiagram
 #### Writer 替换示例
 
 ```
-初始状态（create_shm 后，max_points=20）：
+初始状态（create_shm + 首次 adjust_shm 后，max_points=20）：
   writer1: [ 1..2]   (2个, state=1)
   writer2: [ 3..4]   (2个, state=1)
   writer3: [ 5..7]   (3个, state=1)
@@ -389,15 +392,16 @@ Agent 删除 writer3 并新增 writer5(5点)，调用 adjust_shm(instance_id, co
 孤儿并置 state=0，导致新分配的点丢失。因此 `adjust_shm` 必须严格遵守
 **先回收、再分配**的顺序。
 
-### 1.3 `c4_shm_manager` 崩溃恢复
+### 1.3 shm 创建/附加与校验（Agent 工具调用内完成）
 
-`c4_shm_manager` 崩溃后，POSIX 共享内存对象 `/{id}` 仍然存在于 `/dev/shm`
-（崩溃进程未调用 `shm_unlink`），其他 MCP 进程的 mmap 映射不受影响。
-
-重启时不能走 `O_CREAT|O_EXCL` 路径——名字已被占用。流程如下：
+`c4_shm_manager` 进程由 systemd 拉起后**仅监听 Unix socket，不 attach 任何 shm**；
+shm 的创建/附加/校验全部发生在 Agent 发起的 `create_shm` / `adjust_shm` 工具调用内。
+POSIX 共享内存对象 `/{id}` 一经创建便持久存在于 `/dev/shm`（进程崩溃未调用
+`shm_unlink`），其他 MCP 进程的 mmap 映射不受影响——因此工具调用发现 shm 已存在时
+必须走附加路径，不能走 `O_CREAT|O_EXCL` 新建（名字已被占用）。流程如下：
 
 ```
-c4_shm_manager 重启
+Agent 调用 create_shm / adjust_shm 工具（触发者）
         │
         │ shm_open("/{id}", O_RDWR)  // 不传 O_CREAT
         │ 若失败（文件不存在或权限错误）→ shm_unlink + O_CREAT|O_EXCL 新建
@@ -407,7 +411,9 @@ c4_shm_manager 重启
 │                                               │
 │  mmap                                         │
 │  校验 Header magic == 0xC4DA7A00              │
-│  ┌─ 若 magic 无效：shm_unlink + 重建新 shm     │
+│  ┌─ 若 magic 无效：返回 SHM_CORRUPTED，        │
+│  │    拒绝并报告，不做自动重建                  │
+│  │    （运行期不销毁 shm，见销毁语义）                │
 │  └─ 若 magic 有效：                           │
 │       扫描 block[1..max_points]               │
 │         count = 0                             │
@@ -422,10 +428,12 @@ c4_shm_manager 重启
 
 关键保证：
 
-- **其他 MCP 进程不受影响**：它们的 mmap 在 crash 期间始终有效，不会 SIGSEGV
-- **`point_count` 自动修复**：扫描重建，不依赖崩溃前的内存值
+- **其他 MCP 进程不受影响**：「文件不存在 → 新建」分支仅在 shm 尚不存在（首次接入）时
+  可达；shm 已存在时始终附加而非重建——`shm_unlink` 会使其他进程的 mmap 失效后 SIGSEGV
+- **magic 校验失败不做自动重建**：返回 `SHM_CORRUPTED`，拒绝并报告，等待人工处理
+  （运行期不销毁 shm，见销毁语义）——shm 中 state=1 的分配状态是持久权威，自动重建会将其销毁
+- **`point_count` 自动修复**：附加成功后扫描重建，不依赖崩溃前的内存值
 - **`state=1` 是权威源**：即使崩溃发生在 alloc 后、writer 首次写入前（block 已分配但 state 仍为 0），重建后这些 block 自然为"空闲"，下次分配时回收——不浪费
-- **始终复用而非重建**：重建意味着 `shm_unlink`，会导致其他进程的 mmap 失效后 SIGSEGV。只有 magic 校验失败（shm 真的损坏了）才走重建路径
 
 ---
 
@@ -437,8 +445,9 @@ Agent 与 `c4_shm_manager` 的交互遵循 MCP 标准协议。启动 `c4_shm_man
 完整流程如下：
 
 ```
-1. Agent 启动 c4_shm_manager 进程
-2. Agent 使用 MCP 协议初始化 c4_shm_manager，获得工具列表
+1. c4_shm_manager 作为独立系统服务由 systemd 启动，监听 Unix socket
+   （/run/c4/c4_shm_manager.sock）；Agent 与它是彼此独立的进程，无父子关系
+2. Agent 连接 socket，使用 MCP 协议初始化（initialize 握手），获得工具列表
    （无需声明 roots 能力；配置路径通过工具参数 config_path 显式传入）
 3. Agent 调用 c4_shm_manager 的 create_shm 工具（传入 instance_id 和可选的 config_path）
 4. c4_shm_manager 直接按 config_path 参数读取配置文件。
@@ -466,8 +475,8 @@ sequenceDiagram
     participant S as c4_shm_manager
     participant FS as config.json
 
-    A->>S: 启动进程
-    A->>S: initialize (MCP 握手)
+    Note over S: systemd 启动 c4_shm_manager 进程（常驻）
+    A->>S: 连接 Unix socket / MCP initialize
     S-->>A: 工具列表 (create_shm, adjust_shm, ...)
 
     A->>S: tools/call (create_shm)<br/>params: {instance_id, config_path}
@@ -580,15 +589,40 @@ sequenceDiagram
 - **业务层错误**（tool 成功路由到 handler，但业务逻辑执行失败）→ `result.isError: true`，`content[0].text` 以 `ERROR_TYPE:` 前缀开头
 
 > 示例：参数缺失 `instance_id` → JSON-RPC `{"error": {"code": -32602, "message": "Invalid params: missing required field 'instance_id'"}}`；
-> 共享内存已存在 → `{"result": {"content": [{"type": "text", "text": "SHM_ALREADY_EXISTS: ..."}], "isError": true}}`。
+> 共享内存系统调用失败 → `{"result": {"content": [{"type": "text", "text": "SHM_SYSCALL_FAILED: ..."}], "isError": true}}`。
+
+---
+
+**create_shm / adjust_shm 职责分界与幂等契约**：
+
+```
+create_shm —— 段级容器职责：
+  内容：确保存在一个 magic/版本正确的 shm 段（不存在则创建；已存在则校验并附加）。
+  不做：任何点位分配（所有数据块保持未分配态，分配是 adjust_shm 的职责）。
+  幂等语义：存在即附加（create-or-attach），重放安全。
+  触发频率：每机器生命周期一次（首次部署/整机重启后），及 Agent 启动瀑布的幂等确认。
+  失败语义：环境级——/dev/shm 空间不足、权限、magic/版本不兼容（SHM_CORRUPTED 拒绝并报告）。
+
+adjust_shm —— 段内分配对账职责：
+  内容：以 config.json 点位清单为期望，对现有分配做 diff——新点位分配空闲块、
+        已删点位孤儿回收、容量不足时扩容、shm_id 回填 config.json。
+  前置：段已存在（不承担创建）；数据路径实例已停止（Stop-Start 协议中段）。
+  幂等语义：同参数重跑必然收敛到配置声明的分配状态——c4_shm_manager 崩溃于
+        adjust_shm 半途时，Agent 重放同参数调用即可修复半途状态。
+  失败语义：配置级——点位数超限、config 与 shm 状态不可调和。
+```
+
+整机重启后由 create_shm 重建的段，账面（块状态/point_count）保持空态，点归属以
+config.json 的 shm_id 为权威；建议紧随一次 adjust_shm 对账以恢复账面。
 
 ---
 
 ### 3.1 Tool: `create_shm`
 
-创建共享内存，按 §2.2 算法解析配置文件、分配 shm_id 并初始化共享内存。
+创建共享内存（幂等 create-or-attach），按 §2.2 算法解析配置文件、分配 shm_id 并初始化；
+shm 段已存在且 magic/版本校验通过时，附加该段并返回 success（幂等语义，见 §1.3）。
 
-**触发条件**：`c4_shm_manager` 首次启动后、Agent 准备启动其他 MCP 服务前调用。
+**触发条件**：Agent 发起 create_shm 调用时（如首次部署、整机重启后 tmpfs 清零、Agent 启动瀑布中的幂等确认）。
 
 **参数**：
 
@@ -617,18 +651,22 @@ sequenceDiagram
 
 1. 读取 `config_path` 参数
 2. 若 `config_path` 为空或文件不存在：
-   a. `shm_open("/{instance_id}", O_CREAT|O_EXCL|O_RDWR)` → `ftruncate` → `mmap`
+   a. 先按 §1.3 探测附加（幂等 create-or-attach）：`shm_open("/{instance_id}", O_RDWR)`
+      成功且 magic/版本校验通过 → 附加已有段并返回 `success`，不重复初始化；段不存在
+      → `shm_open("/{instance_id}", O_CREAT|O_EXCL|O_RDWR)` → `ftruncate` → `mmap`
    b. Header 字段：`magic = 0xC4DA7A00`、`version = 1`、`max_points = 100000`、`point_count = 0`；
       `global_write_seq` 及两个 `reserved` 字段保持 `ftruncate` 零填充后的默认值 `0`（参见 [c4_architecture.md §2.2.1](c4_architecture.md) 初始化规则）
    c. 初始化所有 Data Block 的 `magic = 0xC4DA7A00`（state 自然为 0）
    d. 写入 Header `magic = 0xC4DA7A00`（最终提交）
-   e. 跳至步骤 6（不涉及 shm_id 分配和配置回填）
+   e. 跳至步骤 4（返回结果给 Agent）
 3. 若配置文件存在：
     a. 读取配置文件，判断分类：
        ┌ 若 writer 和 reader 均为空 → 视为无配置，创建默认 10 万点共享内存
        ├ 若仅一方为空（writer 空但 reader 非空，或反之）→ 返回 `CONFIG_MISSING_SECTION` 错误
        └ 若双方均非空 → 按 §2.2 算法分配 shm_id 并回填到各 MCP Server 的 `points` 数组
-   b. `shm_open("/{instance_id}", O_CREAT|O_EXCL|O_RDWR)` → `ftruncate` → `mmap`
+    b. 先按 §1.3 探测附加（幂等 create-or-attach）：`shm_open("/{instance_id}", O_RDWR)`
+       成功且 magic/版本校验通过 → 附加已有段并返回 `success`（不重复分配、不回填）；
+       段不存在 → `shm_open("/{instance_id}", O_CREAT|O_EXCL|O_RDWR)` → `ftruncate` → `mmap`
    c. 初始化所有 Data Block 的 `magic = 0xC4DA7A00`（state 自然为 0）
    d. 写入 Header `magic = 0xC4DA7A00`
    e. 将回填 shm_id 后的配置文件写回磁盘
@@ -652,9 +690,11 @@ sequenceDiagram
 // <-- 应答
 {"jsonrpc": "2.0", "id": 1, "result": {"content": [{"type": "text", "text": "success"}], "isError": false}}
 
-// ========== 业务错误：共享内存已存在 ==========
+// ========== 幂等成功：shm 段已存在，附加该段（create-or-attach） ==========
+// --> 请求
+{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "create_shm", "arguments": {"instance_id": "c4_hnalsfarm01", "config_path": "~/.local/c4/config.json"}}}
 // <-- 应答
-{"jsonrpc": "2.0", "id": 1, "result": {"content": [{"type": "text", "text": "SHM_ALREADY_EXISTS: c4_hnalsfarm01 is already created"}], "isError": true}}
+{"jsonrpc": "2.0", "id": 1, "result": {"content": [{"type": "text", "text": "success"}], "isError": false}}
 
 // ========== 业务错误：writer 和 reader 仅一方为空 ==========
 // <-- 应答
@@ -757,7 +797,7 @@ sequenceDiagram
 
 > **部分失败恢复**：`adjust_shm` 的内部操作序列非原子。若中途失败：
 > - **写入 Header 后、配置文件写入前失败**：shm 已更新但 config 未回写。此时 `adjust_shm` 的 no-expand 路径通过扫描 `state=0` 分配空闲块，若上次已分配的 block 已是 `state=1`，可能无法完成回填。此场景将在 C4_FUN_00055（回收/再分配）设计中统一处理。
-> - **`mmap` 后文件尺寸与 `header.max_points` 不一致**（崩溃发生在 `ftruncate` 后、`header.max_points` 更新前）：重启后 `c4_shm_manager` `mmap` 时检测 `file_size > (header.max_points + 1) × BLOCK_SIZE`，以文件尺寸为准修正 `header.max_points`，然后按 §1.3 崩溃恢复流程重建 `point_count`。
+> - **`mmap` 后文件尺寸与 `header.max_points` 不一致**（崩溃发生在 `ftruncate` 后、`header.max_points` 更新前）：`c4_shm_manager` 在工具调用中 `mmap` 时检测 `file_size > (header.max_points + 1) × BLOCK_SIZE`，以文件尺寸为准修正 `header.max_points`，然后按 §1.3 流程重建 `point_count`。
 > - **配置文件必须原子写入**：回填配置文件时使用 write-to-temp + `fsync` + `rename` 模式，避免中途崩溃导致配置文件损坏（半写 JSON 无法解析）。
 
 **返回值**：成功时返回 `"success"`。
@@ -1089,13 +1129,16 @@ sequenceDiagram
 
 | 错误码 | 含义 | 触发工具 |
 |--------|------|---------|
-| `SHM_ALREADY_EXISTS` | 共享内存已存在（O_EXCL 冲突） | `create_shm` |
 | `SHM_NOT_CREATED` | 共享内存尚未创建 | `adjust_shm` |
 | `SHM_SYSCALL_FAILED` | POSIX 系统调用失败（shm_open / ftruncate / mmap） | `create_shm`, `adjust_shm` |
 | `CONFIG_MISSING_SECTION` | `c4_shm_manager` 段缺失；或创建时 writer 与 reader 仅一方为空 | `create_shm`, `adjust_shm` |
 | `CONFIG_PATH_MISSING` | config_path 参数缺失/为空，或指定路径不存在/不可读 | `create_shm`, `adjust_shm` |
 | `DUPLICATE_KEY` | 两个 Writer point 的 `{service_id}.{point_id}` 重复 | `create_shm`, `adjust_shm` |
 | `UNKNOWN_READER_KEY` | Reader 的 `key` 字段引用了不存在的 Writer key | `create_shm`, `adjust_shm` |
+
+> 注：`SHM_ALREADY_EXISTS` 已随 `create_shm` 幂等 create-or-attach 语义移除——shm 段已存在且
+> magic/版本校验通过时附加并返回 success（§1.3）。并发竞态保护：同段被并发创建时后到方返回
+> `ALREADY_ATTACHED`（内部竞态护栏，正常流程不出现）。
 
 **协议层错误**（JSON-RPC `error` 对象，由 MCP 框架/传输层直接返回）：
 
