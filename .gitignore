@@ -65,3 +65,4 @@ dist/
 # Playwright (c4/test/web/)
 test-results/
 playwright-report/
+test/func_case_e2e/results.log
