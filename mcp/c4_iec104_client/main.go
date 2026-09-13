@@ -22,6 +22,7 @@ import (
 
 	"c4/mcp/internal/protocol"
 	"c4/mcp/internal/shm"
+	"c4/mcp/internal/transport"
 )
 
 // ──────────────────────────────────────────────
@@ -87,24 +88,24 @@ type iec104Point struct {
 }
 
 type iec104Instance struct {
-	Name               string        `json:"name"`
-	ID                 string        `json:"id"`
-	IP                 string        `json:"ip"`
-	Port               int           `json:"port"`
-	K                  int           `json:"k"`
-	W                  int           `json:"w"`
-	T0                 int           `json:"t0"`
-	T1                 int           `json:"t1"`
-	T2                 int           `json:"t2"`
-	T3                 int           `json:"t3"`
-	Modules            int           `json:"modules"`
-	CommonAddress      int           `json:"common_address"`
-	IoaSize            int           `json:"ioa_size"`
-	DiscardCp56time2a  int           `json:"discard_cp56time2a"`
-	IgnoreQds          int           `json:"ignore_qds"`
-	ItTimer            int           `json:"it_timer"`
-	GiTimer            int           `json:"gi_timer"`
-	Points             []iec104Point `json:"points"`
+	Name              string        `json:"name"`
+	ID                string        `json:"id"`
+	IP                string        `json:"ip"`
+	Port              int           `json:"port"`
+	K                 int           `json:"k"`
+	W                 int           `json:"w"`
+	T0                int           `json:"t0"`
+	T1                int           `json:"t1"`
+	T2                int           `json:"t2"`
+	T3                int           `json:"t3"`
+	Modules           int           `json:"modules"`
+	CommonAddress     int           `json:"common_address"`
+	IoaSize           int           `json:"ioa_size"`
+	DiscardCp56time2a int           `json:"discard_cp56time2a"`
+	IgnoreQds         int           `json:"ignore_qds"`
+	ItTimer           int           `json:"it_timer"`
+	GiTimer           int           `json:"gi_timer"`
+	Points            []iec104Point `json:"points"`
 }
 
 // pointMapping maps an IOA to a shared-memory block id.
@@ -149,7 +150,8 @@ func loadConfig(configPath string) ([]iec104Instance, error) {
 
 	section, ok := fullCfg["c4_iec104_client"]
 	if !ok {
-		return nil, fmt.Errorf("CONFIG_PARSE_ERROR: 'c4_iec104_client' section not found in config")
+		/* 段缺失＝零实例期望（c4_architecture.md §3.3.1 空配置段语义），不是错误 */
+		return nil, nil
 	}
 
 	rawJSON, _ := json.Marshal(section)
@@ -538,12 +540,12 @@ func readIOA(buf []byte, ioaSize int) uint32 {
 func buildGIRequest(commonAddress int) []byte {
 	ca := uint16(commonAddress)
 	asdu := make([]byte, 0, 10)
-	asdu = append(asdu, typeCicNa1)        // type_id
-	asdu = append(asdu, 0x01)              // VSQ: number=1, sq=0
-	asdu = append(asdu, cotAct, 0x00)      // COT: cause=6, originator=0
+	asdu = append(asdu, typeCicNa1)            // type_id
+	asdu = append(asdu, 0x01)                  // VSQ: number=1, sq=0
+	asdu = append(asdu, cotAct, 0x00)          // COT: cause=6, originator=0
 	asdu = append(asdu, byte(ca), byte(ca>>8)) // CASDU (2B little endian)
-	asdu = append(asdu, 0x00, 0x00, 0x00)  // IOA = 0 (3B little endian)
-	asdu = append(asdu, 20)                // QOI = 20 (station interrogation)
+	asdu = append(asdu, 0x00, 0x00, 0x00)      // IOA = 0 (3B little endian)
+	asdu = append(asdu, 20)                    // QOI = 20 (station interrogation)
 	return asdu
 }
 
@@ -551,12 +553,12 @@ func buildGIRequest(commonAddress int) []byte {
 func buildITRequest(commonAddress int) []byte {
 	ca := uint16(commonAddress)
 	asdu := make([]byte, 0, 10)
-	asdu = append(asdu, typeCciNa1)        // type_id
-	asdu = append(asdu, 0x01)              // VSQ: number=1, sq=0
-	asdu = append(asdu, cotAct, 0x00)      // COT: cause=6, originator=0
+	asdu = append(asdu, typeCciNa1)            // type_id
+	asdu = append(asdu, 0x01)                  // VSQ: number=1, sq=0
+	asdu = append(asdu, cotAct, 0x00)          // COT: cause=6, originator=0
 	asdu = append(asdu, byte(ca), byte(ca>>8)) // CASDU (2B little endian)
-	asdu = append(asdu, 0x00, 0x00, 0x00)  // IOA = 0 (3B little endian)
-	asdu = append(asdu, 0x45)              // QCC = freeze+no-reset, total request
+	asdu = append(asdu, 0x00, 0x00, 0x00)      // IOA = 0 (3B little endian)
+	asdu = append(asdu, 0x45)                  // QCC = freeze+no-reset, total request
 	return asdu
 }
 
@@ -1085,8 +1087,9 @@ func runInstance(ist *instanceState, shmData []byte) {
 // ──────────────────────────────────────────────
 
 func startHandler(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	/* ALREADY_RUNNING 是一等成功路径结果（isError=false）：不重载配置、不中断数据路径 */
 	if state.started.Load() {
-		return newError("ALREADY_RUNNING: start has already been called and service is running, call stop first"), nil
+		return newResult("ALREADY_RUNNING: service is already running, no action taken"), nil
 	}
 
 	var args map[string]any
@@ -1230,7 +1233,9 @@ func main() {
 		stopHandler,
 	)
 
-	if err := server.Run(context.Background(), &mcp.StdioTransport{}); err != nil {
+	/* 常驻模式为默认（Unix socket，进程启动零实例零 attach）；stdio 经 --stdio 或
+	   管道 stdin 保留（Agent / pytest harness 测试脚手架） */
+	if err := transport.Run("c4_iec104_client", server); err != nil {
 		log.Fatal(err)
 	}
 }

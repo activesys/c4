@@ -2,10 +2,21 @@ package shm
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"os"
 
 	"golang.org/x/sys/unix"
+)
+
+// Sentinel errors for the attach/create decision in c4_shm_manager tool
+// calls (c4_shm_manager.md §1.3 / §3.1):
+//   - ErrMissing: the shm object does not exist (create branch is reachable)
+//   - ErrExists:  the shm object came into existence between the attach probe
+//     and O_CREAT|O_EXCL (concurrency race guard; retry attach)
+var (
+	ErrMissing = errors.New("shm object does not exist")
+	ErrExists  = errors.New("shm object already exists")
 )
 
 const (
@@ -20,7 +31,7 @@ const (
 const (
 	HdrOffMagic          = 0
 	HdrOffVersion        = 4
-	HdrOffReserved2   = 6
+	HdrOffReserved2      = 6
 	HdrOffPointCount     = 8
 	HdrOffMaxPoints      = 12
 	HdrOffGlobalWriteSeq = 16
@@ -63,7 +74,7 @@ type BlockInfo struct {
 type StatusInfo struct {
 	Magic          string `json:"magic"`
 	Version        int    `json:"version"`
-	Reserved2     uint16 `json:"reserved"`
+	Reserved2      uint16 `json:"reserved"`
 	PointCount     int    `json:"point_count"`
 	MaxPoints      int    `json:"max_points"`
 	FreeBlocks     int    `json:"free_blocks"`
@@ -82,10 +93,15 @@ func ShmPath(instanceID string) string {
 }
 
 // Open attaches to an existing shared memory object (O_RDWR, no O_CREAT).
-// It validates the header magic and maps the full size read from the header.
+// It validates the header magic and version, reconciles header max_points
+// against the file size (crash between ftruncate and the max_points update —
+// c4_shm_manager.md §3.2 部分失败恢复), and maps the full size.
 func Open(path string) (*SharedMemory, error) {
 	fd, err := unix.Open(path, unix.O_RDWR, 0)
 	if err != nil {
+		if errors.Is(err, unix.ENOENT) {
+			return nil, fmt.Errorf("%w: shm_open failed for %s: %v", ErrMissing, path, err)
+		}
 		return nil, fmt.Errorf("SHM_OPEN_FAILED: shm_open failed for %s: %w", path, err)
 	}
 
@@ -100,8 +116,32 @@ func Open(path string) (*SharedMemory, error) {
 		unix.Close(fd)
 		return nil, fmt.Errorf("SHM_CORRUPTED: header magic is invalid (got 0x%08X, expected 0x%08X)", magic, Magic)
 	}
+	if version := binary.NativeEndian.Uint16(hdrData[HdrOffVersion:]); version != Version {
+		unix.Munmap(hdrData)
+		unix.Close(fd)
+		return nil, fmt.Errorf("SHM_CORRUPTED: header version is unsupported (got %d, expected %d)", version, Version)
+	}
 	maxPoints := binary.NativeEndian.Uint32(hdrData[HdrOffMaxPoints:])
 	unix.Munmap(hdrData)
+
+	/* reconcile header max_points with the actual file size: a crash between
+	   ftruncate and the max_points update leaves file_size > declared size —
+	   the file size is authoritative */
+	var st unix.Stat_t
+	if err := unix.Fstat(fd, &st); err != nil {
+		unix.Close(fd)
+		return nil, fmt.Errorf("SHM_OPEN_FAILED: fstat failed: %w", err)
+	}
+	if fileBlocks := uint32(st.Size) / BlockSize; fileBlocks >= 1 && fileBlocks-1 != maxPoints {
+		rwHdr, err := unix.Mmap(fd, 0, BlockSize, unix.PROT_READ|unix.PROT_WRITE, unix.MAP_SHARED)
+		if err != nil {
+			unix.Close(fd)
+			return nil, fmt.Errorf("SHM_OPEN_FAILED: mmap header failed: %w", err)
+		}
+		maxPoints = fileBlocks - 1
+		binary.NativeEndian.PutUint32(rwHdr[HdrOffMaxPoints:], maxPoints)
+		unix.Munmap(rwHdr)
+	}
 
 	totalSize := int64(int(maxPoints)+1) * BlockSize
 	data, err := unix.Mmap(fd, 0, int(totalSize), unix.PROT_READ|unix.PROT_WRITE, unix.MAP_SHARED)
@@ -123,7 +163,7 @@ func Create(instanceID string, maxPoints int) (*SharedMemory, error) {
 	fd, err := unix.Open(path, unix.O_CREAT|unix.O_EXCL|unix.O_RDWR, 0600)
 	if err != nil {
 		if os.IsExist(err) {
-			return nil, fmt.Errorf("SHM_ALREADY_EXISTS: %s is already created", instanceID)
+			return nil, fmt.Errorf("%w: %s", ErrExists, instanceID)
 		}
 		return nil, fmt.Errorf("SHM_SYSCALL_FAILED: shm_open failed - %w", err)
 	}
@@ -164,7 +204,7 @@ func (s *SharedMemory) HeaderInfo() HeaderInfo {
 	return HeaderInfo{
 		Magic:          binary.NativeEndian.Uint32(s.data[HdrOffMagic:]),
 		Version:        binary.NativeEndian.Uint16(s.data[HdrOffVersion:]),
-		Reserved2:  binary.NativeEndian.Uint16(s.data[HdrOffReserved2:]),
+		Reserved2:      binary.NativeEndian.Uint16(s.data[HdrOffReserved2:]),
 		PointCount:     binary.NativeEndian.Uint32(s.data[HdrOffPointCount:]),
 		MaxPoints:      binary.NativeEndian.Uint32(s.data[HdrOffMaxPoints:]),
 		GlobalWriteSeq: binary.NativeEndian.Uint64(s.data[HdrOffGlobalWriteSeq:]),
@@ -283,7 +323,7 @@ func ReadHeaderFromPath(path string) (HeaderInfo, error) {
 	return HeaderInfo{
 		Magic:          binary.NativeEndian.Uint32(data[HdrOffMagic:]),
 		Version:        binary.NativeEndian.Uint16(data[HdrOffVersion:]),
-		Reserved2:  binary.NativeEndian.Uint16(data[HdrOffReserved2:]),
+		Reserved2:      binary.NativeEndian.Uint16(data[HdrOffReserved2:]),
 		PointCount:     binary.NativeEndian.Uint32(data[HdrOffPointCount:]),
 		MaxPoints:      binary.NativeEndian.Uint32(data[HdrOffMaxPoints:]),
 		GlobalWriteSeq: binary.NativeEndian.Uint64(data[HdrOffGlobalWriteSeq:]),

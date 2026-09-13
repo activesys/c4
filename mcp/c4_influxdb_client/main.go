@@ -27,6 +27,7 @@ import (
 
 	"c4/mcp/internal/protocol"
 	"c4/mcp/internal/shm"
+	"c4/mcp/internal/transport"
 )
 
 // ──────────────────────────────────────────────
@@ -76,15 +77,15 @@ type pointMapping struct {
 // ──────────────────────────────────────────────
 
 type instanceState struct {
-	cfg         influxInstance
-	points      []pointMapping
-	lastSeen    map[int]uint64
-	buffer      []string
-	lastFlush   time.Time
-	httpClient  *http.Client
-	quit        chan struct{}
-	wg          sync.WaitGroup
-	writeErrors uint64
+	cfg          influxInstance
+	points       []pointMapping
+	lastSeen     map[int]uint64
+	buffer       []string
+	lastFlush    time.Time
+	httpClient   *http.Client
+	quit         chan struct{}
+	wg           sync.WaitGroup
+	writeErrors  uint64
 	itemsSkipped uint64
 }
 
@@ -115,7 +116,8 @@ func loadConfig(configPath string) ([]influxInstance, error) {
 
 	section, ok := fullCfg["c4_influxdb_client"]
 	if !ok {
-		return nil, fmt.Errorf("CONFIG_PARSE_ERROR: 'c4_influxdb_client' section not found in config")
+		/* 段缺失＝零实例期望（c4_architecture.md §3.3.1 空配置段语义），不是错误 */
+		return nil, nil
 	}
 
 	rawJSON, _ := json.Marshal(section)
@@ -795,8 +797,9 @@ func runInstance(ist *instanceState, shmData []byte) {
 // ──────────────────────────────────────────────
 
 func startHandler(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	/* ALREADY_RUNNING 是一等成功路径结果（isError=false）：不重载配置、不中断数据路径 */
 	if state.started.Load() {
-		return newError("ALREADY_RUNNING: start has already been called and service is running, call stop first"), nil
+		return newResult("ALREADY_RUNNING: service is already running, no action taken"), nil
 	}
 
 	var args map[string]any
@@ -948,7 +951,9 @@ func main() {
 		stopHandler,
 	)
 
-	if err := server.Run(context.Background(), &mcp.StdioTransport{}); err != nil {
+	/* 常驻模式为默认（Unix socket，进程启动零实例零 attach）；stdio 经 --stdio 或
+	   管道 stdin 保留（Agent / pytest harness 测试脚手架） */
+	if err := transport.Run("c4_influxdb_client", server); err != nil {
 		log.Fatal(err)
 	}
 }

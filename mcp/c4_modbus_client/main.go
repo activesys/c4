@@ -22,6 +22,7 @@ import (
 
 	"c4/mcp/internal/protocol"
 	"c4/mcp/internal/shm"
+	"c4/mcp/internal/transport"
 )
 
 // ──────────────────────────────────────────────
@@ -132,7 +133,8 @@ func loadConfig(configPath string) ([]modbusInstance, error) {
 
 	section, ok := fullCfg["c4_modbus_client"]
 	if !ok {
-		return nil, fmt.Errorf("CONFIG_PARSE_ERROR: 'c4_modbus_client' section not found in config")
+		/* 段缺失＝零实例期望（c4_architecture.md §3.3.1 空配置段语义），不是错误 */
+		return nil, nil
 	}
 
 	rawJSON, _ := json.Marshal(section)
@@ -717,8 +719,9 @@ func runClient(ist *instanceState, shmData []byte) {
 // ──────────────────────────────────────────────
 
 func startHandler(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	/* ALREADY_RUNNING 是一等成功路径结果（isError=false）：不重载配置、不中断数据路径 */
 	if state.started.Load() {
-		return newError("ALREADY_RUNNING: start has already been called and service is running, call stop first"), nil
+		return newResult("ALREADY_RUNNING: service is already running, no action taken"), nil
 	}
 
 	var args map[string]any
@@ -748,9 +751,9 @@ func startHandler(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolR
 		return newError(err.Error()), nil
 	}
 
+	/* 返回时机语义（c4_architecture.md §3.3.1）：只启动 goroutine，不等待 TCP 连接建立；
+	   连接失败属运行时事件，由各实例的 T0 后台重拨处理，不作为 start 错误 */
 	var instancesState []*instanceState
-	var lastErr string
-
 	for _, cfg := range instances {
 		var points []*pointMapping
 		for _, pt := range cfg.Points {
@@ -770,24 +773,7 @@ func startHandler(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolR
 			batches: buildBatches(points, cfg.CoilsQuantityMax, cfg.RegistersQuantityMax),
 			quit:    make(chan struct{}),
 		}
-
-		conn, err := net.DialTimeout("tcp", ist.address(), time.Duration(cfg.T0)*time.Second)
-		if err != nil {
-			lastErr = fmt.Sprintf("CONNECT_FAILED: connect to %s failed: %v", ist.address(), err)
-			break
-		}
-		ist.conn = conn
-
 		instancesState = append(instancesState, ist)
-	}
-
-	if lastErr != "" {
-		for _, ist := range instancesState {
-			ist.closeConn()
-		}
-		unix.Munmap(shmData)
-		unix.Close(shmFd)
-		return newError(lastErr), nil
 	}
 
 	for _, ist := range instancesState {
@@ -878,7 +864,9 @@ func main() {
 		stopHandler,
 	)
 
-	if err := server.Run(context.Background(), &mcp.StdioTransport{}); err != nil {
+	/* 常驻模式为默认（Unix socket，进程启动零实例零 attach）；stdio 经 --stdio 或
+	   管道 stdin 保留（Agent / pytest harness 测试脚手架） */
+	if err := transport.Run("c4_modbus_client", server); err != nil {
 		log.Fatal(err)
 	}
 }

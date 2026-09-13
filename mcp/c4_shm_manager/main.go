@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"math"
@@ -13,6 +14,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"c4/mcp/internal/shm"
+	"c4/mcp/internal/transport"
 )
 
 // ASFP2 数据类型枚举（与 c4/mcp/internal/protocol 一致，此处本地化避免跨模块依赖）
@@ -39,6 +41,16 @@ type serverState struct {
 	sm                *shm.SharedMemory
 }
 
+// attach replaces the cached shm handle. The previous handle (if any) is
+// closed — never unlinked: 运行期不销毁 shm，销毁仅发生在整机重启与卸载脚本。
+func (s *serverState) attach(sm *shm.SharedMemory, instanceID string) {
+	if s.sm != nil && s.sm != sm {
+		s.sm.Close()
+	}
+	s.sm = sm
+	s.currentInstanceID = instanceID
+}
+
 type CreateShmInput struct {
 	InstanceID string `json:"instance_id" jsonschema:"required"`
 	ConfigPath string `json:"config_path,omitempty" jsonschema:"optional,absolute path to config.json for config-based sizing"`
@@ -62,32 +74,67 @@ func createShmHandler(ctx context.Context, req *mcp.CallToolRequest, input Creat
 		return newError("INVALID_INSTANCE_ID: instance_id must match ^c4_[a-zA-Z0-9]+$"), nil, nil
 	}
 
-	var sm *shm.SharedMemory
-	var err error
-
-	if input.ConfigPath != "" {
-		if _, statErr := os.Stat(input.ConfigPath); statErr == nil {
-			if isDefaultConfigContent(input.ConfigPath) {
-				sm, err = shm.Create(input.InstanceID, shm.DefaultMaxPoints)
-			} else {
-				sm, err = createFromConfig(input.ConfigPath, input.InstanceID)
+	/* 步骤 1：配置分类（CONFIG_MISSING_SECTION / CONFIG_PARSE_ERROR 与段是否存在无关） */
+	configPath := input.ConfigPath
+	var (
+		config    map[string]any
+		writers   []string
+		readers   []string
+		hasConfig bool
+	)
+	if configPath != "" {
+		if _, statErr := os.Stat(configPath); statErr == nil && !isDefaultConfigContent(configPath) {
+			cfg, w, r, err := loadConfigSection(configPath)
+			if err != nil {
+				return newError(err.Error()), nil, nil
 			}
-		} else {
-			sm, err = shm.Create(input.InstanceID, shm.DefaultMaxPoints)
+			config, writers, readers, hasConfig = cfg, w, r, true
 		}
-	} else {
-		sm, err = shm.Create(input.InstanceID, shm.DefaultMaxPoints)
 	}
-	if err != nil {
+
+	/* 步骤 2：§1.3 幂等探测附加——段已存在且 magic/版本校验通过 → 附加该段并以
+	   state=1 为权威源重建 point_count，返回 success（不重复分配、不回填配置） */
+	sm, err := shm.Open(shm.ShmPath(input.InstanceID))
+	if err == nil {
+		rebuildPointCount(sm)
+		state.attach(sm, input.InstanceID)
+		return newResult("success"), nil, nil
+	}
+	if !errors.Is(err, shm.ErrMissing) {
+		/* SHM_CORRUPTED 拒绝并报告，不做 shm_unlink + 重建（运行期不销毁 shm） */
 		return newError(err.Error()), nil, nil
 	}
 
-	if state.sm != nil {
-		state.sm.Close()
+	/* 步骤 3：段不存在 → 创建分支 */
+	if hasConfig {
+		if len(writers) == 0 && len(readers) == 0 {
+			hasConfig = false // 均为空 → 视为无配置，创建默认 10 万点
+		} else if len(writers) == 0 || len(readers) == 0 {
+			return newError("CONFIG_MISSING_SECTION: 'c4_shm_manager.writer' or 'c4_shm_manager.reader' is empty"), nil, nil
+		}
 	}
-	state.sm = sm
-	state.currentInstanceID = input.InstanceID
 
+	var created *shm.SharedMemory
+	if hasConfig {
+		created, err = createFromConfig(configPath, input.InstanceID, config, writers, readers)
+	} else {
+		created, err = shm.Create(input.InstanceID, shm.DefaultMaxPoints)
+	}
+	if err != nil {
+		/* 并发竞态护栏：探测与创建之间段被并发创建 → 附加已有段（正常流程不出现） */
+		if errors.Is(err, shm.ErrExists) {
+			sm, aerr := shm.Open(shm.ShmPath(input.InstanceID))
+			if aerr != nil {
+				return newError(aerr.Error()), nil, nil
+			}
+			rebuildPointCount(sm)
+			state.attach(sm, input.InstanceID)
+			return newResult("success"), nil, nil
+		}
+		return newError(err.Error()), nil, nil
+	}
+
+	state.attach(created, input.InstanceID)
 	return newResult("success"), nil, nil
 }
 
@@ -172,38 +219,19 @@ func countPoints(config map[string]any, writers []string) (int, error) {
 	return total, nil
 }
 
-func createFromConfig(configPath string, instanceID string) (*shm.SharedMemory, error) {
-	config, writers, readers, err := loadConfigSection(configPath)
-	if err != nil {
-		return nil, err
-	}
-
-	if len(writers) == 0 && len(readers) == 0 {
-		return shm.Create(instanceID, shm.DefaultMaxPoints)
-	}
-	if len(writers) == 0 || len(readers) == 0 {
-		return nil, fmt.Errorf("CONFIG_MISSING_SECTION: 'c4_shm_manager.writer' or 'c4_shm_manager.reader' is empty")
-	}
-
+func createFromConfig(configPath string, instanceID string, config map[string]any, writers, readers []string) (*shm.SharedMemory, error) {
 	totalPoints, err := countPoints(config, writers)
 	if err != nil {
 		return nil, err
 	}
 
-	if totalPoints == 0 {
-		sm, err := shm.Create(instanceID, shm.DefaultMaxPoints)
-		if err != nil {
-			return nil, err
-		}
-		return sm, nil
-	}
-
 	maxPoints := totalPoints * 2
-	sm, err := shm.Create(instanceID, maxPoints)
-	if err != nil {
-		return nil, err
+	if maxPoints == 0 {
+		maxPoints = shm.DefaultMaxPoints
 	}
 
+	/* §2.2 分配算法先在内存完成——配置级错误（DUPLICATE_KEY / UNKNOWN_READER_KEY）
+	   在任何 shm 侧效应发生之前返回，不遗留半初始化段，也无需 unlink 回滚 */
 	keyMap := make(map[string]int)
 	nextID := 1
 	for _, wType := range writers {
@@ -230,7 +258,6 @@ func createFromConfig(configPath string, instanceID string) (*shm.SharedMemory, 
 				pointID, _ := ptMap["id"].(string)
 				key := serviceID + "." + pointID
 				if _, exists := keyMap[key]; exists {
-					rollback(sm)
 					return nil, fmt.Errorf("DUPLICATE_KEY: key '%s' already assigned", key)
 				}
 				keyMap[key] = nextID
@@ -263,7 +290,6 @@ func createFromConfig(configPath string, instanceID string) (*shm.SharedMemory, 
 				key, _ := ptMap["key"].(string)
 				pid, exists := keyMap[key]
 				if !exists {
-					rollback(sm)
 					return nil, fmt.Errorf("UNKNOWN_READER_KEY: reader key '%s' not found in any writer", key)
 				}
 				ptMap["shm_id"] = float64(pid)
@@ -271,16 +297,18 @@ func createFromConfig(configPath string, instanceID string) (*shm.SharedMemory, 
 		}
 	}
 
-	sm.SetHeaderUint32(8, uint32(totalPoints))
+	sm, err := shm.Create(instanceID, maxPoints)
+	if err != nil {
+		return nil, err
+	}
+	sm.SetHeaderUint32(shm.HdrOffPointCount, uint32(totalPoints))
 
 	out, err := json.MarshalIndent(config, "", "  ")
 	if err != nil {
-		rollback(sm)
 		return nil, fmt.Errorf("CONFIG_WRITE_FAILED: marshal failed: %v", err)
 	}
 
 	if err := writeConfigAtomic(configPath, out); err != nil {
-		rollback(sm)
 		return nil, err
 	}
 
@@ -312,10 +340,6 @@ func writeConfigAtomic(configPath string, out []byte) error {
 		return fmt.Errorf("CONFIG_WRITE_FAILED: rename failed: %w", err)
 	}
 	return nil
-}
-
-func rollback(sm *shm.SharedMemory) {
-	sm.Unlink()
 }
 
 func toStringSlice(v any) ([]string, bool) {
@@ -361,10 +385,16 @@ func queryStatusHandler(ctx context.Context, req *mcp.CallToolRequest) (*mcp.Cal
 	return newResult(string(data)), nil
 }
 
+// attachExistingShm attaches the shm object for instanceID inside a tool call
+// (进程重启后不主动 attach shm —— c4_shm_manager.md §1.3). The segment must
+// already exist: adjust_shm does not create (that is create_shm's job).
 func attachExistingShm(instanceID string) (*shm.SharedMemory, error) {
 	sm, err := shm.Open(shm.ShmPath(instanceID))
 	if err != nil {
-		return nil, fmt.Errorf("SHM_NOT_CREATED: shared memory not initialized, call create_shm first")
+		if errors.Is(err, shm.ErrMissing) {
+			return nil, fmt.Errorf("SHM_NOT_CREATED: shared memory not initialized, call create_shm first")
+		}
+		return nil, err
 	}
 	return sm, nil
 }
@@ -374,12 +404,12 @@ func adjustShmHandler(ctx context.Context, req *mcp.CallToolRequest, input Adjus
 		return newError("INVALID_INSTANCE_ID: instance_id must match ^c4_[a-zA-Z0-9]+$"), nil, nil
 	}
 
-	if state.sm == nil {
+	if state.sm == nil || state.currentInstanceID != input.InstanceID {
 		sm, err := attachExistingShm(input.InstanceID)
 		if err != nil {
 			return newError(err.Error()), nil, nil
 		}
-		state.sm = sm
+		state.attach(sm, input.InstanceID)
 		rebuildPointCount(sm)
 	}
 
@@ -757,7 +787,9 @@ func main() {
 		readPointsHandler,
 	)
 
-	if err := server.Run(context.Background(), &mcp.StdioTransport{}); err != nil {
+	/* 常驻模式为默认（Unix socket，进程启动零实例零 attach）；stdio 经 --stdio 或
+	   管道 stdin 保留（Agent / pytest harness 测试脚手架） */
+	if err := transport.Run("c4_shm_manager", server); err != nil {
 		log.Fatal(err)
 	}
 }

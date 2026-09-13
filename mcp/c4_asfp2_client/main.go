@@ -23,6 +23,7 @@ import (
 	"c4/mcp/internal/logger"
 	"c4/mcp/internal/protocol"
 	"c4/mcp/internal/shm"
+	"c4/mcp/internal/transport"
 )
 
 // ──────────────────────────────────────────────
@@ -167,7 +168,8 @@ func loadConfig(configPath string) ([]clientInstance, error) {
 
 	section, ok := fullCfg["c4_asfp2_client"]
 	if !ok {
-		return nil, fmt.Errorf("CONFIG_PARSE_ERROR: 'c4_asfp2_client' section not found in config")
+		/* 段缺失＝零实例期望（c4_architecture.md §3.3.1 空配置段语义），不是错误 */
+		return nil, nil
 	}
 
 	rawJSON, _ := json.Marshal(section)
@@ -610,6 +612,7 @@ func (ist *instanceState) markConnDead(conn net.Conn, reason string) {
 			"reconnect_after_s", ist.t0.Seconds())
 	}
 }
+
 // reconnectAfterError is the single reconnect path, invoked by sendRound once
 // T0 has elapsed since the link went down (§T0): dials once; on failure the
 // T0 window restarts so the next attempt waits a full period. Reuses the
@@ -925,8 +928,9 @@ type ClientStartInput struct {
 }
 
 func startHandler(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	/* ALREADY_RUNNING 是一等成功路径结果（isError=false）：不重载配置、不中断数据路径 */
 	if state.started.Load() {
-		return newError("ALREADY_RUNNING: start has already been called and service is running, call stop first"), nil
+		return newResult("ALREADY_RUNNING: service is already running, no action taken"), nil
 	}
 
 	var args map[string]any
@@ -961,12 +965,7 @@ func startHandler(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolR
 	}
 	log.Info("config_loaded", "instances", len(instances), "points_total", pointsTotal)
 
-	// Empty instances array is valid — start succeeds with no senders
-	if len(instances) == 0 {
-		state.started.Store(true)
-		return newResult("success"), nil
-	}
-
+	/* 空实例列表与段缺失等价（零实例期望）：仍附加共享内存，仅无发送实例 */
 	shmData, shmFd, err := attachShm(instanceID)
 	if err != nil {
 		log.Error("shm_attach_failed", "instance_id", instanceID, "err", err.Error())
@@ -1169,7 +1168,9 @@ func main() {
 		stopHandler,
 	)
 
-	if err := server.Run(context.Background(), &mcp.StdioTransport{}); err != nil {
+	/* 常驻模式为默认（Unix socket，进程启动零实例零 attach）；stdio 经 --stdio 或
+	   管道 stdin 保留（Agent / pytest harness 测试脚手架） */
+	if err := transport.Run("c4_asfp2_client", server); err != nil {
 		stdlog.Fatal(err)
 	}
 }
