@@ -2,10 +2,10 @@
 // 设计：agent.md §3.6.2（数据读取通道）——Agent 不直接读 shm，
 // 所有读取经 c4_shm_manager 的 read_points MCP 工具（确定性调用，不经 LLM）。
 
-import type { MultiServerMCPClient } from "@langchain/mcp-adapters";
-import { callToolViaMultiClient } from "../executor/executor.js";
+import type { C4McpManager } from "../mcp/client.js";
+import { callToolViaManager } from "../executor/executor.js";
 
-const SHM_SERVER_NAME = "shm";
+const SHM_SERVER_NAME = "c4_shm_manager";
 
 /** read_points 单点读取结果（c4_shm_manager.md §3.3 契约） */
 export interface ReadEntry {
@@ -35,14 +35,14 @@ export interface ReadPointsResult {
  * 单点 contention 不抛异常，在返回值的 errors 中。
  */
 export async function readPoints(
-    multiClient: MultiServerMCPClient,
+    manager: C4McpManager,
     shmIds: number[],
 ): Promise<ReadPointsResult> {
     if (shmIds.length === 0) {
         return { reads: [], errors: [] };
     }
-    const text = await callToolViaMultiClient(
-        multiClient,
+    const text = await callToolViaManager(
+        manager,
         SHM_SERVER_NAME,
         "read_points",
         { shm_ids: shmIds },

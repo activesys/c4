@@ -4,14 +4,19 @@
 
 import { Router, type Request, type Response } from "express";
 import { getRegistry } from "../../registry/registry.js";
+import type { ServiceAliveState } from "../../mcp/client.js";
 
 // ── Router Factory ────────────────────────────────────────
 /**
  * Create the services router.
  *
+ * @param aliveProvider MCP 存活状态 provider（连接状态推导）；提供时每个服务条目
+ *   附带 alive/degraded 字段（c4_architecture.md §3.1.1，供 Web 展示与告警）
  * @returns Express Router handling GET /api/services
  */
-export function createServicesRouter(): Router {
+export function createServicesRouter(
+    aliveProvider?: () => ServiceAliveState[],
+): Router {
     const router = Router();
 
     /**
@@ -35,6 +40,24 @@ export function createServicesRouter(): Router {
         }
 
         const catalog = registry.getServiceCatalogEntries();
+
+        if (aliveProvider) {
+            const alive = new Map(
+                aliveProvider().map((a) => [a.service_type, a]),
+            );
+            const withAlive = catalog.map((entry) => {
+                const st = alive.get(entry.service_type);
+                return st
+                    ? { ...entry, alive: st.alive, degraded: st.degraded }
+                    : entry;
+            });
+            res.status(200).json({
+                success: true,
+                services: withAlive,
+                count: withAlive.length,
+            });
+            return;
+        }
 
         res.status(200).json({
             success: true,

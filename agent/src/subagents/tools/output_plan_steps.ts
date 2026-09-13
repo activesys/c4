@@ -657,7 +657,51 @@ export function createOutputPlanStepsTool(
                         }
                     }
                     for (const p of c.points ?? []) {
-                        const pid = (p as unknown as Record<string, unknown>)["id"];
+                        const rec = p as unknown as Record<string, unknown>;
+                        // 点名归一：change 点缺 id/key 但带 name 时，name 即既有点的
+                        // point.id（配置点表只存 id 不存 name）——与 devices 路径的
+                        // name→id 转换一致，否则 merge 会把它误判为新点
+                        const has_id = typeof rec["id"] === "string" && (rec["id"] as string).length > 0;
+                        const has_key = typeof rec["key"] === "string" && (rec["key"] as string).length > 0;
+                        const name_raw =
+                            typeof rec["name"] === "string" ? (rec["name"] as string).trim() : "";
+                        if (
+                            !has_id &&
+                            !has_key &&
+                            name_raw !== "" &&
+                            IDENTIFIER_RE.test(name_raw) &&
+                            name_raw.length <= MAX_IDENTIFIER_LENGTH
+                        ) {
+                            rec["id"] = name_raw;
+                            delete rec["name"];
+                        }
+                        // writer 点仍无 id → 按身份字段生成（与 devices 路径一致）；
+                        // 身份字段不全且无点名 → 可读报错，禁止产出无名点
+                        if (
+                            !has_id &&
+                            !has_key &&
+                            (rec["id"] === undefined || rec["id"] === null)
+                        ) {
+                            const entry = registry.queryRegistry(c.service_type);
+                            const identity_fields =
+                                entry?.point_schema.identity_fields ?? [];
+                            if (identity_fields.length > 0) {
+                                const ikey = identity_field_key(
+                                    rec,
+                                    identity_fields,
+                                );
+                                if (ikey === null) {
+                                    return JSON.stringify({
+                                        success: false,
+                                        error:
+                                            `变更点缺少身份字段（${identity_fields.join(", ")}）且未提供点名，无法定位或生成点：` +
+                                            JSON.stringify(rec),
+                                    });
+                                }
+                                rec["id"] = generate_point_id(rec, identity_fields);
+                            }
+                        }
+                        const pid = rec["id"];
                         if (typeof pid === "string" && pid.length > 0) {
                             const err = identifier_error(pid, "point.id");
                             if (err) {

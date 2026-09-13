@@ -1,19 +1,24 @@
 // c4/agent/src/index.ts — Agent 入口点
-// 根据 agent.md §3.2.3 + §5.1 实现启动流程：
+// 根据 agent.md §3.2.3 + c4_architecture.md §3.1.2 实现启动流程：
 //   1. 读取 ~/.local/c4/agent.json → Zod 校验
 //   2. McpServiceRegistry.loadFromDirectory()
 //   3. 构建 service_catalog → 注入 SuperWorker 系统提示
-//   4. 连接 c4_shm_manager，获取 MCP 工具
+//   4. C4McpManager：连 Unix socket（env C4_SOCK_DIR，默认 /run/c4）——从不拉起 MCP 进程
 //   5. createC4Agent（SuperWorker 工厂）
 //   6. 启动 Express 服务器
-//   7. 启动恢复：create_shm；若 ~/.local/c4/config.json 存在，无条件 Stop-Start
+//   7. 四级瀑布启动恢复：L0 config 健康 → L1 连接 → L2 收敛 → L3 监控接续
+//      （收敛不做全量 Stop-Start：无在途事务标记时仅 start，ALREADY_RUNNING 无动作）
 
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import * as path from "node:path";
 import { createApp } from "./server/app.js";
-import { C4McpManager } from "./mcp/client.js";
+import {
+    C4McpManager,
+    SHM_SERVICE_TYPE,
+    resolveSockDir,
+} from "./mcp/client.js";
 import {
     McpServiceRegistry,
 } from "./registry/registry.js";
@@ -23,15 +28,19 @@ import {
 } from "./registry/abbr_registry.js";
 import {
     execute_stop_and_start,
-    type McpServiceClient,
-    type ShmManagerClient,
-    type RegistryLookup,
+    data_service_types,
     McpServiceClientAdapter,
     ShmManagerClientAdapter,
-    type MCPClientHandle,
+    is_success_result,
 } from "./executor/executor.js";
-import { MultiServerMCPClient } from "@langchain/mcp-adapters";
 import { translateError } from "./mcp/tools.js";
+import {
+    load_valid_config,
+    read_pending_marker,
+    restore_prev1,
+    clear_pending_marker,
+} from "./executor/transaction.js";
+import { with_config_lock } from "./executor/single_flight.js";
 import { createC4Agent } from "./super_worker/super_worker.js";
 import { DisplayService } from "./display/session.js";
 import { createDisplayRouter } from "./display/routes.js";
@@ -40,13 +49,11 @@ import { AgentLogger, type AgentLogLevel } from "./logging/agent_logger.js";
 import type {
     AgentConfig,
     SystemConfig,
-    MCPInstanceConfig,
     AgentPhase,
     AgentStateSummary as TypesAgentStateSummary,
 } from "./types/index.js";
 import type { C4Agent, AgentStateProvider, AgentStateWriter } from "./server/types.js";
 import { z } from "zod";
-import type { StructuredTool } from "@langchain/core/tools";
 
 // ── Agent Config Zod Schema ───────────────────────────────
 const AgentConfigSchema: z.ZodType<AgentConfig> = z.object({
@@ -177,179 +184,208 @@ class Logger {
 }
 
 // ── Registry Lookup Adapter ───────────────────────────────
-class RegistryLookupAdapter implements RegistryLookup {
+class RegistryLookupAdapter {
     constructor(private _registry: McpServiceRegistry) {}
 
     get_entry(service_type: string) {
         return this._registry.queryRegistry(service_type) ?? undefined;
     }
+
+    service_types(): string[] {
+        return this._registry.getServiceTypes();
+    }
 }
 
-// ── Startup Recovery ──────────────────────────────────────
+// ── Four-Level Startup Waterfall（c4_architecture.md §3.1.2）──
+
+/** c4_shm_manager socket 等待上限（L1 硬前置挂起点；超时报告后放弃数据路径收敛） */
+const SHM_WAIT_TIMEOUT_MS = 300_000;
+
 /**
- * Execute unconditional Stop-Start at startup (§3.2.3).
+ * 四级瀑布：L0 config 健康 → L1 连接 → L2 收敛 → L3 监控接续。
  *
- * Flow: start c4_shm_manager → create_shm → (if ~/.local/c4/config.json exists)
- * spawn + connect all configured MCP services, then execute stop → adjust_shm → start.
+ * 收敛按差异最小动作：无在途事务标记时仅 start（ALREADY_RUNNING 无动作，
+ * 零中断）；只有涉及已回滚事务的服务才执行完整 Stop-Start（stop → adjust_shm →
+ * start，以恢复后的配置执行，确定性全量重载）。
  *
- * If config.json is missing: skip (no data path services to recover).
- *
- * @param config - Agent configuration
- * @param shmManagerBridge - Connected c4_shm_manager bridge
- * @param logger - Logger instance
+ * 全程持有配置事务单飞锁——瀑布收敛期间到达的配置变更请求在会话层被拒绝。
  */
-async function runStartupRecovery(
+async function runStartupWaterfall(
     config: AgentConfig,
     mcpManager: C4McpManager,
     registry: McpServiceRegistry,
     logger: Logger,
     stateTracker: AgentStateWriter,
 ): Promise<void> {
-    const configPath = config.shm_manager.config_path;
-
-    const shmClient = new ShmManagerClientAdapter(
-        mcpManager.getMultiClient(),
-        "shm",
-        config.instance_id,
-        configPath,
-    );
-
     try {
-        const createResult = await shmClient.create_shm();
-        if (createResult === "success") {
-            logger.info("启动恢复: create_shm 成功，共享内存已创建");
-        } else {
-            logger.info(`启动恢复: create_shm 结果: ${createResult}（共享内存已存在时属正常）`);
-        }
-    } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : String(err);
-        logger.warn(`启动恢复: create_shm 调用异常: ${msg}`);
-    }
+        await with_config_lock(async () => {
+            const configPath = config.shm_manager.config_path;
+            const registryLookup = new RegistryLookupAdapter(registry);
+            let l0Report: string | null = null;
+            let rollbackServices: Set<string> | null = null;
 
-    if (!existsSync(configPath)) {
-        logger.info("启动恢复: config.json 不存在，跳过（等待首次接入）");
-        return;
-    }
-
-    const bakPath = configPath + ".bak";
-
-    let systemConfig: SystemConfig;
-    try {
-        const raw = await readFile(configPath, "utf-8");
-        systemConfig = JSON.parse(raw) as SystemConfig;
-    } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : String(err);
-        logger.warn(`启动恢复: config.json 损坏: ${msg}`);
-        if (existsSync(bakPath)) {
-            try {
-                const bakRaw = await readFile(bakPath, "utf-8");
-                systemConfig = JSON.parse(bakRaw) as SystemConfig;
-                await writeFile(configPath, bakRaw, "utf-8");
-                logger.info("启动恢复: 已从 config.json.bak 恢复 config.json");
-            } catch (bakErr: unknown) {
-                const bakMsg = bakErr instanceof Error ? bakErr.message : String(bakErr);
-                logger.warn(`启动恢复: config.json.bak 也无效: ${bakMsg}，等同首次启动`);
-                return;
+            // ── L0: config.json 健康（parse + schema）──
+            let systemConfig: SystemConfig | null = null;
+            const marker = await read_pending_marker(configPath);
+            if (marker !== null) {
+                // 在途事务标记 → 已开始的变更一律作废回滚、不续做（C4_RS_00066）
+                const restored = await restore_prev1(configPath);
+                await clear_pending_marker(configPath);
+                if (restored) {
+                    l0Report = "上次接入变更未完成，已回滚，接入不成功";
+                    logger.warn(`L0: ${l0Report}（涉及服务: ${marker.services.join(", ") || "全部"}）`);
+                    // 涉及已回滚事务的服务 → 完整 Stop-Start；标记未列明服务 → 全部
+                    rollbackServices = new Set(
+                        marker.services.length > 0
+                            ? marker.services
+                            : ["*"],
+                    );
+                } else {
+                    // .prev 不可用（损坏/缺失）→ 不得覆盖 config.json，报告异常等待人工介入；
+                    // 首次接入尚无 .prev 时崩溃于 rename 之后 → 保留新 config.json，
+                    // 报告「上次变更结果未知，请核验」
+                    l0Report = existsSync(`${configPath}.prev.1`)
+                        ? "上次接入变更出现异常，配置未能恢复，系统等待人工介入"
+                        : "上次接入变更结果未知，请核验当前配置";
+                    logger.error(`L0: 恢复 .prev.1 失败——保留当前 config.json，${l0Report}`);
+                }
             }
-        } else {
-            logger.info("启动恢复: .bak 不存在，等同首次启动");
-            return;
-        }
-    }
 
-    const dataServiceTypes: string[] = [];
-    for (const key of Object.keys(systemConfig)) {
-        if (key === "c4_shm_manager") continue;
-        const instances = systemConfig[key];
-        if (Array.isArray(instances) && instances.length > 0) {
-            dataServiceTypes.push(key);
-        }
-    }
+            if (existsSync(configPath)) {
+                systemConfig = await load_valid_config(configPath);
+                if (systemConfig === null) {
+                    // config.json 损坏（无标记）→ 恢复 .prev → 报告接入不成功
+                    const restored = await restore_prev1(configPath);
+                    if (restored) {
+                        systemConfig = await load_valid_config(configPath);
+                        l0Report = l0Report ?? "检测到配置损坏，已恢复到上一版本";
+                        logger.warn(`L0: config.json 损坏，已从 config.json.prev.1 恢复`);
+                    } else {
+                        l0Report =
+                            "配置文件损坏且无法恢复，系统等待人工介入（保留现状，未做任何修改）";
+                        logger.error(`L0: config.json 损坏且 .prev.1 不可用——${l0Report}`);
+                    }
+                }
+                if (systemConfig !== null) {
+                    logger.info("L0: config.json 健康（parse + schema 通过），获得权威地位（期望状态声明）");
+                }
+            } else {
+                logger.info("L0: config.json 不存在——等待首次接入（无数据路径服务）");
+            }
 
-    if (dataServiceTypes.length === 0) {
-        logger.info("启动恢复: config.json 存在但无数据路径服务，跳过停止/启动");
-        try {
-            const result = await shmClient.adjust_shm();
-            logger.info(`启动恢复: adjust_shm 完成: ${result}`);
-        } catch (err: unknown) {
-            const msg = err instanceof Error ? err.message : String(err);
-            logger.warn(`启动恢复: adjust_shm 失败: ${msg}`);
-        }
-        return;
-    }
+            // ── L1: 连接（逐服务连 Unix socket + MCP initialize；只连接、从不拉起进程）──
+            await mcpManager.connectAll();
+            for (const st of mcpManager.serviceTypes()) {
+                if (mcpManager.isConnected(st)) {
+                    logger.debug(`L1: 已连接 ${st}`);
+                } else {
+                    logger.warn(`L1: ${st} 暂不可连，标记降级、退避重试（不阻塞其余服务）`);
+                }
+            }
+            // c4_shm_manager 是唯一的全局前置：socket 不可连时挂起全部数据服务收敛、
+            // 退避等待（不得以 SHM_OPEN_FAILED 告警风暴的形式失败）
+            const shmReady = await mcpManager.waitShmConnected(SHM_WAIT_TIMEOUT_MS);
+            if (!shmReady) {
+                l0Report =
+                    l0Report ??
+                    "基础数据服务连接超时，数据接入暂时不可用，请检查部署后重启";
+                logger.error(`L1: ${SHM_SERVICE_TYPE} 在 ${SHM_WAIT_TIMEOUT_MS}ms 内不可连——放弃本轮数据路径收敛`);
+            } else {
+                logger.info("L1: 连接完成（c4_shm_manager 就绪）");
+            }
 
-    const registryLookup = new RegistryLookupAdapter(registry);
-    const dataClients: McpServiceClient[] = [];
-    const tempMultiClients: MultiServerMCPClient[] = [];
+            // ── L2: 收敛（信任 MCP 契约返回，不做独立的状态探测）──
+            if (shmReady) {
+                // 对账 shm：不存在则 create_shm（幂等 create-or-attach，agent.md §3.2.3；
+                // SHM_CORRUPTED → 拒绝并报告，不做自愈——c4_deployment.md §6.3）
+                const shmClient = new ShmManagerClientAdapter(
+                    mcpManager,
+                    config.instance_id,
+                    configPath,
+                );
+                try {
+                    const createResult = await shmClient.create_shm();
+                    if (is_success_result(createResult)) {
+                        logger.info("L2: create_shm 完成（幂等 create-or-attach）");
+                    } else {
+                        logger.error(`L2: create_shm 失败: ${createResult}`);
+                        l0Report = l0Report ?? translateError(createResult);
+                    }
+                } catch (err: unknown) {
+                    const msg = err instanceof Error ? err.message : String(err);
+                    logger.error(`L2: create_shm 调用异常: ${msg}`);
+                    l0Report = l0Report ?? translateError(msg);
+                }
 
-    for (const svcType of dataServiceTypes) {
-        const entry = registryLookup.get_entry(svcType);
-        if (!entry) {
-            logger.warn(`启动恢复: 跳过 ${svcType}（Registry 中未找到注册信息）`);
-            continue;
-        }
+                if (systemConfig !== null) {
+                    const involvedAll = rollbackServices?.has("*") ?? false;
+                    for (const svcType of data_service_types(systemConfig)) {
+                        if (!mcpManager.isConnected(svcType)) {
+                            // 记录失败并保持降级，继续处理其余服务（§3.2.3 L2 / C4_RS_00242）
+                            logger.warn(`L2: ${svcType} 降级中，本轮跳过（记录失败，继续处理其余服务）`);
+                            l0Report = l0Report ??
+                                "部分数据服务暂时无法连接，已记录，待其恢复后自动接入";
+                            continue;
+                        }
+                        if (!registryLookup.get_entry(svcType)) {
+                            logger.warn(`L2: 跳过 ${svcType}（Registry 中未找到注册信息）`);
+                            continue;
+                        }
+                        const client = new McpServiceClientAdapter(
+                            mcpManager,
+                            svcType,
+                            config.instance_id,
+                            configPath,
+                        );
+                        try {
+                            if (rollbackServices !== null && (involvedAll || rollbackServices.has(svcType))) {
+                                // 涉及已回滚事务的服务 → 完整 Stop-Start（确定性全量重载）
+                                logger.info(`L2: ${svcType} 涉及已回滚事务，执行完整 Stop-Start`);
+                                const result = await execute_stop_and_start(
+                                    shmClient,
+                                    [client],
+                                    [client],
+                                    systemConfig,
+                                    configPath,
+                                );
+                                if (result.success) {
+                                    logger.info(`L2: ${svcType} Stop-Start 完成`);
+                                } else {
+                                    logger.error(`L2: ${svcType} Stop-Start 失败: ${result.abort_reason}`);
+                                    l0Report = l0Report ?? translateError(result.abort_reason ?? "");
+                                }
+                                continue;
+                            }
+                            const result = await client.start();
+                            if (result === "success") {
+                                logger.info(`L2: ${svcType} start 成功（此前为空白进程，实例已按当前配置拉起）`);
+                            } else {
+                                logger.error(`L2: ${svcType} start 失败: ${result}`);
+                                l0Report = l0Report ?? translateError(result);
+                            }
+                        } catch (err: unknown) {
+                            const msg = err instanceof Error ? err.message : String(err);
+                            logger.error(`L2: ${svcType} 收敛调用异常: ${msg}`);
+                            l0Report = l0Report ?? translateError(msg);
+                        }
+                    }
+                }
+            }
 
-        try {
-            const multiClient = new MultiServerMCPClient({
-                mcpServers: {
-                    [svcType]: {
-                        transport: "stdio" as const,
-                        command: entry.binary_path,
-                        args: [],
-                    },
-                },
-            });
-            tempMultiClients.push(multiClient);
+            // ── L3: 监控接续 ──
+            // 重建周期监控；服务存活状态＝连接状态推导（供页面展示与告警）——
+            // 由 C4McpManager 连接状态与 DisplayService 周期轮询承载
+            logger.info("L3: 监控接续（存活状态＝连接状态推导），瀑布收敛完成，Agent 就绪");
 
-            const client = new McpServiceClientAdapter(
-                null as unknown as MCPClientHandle,
-                svcType,
-                config.instance_id,
-                configPath,
-                multiClient,
-            );
-            dataClients.push(client);
-            logger.debug(`启动恢复: 已连接 ${svcType} (${entry.binary_path})`);
-        } catch (err: unknown) {
-            const msg = err instanceof Error ? err.message : String(err);
-            logger.warn(`启动恢复: 连接 ${svcType} 失败，将跳过: ${msg}`);
-        }
-    }
-
-    if (dataClients.length === 0) {
-        logger.info("启动恢复: 无可用数据路径 MCP 服务");
-        // 无数据路径服务也要确保 shm 附着——对点显示的 read_points 依赖附着态（agent.md §3.6.2）
-        try {
-            const adjustResult = await shmClient.adjust_shm();
-            logger.info(`启动恢复: adjust_shm 完成: ${adjustResult}`);
-        } catch (err: unknown) {
-            const msg = err instanceof Error ? err.message : String(err);
-            logger.warn(`启动恢复: adjust_shm 失败: ${msg}`);
-        }
-        for (const mc of tempMultiClients) {
-            try { await mc.close(); } catch { /* ignore */ }
-        }
-        return;
-    }
-
-    logger.info(`启动恢复: 无条件执行 Stop-Start（${dataClients.length} 个数据路径服务）`);
-
-    const result = await execute_stop_and_start(
-        shmClient,
-        dataClients,
-        systemConfig,
-        configPath,
-    );
-
-    if (result.success) {
-        logger.info(`启动恢复: Stop-Start 成功，${result.started_services.length} 个服务已启动`);
-    } else {
-        const reason = result.abort_reason ?? "未知原因";
-        logger.warn(`启动恢复: Stop-Start 失败: ${reason}`);
-        for (const f of result.failed_services) {
-            logger.error(`启动恢复: 服务 ${f.service_type} 启动失败: ${f.error}`);
-        }
-        stateTracker.setError(translateError(reason));
+            if (l0Report !== null) {
+                // 显式告知用户，不得静默（§3.1.2 崩溃恢复语义 / C4_RS_00066）
+                stateTracker.setError(l0Report);
+            }
+        });
+    } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.error(`启动瀑布异常: ${msg}`);
+        stateTracker.setError(`启动恢复出现问题: ${translateError(msg)}`);
     }
 }
 
@@ -435,6 +471,14 @@ async function main(): Promise<void> {
 
     // Apply logging level from config
     logger = new Logger(config.logging.level);
+
+    // 进程级兜底（独立服务模型，c4_architecture.md §3.1.1）：Agent 是常驻系统服务，
+    // 对话层异步链路的未观察拒绝（如图运行中止的 GraphRecursionError）不得使
+    // 进程退出——崩溃会中断 Web/对话能力，而 MCP 数据路径并不因此受益。
+    process.on("unhandledRejection", (reason: unknown) => {
+        const msg = reason instanceof Error ? reason.message : String(reason);
+        logger.error(`未处理的 Promise 拒绝（进程保持运行）: ${msg}`);
+    });
     logger.info(
         `配置加载成功: model=${config.model.provider}/${config.model.name}, ` +
         `server=${config.server.host}:${config.server.port}`,
@@ -445,42 +489,6 @@ async function main(): Promise<void> {
         config.logging.dir,
         (config.logging.agent_level ?? "debug") as AgentLogLevel,
     );
-
-    // ── Step 1.5: Config.json recovery (§3.2.3 step 2) ──
-    const dataConfigPath = config.shm_manager.config_path;
-    if (existsSync(dataConfigPath)) {
-        const bakPath = dataConfigPath + ".bak";
-        try {
-            const raw = await readFile(dataConfigPath, "utf-8");
-            JSON.parse(raw);
-        } catch (_err: unknown) {
-            logger.warn("config.json 损坏，尝试从 .bak 恢复...");
-            if (existsSync(bakPath)) {
-                try {
-                    const bakRaw = await readFile(bakPath, "utf-8");
-                    JSON.parse(bakRaw);
-                    await writeFile(dataConfigPath, bakRaw, "utf-8");
-                    logger.info("已从 config.json.bak 恢复 config.json");
-                } catch (bakErr: unknown) {
-                    const bakMsg =
-                        bakErr instanceof Error ? bakErr.message : String(bakErr);
-                    logger.warn(`config.json.bak 也无效: ${bakMsg}，清空 config.json`);
-                    await writeFile(
-                        dataConfigPath,
-                        JSON.stringify({ c4_shm_manager: { writer: [], reader: [] } }),
-                        "utf-8",
-                    );
-                }
-            } else {
-                logger.info(".bak 不存在，清空 config.json（等同首次启动）");
-                await writeFile(
-                    dataConfigPath,
-                    JSON.stringify({ c4_shm_manager: { writer: [], reader: [] } }),
-                    "utf-8",
-                );
-            }
-        }
-    }
 
     // ── Step 2: Load MCP Service Registry ──
     const registry = McpServiceRegistry.getInstance();
@@ -522,16 +530,14 @@ async function main(): Promise<void> {
         systemPrompt = `你是 C4 Agent。\n\n${serviceCatalog}`;
     }
 
-    // ── Step 4: Setup MCP manager ──
-    const mcpManager = new C4McpManager(
-        { shm: { binaryPath: config.shm_manager.binary } },
-        registry,
-    );
-    logger.info("MCP manager 已配置（shm_manager + MultiServerMCPClient）");
+    // ── Step 4: Setup MCP manager（Unix socket 客户端；服务清单启动时确立）──
+    const sockDir = resolveSockDir();
+    const mcpManager = new C4McpManager(registry, sockDir, logger);
+    logger.info(`MCP manager 已配置（socket 目录: ${sockDir}，从不拉起 MCP 进程）`);
 
     // ── Step 4.5: 对点核验显示服务（agent.md §3.6）──
     const displayService = new DisplayService({
-        multiClient: mcpManager.getMultiClient(),
+        manager: mcpManager,
         configPath: config.shm_manager.config_path,
         staleThresholdMs: config.display?.stale_threshold_ms,
         logger,
@@ -581,6 +587,8 @@ async function main(): Promise<void> {
         corsOrigin: config.server.cors_origin,
         displayRouter,
         frontendDir: config.frontend?.dir,
+        // MCP 存活状态＝连接状态推导（c4_architecture.md §3.1.1，C4_RS_00060/00068）
+        aliveProvider: () => mcpManager.aliveStates(),
     });
 
     const { host, port } = config.server;
@@ -588,16 +596,58 @@ async function main(): Promise<void> {
         logger.info(
             `Express 服务器已启动: http://${host}:${port}`,
         );
-        logger.info("C4 Agent 就绪");
     });
 
-    // ── Step 9: Startup Recovery ──
-    // Unconditional Stop-Start if /etc/c4/config.json exists (§3.2.3).
-    // This runs after the server is listening so the agent is responsive
-    // even during recovery.
-    await runStartupRecovery(config, mcpManager, registry, logger, stateTracker);
+    // ── Step 9: 重连收敛接线（§3.1.1：重连成功后按 §3.1.2 恢复流程收敛）──
+    mcpManager.setReconnectHandler((serviceType: string) => {
+        if (serviceType === SHM_SERVICE_TYPE) {
+            // shm_manager 重连：对账 shm（幂等 create-or-attach）
+            const shmClient = new ShmManagerClientAdapter(
+                mcpManager,
+                config.instance_id,
+                config.shm_manager.config_path,
+            );
+            shmClient
+                .create_shm()
+                .then((r) =>
+                    logger.info(`重连收敛: ${serviceType} create_shm → ${r}`),
+                )
+                .catch((err: unknown) => {
+                    const msg = err instanceof Error ? err.message : String(err);
+                    logger.warn(`重连收敛: ${serviceType} create_shm 失败: ${msg}`);
+                });
+            return;
+        }
+        // 数据服务重连：按当前 config 收敛（start 契约返回；ALREADY_RUNNING 无动作）
+        void (async () => {
+            const cfg = await load_valid_config(config.shm_manager.config_path);
+            if (cfg === null) {
+                return;
+            }
+            if (!data_service_types(cfg).includes(serviceType)) {
+                return; // 无该服务配置段 = 期望零实例，无需动作
+            }
+            const client = new McpServiceClientAdapter(
+                mcpManager,
+                serviceType,
+                config.instance_id,
+                config.shm_manager.config_path,
+            );
+            const r = await client.start();
+            logger.info(
+                `重连收敛: ${serviceType} start → ${is_success_result(r) ? "success" : r}`,
+            );
+        })().catch((err: unknown) => {
+            const msg = err instanceof Error ? err.message : String(err);
+            logger.warn(`重连收敛: ${serviceType} 失败: ${msg}`);
+        });
+    });
 
-    // ── Step 10: Load / rebuild abbr registry ──
+    // ── Step 10: 四级瀑布启动恢复（持配置事务单飞锁直至收敛完成）──
+    // 在服务器监听之后执行——收敛期间 Agent 仍可响应（C4_RS_00241）
+    await runStartupWaterfall(config, mcpManager, registry, logger, stateTracker);
+
+    // ── Step 11: Load / rebuild abbr registry ──
     // 记忆库是可重建派生数据：丢失/损坏/entries 为空时从 config.json 重建（agent.md §3.2.1.3a）
     const abbr_registry_path = path.join(
         path.dirname(config.shm_manager.config_path),
@@ -626,6 +676,8 @@ async function main(): Promise<void> {
         const msg = err instanceof Error ? err.message : String(err);
         logger.warn(`abbr 记忆库加载失败: ${msg}`);
     }
+
+    logger.info("C4 Agent 就绪");
 
     // ── Graceful Shutdown ──
     const shutdown = async (signal: string) => {

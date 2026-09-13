@@ -176,6 +176,11 @@ export class McpServiceRegistry {
     return this.queryRegistry(serviceType) ?? undefined;
   }
 
+  /** RegistryLookup 兼容接口，供 executor 调用 */
+  service_types(): string[] {
+    return this.getServiceTypes();
+  }
+
   /**
    * 获取合并后的错误翻译表（内置 + 所有 Registry 的 error_mappings）。
    */

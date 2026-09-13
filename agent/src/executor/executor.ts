@@ -4,7 +4,6 @@
 
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { MultiServerMCPClient } from "@langchain/mcp-adapters";
 import type {
     MCPInstanceConfig,
     RegistryEntry,
@@ -13,6 +12,9 @@ import type {
     SystemConfig,
 } from "../types/index.js";
 import { McpServiceRegistry } from "../registry/registry.js";
+import type { C4McpManager } from "../mcp/client.js";
+import { restore_prev1, atomic_write_raw } from "./transaction.js";
+import { SHM_SERVICE_TYPE } from "../mcp/client.js";
 
 // ── Point 匹配辅助 ────────────────────────────────────────
 // ServicePoint 是判别联合（WriterPoint.id / ReaderPoint.key），
@@ -55,6 +57,8 @@ export interface ShmManagerClient extends McpServiceClient {
 export interface RegistryLookup {
     /** 按 service_type 查询完整 Registry 条目 */
     get_entry(service_type: string): RegistryEntry | undefined;
+    /** 全部已注册服务类型（Stop 阶段全集用） */
+    service_types(): string[];
 }
 
 // ── Result Types ──────────────────────────────────────────
@@ -83,14 +87,14 @@ export interface MergeResult {
 
 // ── Error Classification ───────────────────────────────────
 
-/** adjust_shm 的 config 类错误码——需回退 config.json.bak */
+/** adjust_shm 的 config 类错误码——回滚时恢复 config.json.prev.1（事务层） */
 const CONFIG_CLASS_ERRORS = new Set([
     "DUPLICATE_KEY",
     "CONFIG_MISSING_SECTION",
     "UNKNOWN_READER_KEY",
 ]);
 
-/** adjust_shm 的非 config 类错误码——不回退 config，只重启已停止的服务 */
+/** adjust_shm 的非 config 类错误码——回滚行为与 config 类一致（agent.md §3.2.2） */
 const NON_CONFIG_CLASS_ERRORS = new Set([
     "SHM_SYSCALL_FAILED",
     "SHM_NOT_CREATED",
@@ -127,15 +131,14 @@ function empty_config(): SystemConfig {
 /**
  * 将 AccessPlanSteps 合并到 config.json（全量配置）。
  *
- * 流程（agent.md §3.2）：
- * 1. 读取现有 config.json（不存在 → 创建空结构）
- * 2. 损坏 JSON → 恢复 config.json.bak（若有效）否则创建空结构
- * 3. 备份当前内容到 config.json.bak
- * 4. 逐一处理 add / modify / delete（§3.2.1.6 规则）
- * 5. 原子写入：config.json.tmp → rename → config.json
+ * 流程（agent.md §3.2，c4_architecture.md §3.1.2 事务步骤 3）：
+ * 1. 读取现有 config.json（不存在 → 创建空结构；损坏 → 报错，回滚由事务层负责）
+ * 2. 逐一处理 add / modify / delete（§3.2.1.6 规则）
+ * 3. 原子写入：临时文件 → fsync → rename → 父目录 fsync
+ *    （回滚源 config.json.prev.1 与事务标记由事务层在本函数之前写入）
  *
  * @param steps    本次接入的增量操作步骤
- * @param config_path 配置文件路径（如 /etc/c4/config.json）
+ * @param config_path 配置文件路径（如 ~/.local/c4/config.json）
  * @param registry Registry 查询接口（用于填充技术默认值字段和角色查询）
  */
 export async function merge_config_from_steps(
@@ -144,7 +147,6 @@ export async function merge_config_from_steps(
     registry?: RegistryLookup,
 ): Promise<MergeResult> {
     const warnings: string[] = [];
-    const config_dir = path.dirname(config_path);
 
     // ── Step 1-2: 读取现有配置 ──
     let config: SystemConfig;
@@ -170,30 +172,31 @@ export async function merge_config_from_steps(
             config = empty_config();
             warnings.push("config.json 不存在，创建新配置文件");
         } else {
-            // JSON 解析失败 → 尝试恢复 .bak
-            const recovered = await try_restore_bak(config_path);
-            if (recovered) {
-                config = recovered.config;
-                warnings.push("config.json 已损坏，已从 config.json.bak 恢复");
-                current_raw = recovered.raw;
-            } else {
-                config = empty_config();
-                warnings.push("config.json 已损坏且 config.json.bak 不可用，创建新配置文件");
-                current_raw = "";
-            }
+            // JSON 损坏 → 中止合并（磁盘 config.json 未被触碰；L0/事务层负责恢复）
+            return {
+                success: false,
+                config: empty_config(),
+                warnings,
+                error: "config.json 已损坏，无法合并变更，请重启 Agent 以执行启动恢复",
+            };
         }
     }
-
-    // ── Step 3: 备份 ──
-    await fs.mkdir(config_dir, { recursive: true });
-    const backup_raw = JSON.stringify(config, null, 4) + "\n";
-    await fs.writeFile(config_path + ".bak", backup_raw, "utf-8");
+    void current_raw;
 
     // ── Step 4: 处理 steps ──
-    // 撞名去重的改名传播表（writer instance_id → 旧点id → 新点id）：
-    // writer 点去重后，同批次 reader 转发点的 key 必须跟随新 id（func_test_case 用例 10）
-    const renames = new Map<string, Map<string, string>>();
+    // 两段式处理：先 writer 后 reader（stable partition）。撞名去重的改名传播
+    // 依赖处理顺序——reader 步骤若先于 writer 执行，其转发点 key 无法跟随
+    // writer 撞名改名（func_test_case 用例 10：LLM 步骤顺序非确定）。
+    const writerSteps: ServiceStep[] = [];
+    const readerSteps: ServiceStep[] = [];
     for (const step of steps) {
+        const entry = registry?.get_entry(step.service_type);
+        (entry?.role === "reader" ? readerSteps : writerSteps).push(step);
+    }
+
+    // writer 点去重后，同批次 reader 转发点的 key 必须跟随新 id（用例 10）
+    const renames = new Map<string, Map<string, string>>();
+    for (const step of [...writerSteps, ...readerSteps]) {
         const svc_type = step.service_type;
         if (svc_type === "c4_shm_manager") {
             return {
@@ -255,11 +258,9 @@ export async function merge_config_from_steps(
         }
     }
 
-    // ── Step 5: 原子写入 ──
+    // ── Step 3: 原子写入（临时文件 → fsync → rename → 父目录 fsync）──
     const output = JSON.stringify(config, null, 4) + "\n";
-    const tmp_path = config_path + ".tmp";
-    await fs.writeFile(tmp_path, output, "utf-8");
-    await fs.rename(tmp_path, config_path);
+    await atomic_write_raw(config_path, output);
 
     return { success: true, config, warnings };
 }
@@ -348,6 +349,23 @@ async function handle_add(
         throw new Error(`add 操作缺少 instance.id: ${step.service_type}`);
     }
     validate_identifier(instance_id, "instance.id");
+
+    // reader 点 key 跟随同批次 writer 撞名改名——无论实例是新建还是合并
+    // （新建实例路径原先不做改名传播，func_test_case 用例 10 复现）
+    if (renames) {
+        for (const pt of step.points) {
+            const rec_r = pt as unknown as Record<string, unknown>;
+            const key_r = typeof rec_r["key"] === "string" ? (rec_r["key"] as string) : "";
+            const dot_r = key_r.indexOf(".");
+            if (dot_r <= 0) continue;
+            const prefix_r = key_r.slice(0, dot_r);
+            const pid_r = key_r.slice(dot_r + 1);
+            const new_id_r = renames.get(prefix_r)?.get(pid_r);
+            if (new_id_r) {
+                rec_r["key"] = `${prefix_r}.${new_id_r}`;
+            }
+        }
+    }
 
     // 有效实例 id：同 id 且端口相同（或无端口语义）→ 合并 points（增量加点）；
     // 同 id 但端口不同 → 语义是不同的转发连接/监听，生成带序号的新实例 id，
@@ -855,148 +873,85 @@ function update_shm_classification(
     }
 }
 
-// ── try_restore_bak ───────────────────────────────────────
-
-async function try_restore_bak(
-    config_path: string,
-): Promise<{ config: SystemConfig; raw: string } | null> {
-    const bak_path = config_path + ".bak";
-    try {
-        const raw = await fs.readFile(bak_path, "utf-8");
-        const config = JSON.parse(raw) as SystemConfig;
-        if (!config.c4_shm_manager) {
-            return null;
-        }
-        // 恢复：用 .bak 覆盖损坏的 config.json
-        await fs.writeFile(config_path, raw, "utf-8");
-        return { config, raw };
-    } catch {
-        return null;
-    }
-}
-
 // ── executeStopAndStart ────────────────────────────────────
 
 /**
- * 执行 Stop-Start 安全协议。
+ * 执行 Stop-Start 安全协议（实例粒度，独立服务模型）。
  *
- * 流程（agent.md §3.2）：
- *   1. Stop 阶段：stop 所有数据路径 MCP 服务（不含 c4_shm_manager）
- *   2. adjust_shm 阶段：调用 c4_shm_manager.adjust_shm()
- *   3. Start 阶段：start 所有 MCP 服务
+ * 流程（agent.md §3.2，c4_architecture.md §3.1.2）：
+ *   1. Stop 阶段：stop 所有数据路径 MCP 服务实例（进程常驻，不退出）——
+ *      stop_clients 必须覆盖全部数据路径服务（Registry 全集），而非仅新配置
+ *      中出现的服务：被删除的服务实例同样要停（否则整机删除后端口不释放）
+ *   2. adjust_shm 阶段：调用 c4_shm_manager.adjust_shm()（禁止只 restart 不调 adjust_shm）
+ *   3. Start 阶段：start start_clients 中的服务实例（ALREADY_RUNNING 视为一等成功路径）
  *
- * 错误处理（agent.md §3.2.2）：
- *   - stop 失败 → 回滚（start 已停止的服务），abort
- *   - adjust_shm 失败（config 类）→ 恢复 config.json.bak，start 已停止的服务，abort
- *   - adjust_shm 失败（非 config 类）→ start 已停止的服务（不恢复 config），abort
- *   - start 部分失败 → 不回滚已成功的，只报告失败
+ * 本函数不修改 config.json——变更失败的回滚（恢复 .prev.1 + 完整 Stop-Start）
+ * 由事务层（transaction 调用方）负责：任一阶段失败 → 返回 failure 结果 +
+ * abort_reason（含错误分类），调用方执行回滚协议。
  *
  * stop() 是幂等的——对已停止的服务调用仍返回 success。
  *
  * @param shm_manager c4_shm_manager MCP 客户端
- * @param data_clients 数据路径 MCP 服务客户端列表（不含 c4_shm_manager）
+ * @param stop_clients Stop 阶段覆盖的数据路径服务客户端（Registry 全集）
+ * @param start_clients Start 阶段按当前配置拉起的服务客户端（config 子集）
  * @param config 当前全量配置
- * @param config_path 配置文件路径（用于恢复 config.json.bak）
+ * @param config_path 配置文件路径（工具参数 config_path 透传）
  */
 export async function execute_stop_and_start(
     shm_manager: ShmManagerClient,
-    data_clients: McpServiceClient[],
+    stop_clients: McpServiceClient[],
+    start_clients: McpServiceClient[],
     _config: SystemConfig,
     config_path: string,
 ): Promise<StopStartResult> {
-    const stopped_clients: McpServiceClient[] = [];
-
     // ── Phase 1: Stop ──
-    for (const client of data_clients) {
+    for (const client of stop_clients) {
         try {
             await client.stop();
-            stopped_clients.push(client);
         } catch (err: unknown) {
             const err_msg = err instanceof Error ? err.message : String(err);
-            // 回滚：start 已停止的服务
-            await rollback_start_services(stopped_clients);
+            // 失败不在此处回滚——事务层负责「恢复 .prev.1 + 完整 Stop-Start」
             return {
                 success: false,
                 started_services: [],
                 failed_services: [],
-                abort_reason:
-                    `Stop 阶段失败: ${client.service_type} stop() 报错: ${err_msg}。已回滚：重启了 ${stopped_clients.length} 个已停止的服务`,
+                abort_reason: `Stop 阶段失败: ${client.service_type} stop() 报错: ${err_msg}`,
             };
         }
     }
 
     // ── Phase 2: adjust_shm ──
+    // 失败不在此处回滚——事务层负责「恢复 .prev.1 + 完整 Stop-Start（含 adjust_shm）」
+    //（agent.md §3.2.2：config 类/非 config 类错误均回滚）；此处仅记录错误分类。
+    let adjust_error: string | null = null;
     try {
         const adjust_result = await shm_manager.adjust_shm();
         if (adjust_result !== "success") {
-            if (is_config_class_error(adjust_result)) {
-                // Config 类错误：恢复 config.json.bak，重启已停止的服务
-                await restore_config_bak(config_path);
-                await rollback_start_services(stopped_clients);
-                return {
-                    success: false,
-                    started_services: [],
-                    failed_services: [],
-                    abort_reason: `adjust_shm 失败（配置类错误），已恢复 config.json.bak 并重启 ${stopped_clients.length} 个服务: ${adjust_result}`,
-                };
-            }
-            if (is_non_config_class_error(adjust_result)) {
-                // 非 config 类错误：不恢复 config，仅重启已停止的服务
-                await rollback_start_services(stopped_clients);
-                return {
-                    success: false,
-                    started_services: [],
-                    failed_services: [],
-                    abort_reason: `adjust_shm 失败（系统类错误），已重启 ${stopped_clients.length} 个服务，config 未回退: ${adjust_result}`,
-                };
-            }
-            // 未知错误码：保守处理，重启已停止的服务，不恢复 config
-            await rollback_start_services(stopped_clients);
-            return {
-                success: false,
-                started_services: [],
-                failed_services: [],
-                abort_reason: `adjust_shm 失败（未知错误），已重启 ${stopped_clients.length} 个服务，config 未回退: ${adjust_result}`,
-            };
+            const cls = is_config_class_error(adjust_result)
+                ? "配置类错误"
+                : is_non_config_class_error(adjust_result)
+                  ? "系统类错误"
+                  : "未知错误";
+            adjust_error = `adjust_shm 失败（${cls}）: ${adjust_result}`;
         }
     } catch (err: unknown) {
         const err_msg = err instanceof Error ? err.message : String(err);
-        // 调用本身失败（网络/进程异常）→ 保守处理
-        await rollback_start_services(stopped_clients);
+        adjust_error = `adjust_shm 调用异常: ${err_msg}`;
+    }
+    if (adjust_error !== null) {
         return {
             success: false,
             started_services: [],
             failed_services: [],
-            abort_reason: `adjust_shm 调用异常，已重启 ${stopped_clients.length} 个服务: ${err_msg}`,
+            abort_reason: adjust_error,
         };
     }
 
     // ── Phase 3: Start ──
-    const dumpSections = (tag: string, raw: string) => {
-        try {
-            const d = JSON.parse(raw) as Record<string, unknown>;
-            const parts = Object.keys(d)
-                .filter((k) => k !== "c4_shm_manager")
-                .map((k) => {
-                    const list = d[k];
-                    const ids = Array.isArray(list)
-                        ? (list as Record<string, unknown>[]).map((i) => String(i["id"])).join("+")
-                        : "?";
-                    return `${k}[${ids}]`;
-                });
-            console.error(`[SS_DEBUG] ${tag}: ${parts.join(" | ")}`);
-        } catch {
-            console.error(`[SS_DEBUG] ${tag}: <读取失败>`);
-        }
-    };
-    try {
-        dumpSections("pre-start", await fs.readFile(config_path, "utf-8"));
-    } catch { /* 诊断失败不影响主流程 */ }
-
     const started: string[] = [];
     const failed: StopStartResult["failed_services"] = [];
 
-    for (const client of data_clients) {
+    for (const client of start_clients) {
         try {
             const result = await client.start();
             if (result === "success") {
@@ -1015,10 +970,6 @@ export async function execute_stop_and_start(
         }
     }
 
-    try {
-        dumpSections("post-start", await fs.readFile(config_path, "utf-8"));
-    } catch { /* 诊断失败不影响主流程 */ }
-
     const success = failed.length === 0;
     return {
         success,
@@ -1030,83 +981,44 @@ export async function execute_stop_and_start(
     };
 }
 
-// ── Rollback Helpers ──────────────────────────────────────
-
-/** 回滚：重新 start 所有已停止的服务 */
-async function rollback_start_services(
-    clients: McpServiceClient[],
-): Promise<void> {
-    for (const client of clients) {
-        try {
-            await client.start();
-        } catch {
-            // 回滚中的再次失败无法恢复，记录并继续
-        }
-    }
-}
-
-/** 用 config.json.bak 恢复 config.json */
-async function restore_config_bak(config_path: string): Promise<void> {
-    const bak_path = config_path + ".bak";
-    try {
-        const bak_content = await fs.readFile(bak_path, "utf-8");
-        // 验证 bak 是有效 JSON
-        JSON.parse(bak_content);
-        const tmp_path = config_path + ".tmp";
-        await fs.writeFile(tmp_path, bak_content, "utf-8");
-        await fs.rename(tmp_path, config_path);
-    } catch {
-        // bak 也不可用——无法恢复，但不抛异常（调用方已处于错误路径）
-    }
-}
-
 export interface MCPClientHandle {
     callTool(params: { name: string; arguments: Record<string, unknown> }): Promise<unknown>;
 }
 
-export async function callToolViaMultiClient(
-    multiClient: MultiServerMCPClient,
-    serverName: string,
+// ── Manager-based 工具调用（独立服务模型：Unix socket 连接由 C4McpManager 持有）──
+
+/**
+ * 经 C4McpManager 调用指定服务的工具，返回应答文本。
+ * MCP isError 应答返回其错误文本（如 "DUPLICATE_KEY: ..."）——与错误码分类兼容；
+ * 服务未连接（降级）→ 抛出异常。
+ */
+export async function callToolViaManager(
+    manager: C4McpManager,
+    serviceType: string,
     toolName: string,
     args: Record<string, unknown>,
 ): Promise<string> {
-    const tools = await multiClient.getTools(serverName);
-    const tool = tools.find(t => t.name === toolName);
-    if (!tool) throw new Error(`tool not found: ${toolName}`);
-    try {
-        const result = await tool.invoke(args);
-        return typeof result === "string" ? result : JSON.stringify(result);
-    } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        const error_text = extract_mcp_tool_error_text(message);
-        if (error_text !== null) {
-            return error_text;
-        }
-        throw err;
-    }
+    return manager.callToolText(serviceType, toolName, args);
 }
 
-function extract_mcp_tool_error_text(message: string): string | null {
-    const marker = "returned an error: ";
-    const idx = message.indexOf(marker);
-    if (idx < 0) {
-        return null;
-    }
-    return message.slice(idx + marker.length);
+/** ALREADY_RUNNING 是一等成功路径结果（isError=false）：无动作、不中断数据路径 */
+export function is_success_result(result: string): boolean {
+    return result === "success" || result.startsWith("ALREADY_RUNNING");
 }
 
 export class McpServiceClientAdapter implements McpServiceClient {
     readonly service_type: string;
     private _instanceId: string;
     private _configPath: string;
+    private _manager: C4McpManager;
 
     constructor(
-        private _mcp: MCPClientHandle,
+        manager: C4McpManager,
         serviceType: string,
         instanceId: string,
         configPath: string,
-        private _multiClient: MultiServerMCPClient,
     ) {
+        this._manager = manager;
         this.service_type = serviceType;
         this._instanceId = instanceId;
         this._configPath = configPath;
@@ -1114,22 +1026,21 @@ export class McpServiceClientAdapter implements McpServiceClient {
 
     async stop(): Promise<string> {
         try {
-            return await callToolViaMultiClient(this._multiClient, this.service_type, "stop", {});
-        } catch (err) {
+            const r = await callToolViaManager(this._manager, this.service_type, "stop", {});
+            return is_success_result(r) ? "success" : r;
+        } catch (err: unknown) {
             void err;
+            // stop 幂等：服务暂不可达（如正在重启）视为已停止，不阻塞协议推进
             return "success";
         }
     }
 
     async start(): Promise<string> {
-        return callToolViaMultiClient(this._multiClient, this.service_type, "start", {
+        const r = await callToolViaManager(this._manager, this.service_type, "start", {
             instance_id: this._instanceId,
             config_path: this._configPath,
         });
-    }
-
-    async dispose(): Promise<void> {
-        await this._multiClient.close();
+        return is_success_result(r) ? "success" : r;
     }
 }
 
@@ -1137,14 +1048,15 @@ export class ShmManagerClientAdapter implements ShmManagerClient {
     readonly service_type: string;
     private _instanceId: string;
     private _configPath: string;
+    private _manager: C4McpManager;
 
     constructor(
-        private _multiClient: MultiServerMCPClient,
-        serverName: string,
+        manager: C4McpManager,
         instanceId: string,
         configPath: string,
     ) {
-        this.service_type = serverName;
+        this._manager = manager;
+        this.service_type = SHM_SERVICE_TYPE;
         this._instanceId = instanceId;
         this._configPath = configPath;
     }
@@ -1158,27 +1070,47 @@ export class ShmManagerClientAdapter implements ShmManagerClient {
     }
 
     async create_shm(): Promise<string> {
-        return callToolViaMultiClient(this._multiClient, this.service_type, "create_shm", {
+        return callToolViaManager(this._manager, this.service_type, "create_shm", {
             instance_id: this._instanceId,
             config_path: this._configPath,
         });
     }
 
     async adjust_shm(): Promise<string> {
-        return callToolViaMultiClient(this._multiClient, this.service_type, "adjust_shm", {
+        return callToolViaManager(this._manager, this.service_type, "adjust_shm", {
             instance_id: this._instanceId,
             config_path: this._configPath,
         });
     }
 }
 
-// 数据服务 stdio 客户端缓存（service_type → adapter）：跨执行轮复用同一进程，
-// 保证 Stop-Start 作用于持有监听端口的真实进程（func_test_case 用例 16/17）
-const runtimeDataClients = new Map<string, McpServiceClientAdapter>();
+/** 从 config.json 提取非空数据路径服务段（c4_shm_manager 除外） */
+export function data_service_types(systemConfig: SystemConfig): string[] {
+    const out: string[] = [];
+    for (const key of Object.keys(systemConfig)) {
+        if (key === "c4_shm_manager") continue;
+        const instances = systemConfig[key];
+        if (Array.isArray(instances) && instances.length > 0) {
+            out.push(key);
+        }
+    }
+    return out;
+}
 
-export async function runRuntimeStopStart(
-    shmMultiClient: MultiServerMCPClient,
-    shmServerName: string,
+function new_shm_client(
+    manager: C4McpManager,
+    instanceId: string,
+    configPath: string,
+): ShmManagerClientAdapter {
+    return new ShmManagerClientAdapter(manager, instanceId, configPath);
+}
+
+/**
+ * 运行期 Stop-Start（变更事务步骤 4）。
+ * 连接来自 manager（Unix socket 常驻连接），不拉起任何进程。
+ */
+export async function run_runtime_stop_start(
+    manager: C4McpManager,
     instanceId: string,
     configPath: string,
     registry: RegistryLookup,
@@ -1196,67 +1128,74 @@ export async function runRuntimeStopStart(
         };
     }
 
-    const dataServiceTypes: string[] = [];
-    for (const key of Object.keys(systemConfig)) {
-        if (key === "c4_shm_manager") continue;
-        const instances = systemConfig[key];
-        if (Array.isArray(instances) && instances.length > 0) {
-            dataServiceTypes.push(key);
-        }
+    const shmClient = new_shm_client(manager, instanceId, configPath);
+    const stopClients = all_data_clients(manager, instanceId, configPath, registry);
+    const startClients = build_data_clients(manager, systemConfig, instanceId, configPath, registry);
+
+    return execute_stop_and_start(shmClient, stopClients, startClients, systemConfig, configPath);
+}
+
+function build_data_clients(
+    manager: C4McpManager,
+    systemConfig: SystemConfig,
+    instanceId: string,
+    configPath: string,
+    registry: RegistryLookup,
+): McpServiceClientAdapter[] {
+    const clients: McpServiceClientAdapter[] = [];
+    for (const svcType of data_service_types(systemConfig)) {
+        if (!registry.get_entry(svcType)) continue;
+        clients.push(new McpServiceClientAdapter(manager, svcType, instanceId, configPath));
+    }
+    return clients;
+}
+
+/**
+ * Stop 阶段客户端全集：Registry 中全部数据路径服务（agent.md §3.2「for 每个
+ * 数据路径 MCP 服务: call stop()」）。stop 幂等，未接入的服务返回 success；
+ * 覆盖全集才能停掉被删除的服务实例（整机删除后端口必须释放）。
+ */
+function all_data_clients(
+    manager: C4McpManager,
+    instanceId: string,
+    configPath: string,
+    registry: RegistryLookup,
+): McpServiceClientAdapter[] {
+    const clients: McpServiceClientAdapter[] = [];
+    for (const svcType of registry.service_types()) {
+        if (svcType === SHM_SERVICE_TYPE) continue;
+        clients.push(new McpServiceClientAdapter(manager, svcType, instanceId, configPath));
+    }
+    return clients;
+}
+
+/**
+ * 变更失败回滚（agent.md §3.2.2）：恢复 config.json.prev.1 → 以恢复后的配置
+ * 执行完整 Stop-Start（stop → adjust_shm → start，含 adjust_shm——禁止只
+ * restart 不调 adjust_shm）→ 删除事务标记由调用方负责。
+ *
+ * @returns {restored} .prev.1 是否成功恢复（false = .prev 不可用，config.json 保留现状）
+ */
+export async function rollback_config_change(
+    manager: C4McpManager,
+    instanceId: string,
+    configPath: string,
+    registry: RegistryLookup,
+): Promise<{ restored: boolean; result: StopStartResult }> {
+    const restored = await restore_prev1(configPath);
+
+    // 以恢复后的（或保留现状的）config.json 为准重建客户端清单
+    let systemConfig: SystemConfig;
+    try {
+        const raw = await fs.readFile(configPath, "utf-8");
+        systemConfig = JSON.parse(raw) as SystemConfig;
+    } catch {
+        systemConfig = { c4_shm_manager: { writer: [], reader: [] } };
     }
 
-    const shmClient = new ShmManagerClientAdapter(
-        shmMultiClient,
-        shmServerName,
-        instanceId,
-        configPath,
-    );
-
-    const dataClients: McpServiceClientAdapter[] = [];
-    for (const svcType of dataServiceTypes) {
-        const cached = runtimeDataClients.get(svcType);
-        if (cached) {
-            dataClients.push(cached);
-            continue;
-        }
-        const entry = registry.get_entry(svcType);
-        if (!entry) continue;
-
-        try {
-            const multiClient = new MultiServerMCPClient({
-                mcpServers: {
-                    [svcType]: {
-                        transport: "stdio" as const,
-                        command: entry.binary_path,
-                        args: [],
-                    },
-                },
-            });
-            const mcpClient = await multiClient.getClient(svcType);
-            if (!mcpClient) {
-                await multiClient.close();
-                continue;
-            }
-            const adapter = new McpServiceClientAdapter(
-                mcpClient as MCPClientHandle,
-                svcType,
-                instanceId,
-                configPath,
-                multiClient,
-            );
-            runtimeDataClients.set(svcType, adapter);
-            dataClients.push(adapter);
-        } catch {
-            continue;
-        }
-    }
-
-    const result = await execute_stop_and_start(
-        shmClient,
-        dataClients,
-        systemConfig,
-        configPath,
-    );
-
-    return result;
+    const shmClient = new_shm_client(manager, instanceId, configPath);
+    const stopClients = all_data_clients(manager, instanceId, configPath, registry);
+    const startClients = build_data_clients(manager, systemConfig, instanceId, configPath, registry);
+    const result = await execute_stop_and_start(shmClient, stopClients, startClients, systemConfig, configPath);
+    return { restored, result };
 }

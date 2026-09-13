@@ -26,8 +26,19 @@ import { createQueryRegistryTool } from "../subagents/tools/query_registry.js";
 import { createQueryAbbrRegistryTool } from "../subagents/tools/query_abbr_registry.js";
 import {
     merge_config_from_steps,
-    runRuntimeStopStart,
+    run_runtime_stop_start,
+    rollback_config_change,
 } from "../executor/executor.js";
+import {
+    with_config_lock,
+    is_config_locked,
+    ConfigBusyError,
+    CONFIG_BUSY_MESSAGE,
+} from "../executor/single_flight.js";
+import {
+    begin_config_transaction,
+    clear_pending_marker,
+} from "../executor/transaction.js";
 import {
     load_abbr_registry,
     save_abbr_registry,
@@ -110,8 +121,6 @@ export async function createSuperWorker(
 ): Promise<ReturnType<typeof createAgent>> {
     const { model, registry, mcpManager } = config;
     const systemPrompt = loadSystemPrompt(registry, config.site);
-
-    const mcpTools: StructuredTool[] = await mcpManager.getTools();
 
     const allTools: StructuredTool[] = [
         xlsxParserTool,
@@ -713,6 +722,16 @@ export async function createC4Agent(
                         }
                     })();
 
+                    // bgCapture 在 continue 补跑路径上不被 await——其迭代器若因
+                    // 图运行中止（如 GraphRecursionError）而 reject，未观察的拒绝
+                    // 会使整个 Agent 进程退出（Node 默认行为）。此处先挂 catch
+                    // 标记为已处理；主路径的 await 语义不受影响（仍会抛出）。
+                    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                    bgCapture.catch((err: unknown) => {
+                        const msg = err instanceof Error ? err.message : String(err);
+                        log?.error(conversation, `后台工具流异常: ${msg}`);
+                    });
+
                     for await (const msg of stream.messages) {
                         const textParts: string[] = [];
                         lastMsgHadToolCall = false;
@@ -918,120 +937,186 @@ export async function createC4Agent(
                 }
 
                 if (planSteps && planSteps.length > 0) {
-                    config.state?.setPhase("executing");
-                    log?.phase(conversation, "executing");
-                    try {
-                        const mr = await merge_config_from_steps(planSteps, config.configPath, config.registry as any);
-                        log?.memory(conversation, "config_merge", {
-                            success: mr.success,
-                            error: mr.error ?? null,
-                            warnings: mr.warnings,
-                        });
-                        if (mr.success) {
-                            yield { type: "text" as const, content: "接入方案已执行，配置已写入。" };
+                    const steps: ServiceStep[] = planSteps; // 闭包内使用（let 窄化不跨闭包）
+                    // 单飞规则（c4_architecture.md §3.1.2）：并发配置变更请求在会话层
+                    // 直接拒绝，向用户提示固定话术。
+                    // 事务在非生成器闭包中执行，SSE 事件先收集后 yield。
+                    type ExecEvent =
+                        | { type: "text"; content: string }
+                        | { type: "error"; message: string };
+                    const events: ExecEvent[] = [];
 
-                            const ssr = await runRuntimeStopStart(
-                                config.mcpManager.getMultiClient(),
-                                "shm",
-                                config.instanceId,
-                                config.configPath,
-                                config.registry as any,
-                            );
-                            log?.memory(conversation, "stop_start", {
-                                success: ssr.success,
-                                started_services: ssr.started_services,
-                                failed_services: ssr.failed_services.map((f) => ({
-                                    service_type: f.service_type,
-                                    error: f.error,
-                                })),
-                                abort_reason: ssr.abort_reason ?? null,
-                            });
-                            const need_rollback =
-                                !ssr.success || ssr.failed_services.length > 0;
-                            if (!(ssr.abort_reason && /配置类错误/.test(ssr.abort_reason)) && !need_rollback) {
-                                await persist_abbr_registry(
-                                    planSteps,
-                                    planDeviceInfo,
-                                    planAccessPlan,
-                                    config,
-                                );
-                                log?.memory(conversation, "abbr_persist", {
-                                    plan_steps: planSteps.length,
-                                });
-                            }
-                            if (ssr.success) {
-                                yield {
-                                    type: "text" as const,
-                                    content: `服务已重启: ${ssr.started_services.join(", ")}`,
-                                };
-                            } else if (ssr.abort_reason) {
-                                log?.error(conversation, ssr.abort_reason);
-                                yield {
-                                    type: "error" as const,
-                                    message: ssr.abort_reason,
-                                };
-                            }
-                            if (ssr.failed_services.length > 0) {
-                                const names = ssr.failed_services.map((f) => f.service_type).join(", ");
-                                const details = ssr.failed_services
-                                    .map((f) => `${f.service_type}: ${f.error}`)
-                                    .join("; ");
-                                log?.error(conversation, `部分服务启动失败: ${details}`);
-                                const translator = buildErrorTranslator(config.registry);
-                                const reasons = ssr.failed_services
-                                    .map((f) => `${f.service_type}: ${translateError(f.error ?? "", translator)}`)
-                                    .join("；");
-                                const portHint =
-                                    /PORT_BIND_FAILED|PORT_CONFLICT/.test(details)
-                                        ? "如需更换端口，请删除该设备后重新接入并指定新的端口。"
-                                        : "";
-                                yield {
-                                    type: "error" as const,
-                                    message: `部分服务启动失败: ${names}（${reasons}）${portHint}`,
-                                };
-                            }
-                            if (need_rollback) {
-                                // 回滚（func_test_case 用例 23/24）：恢复 merge 前备份（config.json.bak）
-                                // 并按原配置重启服务——禁止半接入态残留
+                    if (is_config_locked()) {
+                        log?.error(conversation, "配置变更被拒绝: 已有变更正在执行");
+                        events.push({ type: "text", content: CONFIG_BUSY_MESSAGE });
+                    } else {
+                        const exec_error: { err: unknown } = { err: null };
+                        try {
+                            await with_config_lock(async () => {
                                 try {
-                                    const bakRaw = fs.readFileSync(config.configPath + ".bak", "utf-8");
-                                    fs.writeFileSync(config.configPath, bakRaw, "utf-8");
-                                    await runRuntimeStopStart(
-                                        config.mcpManager.getMultiClient(),
-                                        "shm",
+                                    // 事务步骤 1+2：写事务标记（fsync）→ .prev 滚动复制（fsync）。
+                                    // 必须在任何 config.json 变更发生之前执行（§3.1.2 固定序列）
+                                    const involved = [
+                                        ...new Set(steps.map((st) => st.service_type)),
+                                    ];
+                                    await begin_config_transaction(
+                                        config.configPath,
+                                        "接入变更执行（用户确认后）",
+                                        involved,
+                                    );
+
+                                    // 事务步骤 3：merge（临时文件 → fsync → 原子 rename → 父目录 fsync）
+                                    const mr = await merge_config_from_steps(steps, config.configPath, config.registry as any);
+                                    log?.memory(conversation, "config_merge", {
+                                        success: mr.success,
+                                        error: mr.error ?? null,
+                                        warnings: mr.warnings,
+                                    });
+                                    if (!mr.success) {
+                                        // merge 未触碰磁盘 config.json——作废事务（删除标记，不回滚）
+                                        await clear_pending_marker(config.configPath);
+                                        log?.error(conversation, `执行问题: ${mr.error ?? "未知"}`);
+                                        events.push({ type: "text", content: `执行问题: ${mr.error ?? "未知"}` });
+                                        config.state?.setError(mr.error ?? "未知");
+                                        return;
+                                    }
+                                    events.push({ type: "text", content: "接入方案已执行，配置已写入。" });
+
+                                    // 事务步骤 4：Stop-Start / merge 序列
+                                    const ssr = await run_runtime_stop_start(
+                                        config.mcpManager,
                                         config.instanceId,
                                         config.configPath,
                                         config.registry as any,
                                     );
-                                    yield {
-                                        type: "text" as const,
-                                        content:
-                                            "检测到服务启动失败，已回滚到变更前配置并恢复原服务。",
-                                    };
+                                    log?.memory(conversation, "stop_start", {
+                                        success: ssr.success,
+                                        started_services: ssr.started_services,
+                                        failed_services: ssr.failed_services.map((f) => ({
+                                            service_type: f.service_type,
+                                            error: f.error,
+                                        })),
+                                        abort_reason: ssr.abort_reason ?? null,
+                                    });
+                                    const need_rollback =
+                                        !ssr.success || ssr.failed_services.length > 0;
+                                    if (!need_rollback) {
+                                        await persist_abbr_registry(
+                                            steps,
+                                            planDeviceInfo,
+                                            planAccessPlan,
+                                            config,
+                                        );
+                                        log?.memory(conversation, "abbr_persist", {
+                                            plan_steps: steps.length,
+                                        });
+                                    }
+                                    if (ssr.success) {
+                                        events.push({
+                                            type: "text",
+                                            content: `服务已重启: ${ssr.started_services.join(", ")}`,
+                                        });
+                                    }
+                                    if (ssr.failed_services.length > 0) {
+                                        const names = ssr.failed_services.map((f) => f.service_type).join(", ");
+                                        const details = ssr.failed_services
+                                            .map((f) => `${f.service_type}: ${f.error}`)
+                                            .join("; ");
+                                        log?.error(conversation, `部分服务启动失败: ${details}`);
+                                        const translator = buildErrorTranslator(config.registry);
+                                        const reasons = ssr.failed_services
+                                            .map((f) => `${f.service_type}: ${translateError(f.error ?? "", translator)}`)
+                                            .join("；");
+                                        const portHint =
+                                            /PORT_BIND_FAILED|PORT_CONFLICT/.test(details)
+                                                ? "如需更换端口，请删除该设备后重新接入并指定新的端口。"
+                                                : "";
+                                        events.push({
+                                            type: "error",
+                                            message: `部分服务启动失败: ${names}（${reasons}）${portHint}`,
+                                        });
+                                    }
+                                    if (need_rollback) {
+                                        // 事务步骤 5（失败分支，agent.md §3.2.2）：恢复 .prev.1 →
+                                        // 以恢复后的配置执行完整 Stop-Start（含 adjust_shm）→
+                                        // 删除事务标记 → 报告失败（变更作废，不残留半接入状态）
+                                        try {
+                                            const rb = await rollback_config_change(
+                                                config.mcpManager,
+                                                config.instanceId,
+                                                config.configPath,
+                                                config.registry as any,
+                                            );
+                                            log?.memory(conversation, "rollback", {
+                                                restored: rb.restored,
+                                                success: rb.result.success,
+                                                abort_reason: rb.result.abort_reason ?? null,
+                                            });
+                                            if (!rb.restored) {
+                                                log?.error(conversation, "回滚源 config.json.prev.1 不可用，保留当前配置");
+                                            }
+                                            events.push({
+                                                type: "text",
+                                                content: rb.restored
+                                                    ? "检测到服务启动失败，已回滚到变更前配置并恢复原服务，本次接入未成功。"
+                                                    : "检测到服务启动失败，本次接入未成功；配置状态需人工核验。",
+                                            });
+                                            config.state?.setError("上次接入变更未完成，已回滚，接入不成功");
+                                        } catch (rbErr: unknown) {
+                                            const rbMsg = rbErr instanceof Error ? rbErr.message : String(rbErr);
+                                            log?.error(conversation, `回滚失败: ${rbMsg}`);
+                                        }
+                                    }
+                                    // 事务步骤 5（成功分支）：删除事务标记
+                                    await clear_pending_marker(config.configPath);
+                                    config.state?.setPhase("idle");
+                                    log?.phase(conversation, "idle");
+                                    config.state?.setAccessPlan(false);
+                                    // 确认已随本次执行消耗，复位闸门（下一条新接入须重新确认）
+                                    userConfirmed = false;
+                                    userPort = null;
+                                } catch (ex: unknown) {
+                                    exec_error.err = ex;
+                                    throw ex;
+                                }
+                            });
+                        } catch (ex: unknown) {
+                            if (ex instanceof ConfigBusyError) {
+                                log?.error(conversation, "配置变更被拒绝: 已有变更正在执行");
+                                events.push({ type: "text", content: CONFIG_BUSY_MESSAGE });
+                            } else if (exec_error.err !== null) {
+                                const exMsg = ex instanceof Error ? ex.message : String(ex);
+                                log?.error(conversation, `自动执行失败: ${exMsg}`);
+                                // 执行路径异常（事务步骤 3/4 内）→ 按失败分支处理：
+                                // 恢复 .prev.1 + 完整 Stop-Start + 删除标记；
+                                // 回滚本身失败则保留标记，交由下次启动的 L0 恢复流程收敛
+                                try {
+                                    const rb = await rollback_config_change(
+                                        config.mcpManager,
+                                        config.instanceId,
+                                        config.configPath,
+                                        config.registry as any,
+                                    );
+                                    await clear_pending_marker(config.configPath);
+                                    log?.memory(conversation, "rollback_on_exception", {
+                                        restored: rb.restored,
+                                        success: rb.result.success,
+                                    });
+                                    events.push({
+                                        type: "text",
+                                        content: "执行过程出现异常，已回滚到变更前配置并恢复原服务，本次接入未成功。",
+                                    });
                                 } catch (rbErr: unknown) {
                                     const rbMsg = rbErr instanceof Error ? rbErr.message : String(rbErr);
-                                    log?.error(conversation, `回滚失败: ${rbMsg}`);
+                                    log?.error(conversation, `异常回滚失败（保留事务标记，等待重启恢复）: ${rbMsg}`);
                                 }
+                                events.push({ type: "error", message: `自动执行失败: ${exMsg}` });
+                                config.state?.setError(exMsg);
                             }
-                            config.state?.setPhase("idle");
-                            log?.phase(conversation, "idle");
-                            config.state?.setAccessPlan(false);
-                            // 确认已随本次执行消耗，复位闸门（下一条新接入须重新确认）
-                            userConfirmed = false;
-                            userPort = null;
-                        } else {
-                            log?.error(conversation, `执行问题: ${mr.error ?? "未知"}`);
-                            yield { type: "text" as const, content: `执行问题: ${mr.error ?? "未知"}` };
-                            config.state?.setError(mr.error ?? "未知");
                         }
-                    } catch (ex: unknown) {
-                        const exMsg = ex instanceof Error ? ex.message : String(ex);
-                        log?.error(conversation, `自动执行失败: ${exMsg}`);
-                        yield {
-                            type: "error" as const,
-                            message: `自动执行失败: ${exMsg}`,
-                        };
-                        config.state?.setError(exMsg);
+                    }
+                    for (const ev of events) {
+                        yield ev;
                     }
                 }
                 // 闸门状态不复位于此：userConfirmed/userPort 在执行完成后才复位——

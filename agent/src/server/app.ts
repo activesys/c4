@@ -34,6 +34,11 @@ export interface AppOptions {
     statePath?: string;
     /** 对点核验显示路由（agent.md §3.6.5）：/api/points、/api/display、/api/display/stop */
     displayRouter?: Router;
+    /**
+     * MCP 服务存活状态 provider（连接状态推导，c4_architecture.md §3.1.1）；
+     * 提供时 GET /api/services 的每个条目附带 alive/degraded 字段（Web 展示与告警）
+     */
+    aliveProvider?: () => Array<{ service_type: string; alive: boolean; degraded: boolean }>;
     /** Absolute path to the web frontend static dir; served when set and existing (design §4.3 / §5.1) */
     frontendDir?: string;
 }
@@ -97,6 +102,7 @@ export function createApp(options: AppOptions): express.Application {
         statePath = "/api/state",
         displayRouter,
         frontendDir,
+        aliveProvider,
     } = options;
 
     // 1. CORS — Express v5: no `cors` npm package needed
@@ -111,7 +117,7 @@ export function createApp(options: AppOptions): express.Application {
     // 3. Routes — dependency injected
     app.use(chatPath, createChatRouter(agent));
     app.use(uploadPath, createUploadRouter(agent));
-    app.use(servicesPath, createServicesRouter());
+    app.use(servicesPath, createServicesRouter(aliveProvider));
     app.use(statePath, createStateRouter(stateProvider));
     if (displayRouter) {
         app.use("/api", displayRouter);

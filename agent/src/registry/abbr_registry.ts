@@ -101,6 +101,9 @@ export async function load_abbr_registry(
     // config.json 是权威、记忆库是派生数据（失败回滚/点级删除等都可能造成失步）：
     // 每次加载按 config 实例集合对齐——config 有而记忆无 → 补建；
     // 记忆有而 config 无（回滚残留）→ 移除；名称/服务类型漂移 → 校正。
+    // 已存条目的 role/description 不因对齐丢失——重建条目的 role 恒为 null
+    // （config.json 推不出角色），以 null 覆盖已固化角色会破坏记忆库保真
+    //（agent.md §3.2.1.3a：固化信息跨会话稳定）。
     if (config_json) {
         const config_entries = rebuild_entries(config_json, site_abbr);
         if (config_entries.length > 0 || _config_has_data_sections(config_json)) {
@@ -109,17 +112,19 @@ export async function load_abbr_registry(
                 const ex = byId.get(ce.id);
                 if (!ex) {
                     byId.set(ce.id, ce);
-                } else if (
-                    ex.name !== ce.name ||
-                    ex.service_type !== ce.service_type ||
-                    ex.role !== ce.role
-                ) {
-                    Object.assign(ex, {
-                        name: ce.name,
-                        service_type: ce.service_type,
-                        role: ce.role,
-                        description: ce.description,
-                    });
+                } else {
+                    if (
+                        ex.name !== ce.name ||
+                        ex.service_type !== ce.service_type
+                    ) {
+                        Object.assign(ex, {
+                            name: ce.name,
+                            service_type: ce.service_type,
+                        });
+                    }
+                    if (ce.role !== null && ex.role !== ce.role) {
+                        ex.role = ce.role;
+                    }
                 }
             }
             if (config_entries.length === 0) {

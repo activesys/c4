@@ -7,7 +7,7 @@
 
 import { readFileSync } from "node:fs";
 
-import type { MultiServerMCPClient } from "@langchain/mcp-adapters";
+import type { C4McpManager } from "../mcp/client.js";
 import { readPoints, type ReadEntry } from "./shm_client.js";
 
 export type DisplayMode = "realtime" | "cumulative";
@@ -99,7 +99,7 @@ interface ActiveSession {
 }
 
 export interface DisplayServiceOptions {
-    multiClient: MultiServerMCPClient;
+    manager: C4McpManager;
     /** ~/.local/c4 语义下的 config.json 路径（点位枚举来源） */
     configPath: string;
     staleThresholdMs?: number;
@@ -111,7 +111,7 @@ function nowMs(): number {
 }
 
 export class DisplayService {
-    private readonly multiClient: MultiServerMCPClient;
+    private readonly manager: C4McpManager;
     private readonly configPath: string;
     private readonly staleThresholdMs: number;
     private readonly logger?: DisplayServiceOptions["logger"];
@@ -121,7 +121,7 @@ export class DisplayService {
     private seqCounter = 0;
 
     constructor(options: DisplayServiceOptions) {
-        this.multiClient = options.multiClient;
+        this.manager = options.manager;
         this.configPath = options.configPath;
         this.staleThresholdMs = options.staleThresholdMs ?? 60_000;
         this.logger = options.logger;
@@ -321,7 +321,7 @@ export class DisplayService {
             const shmIds = session.points.map((p) => p.shmId);
             let result;
             try {
-                result = await readPoints(this.multiClient, shmIds);
+                result = await readPoints(this.manager, shmIds);
             } catch (err) {
                 // 调用级失败：本轮整体跳过，保持上次值与状态（不杜撰）
                 session.consecutiveFailures += 1;
