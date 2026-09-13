@@ -66,4 +66,4 @@ dist/
 test-results/
 playwright-report/
 test/func_case_e2e/results.log
-c4/build/
+build/
