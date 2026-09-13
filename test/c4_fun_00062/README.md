@@ -4,7 +4,9 @@
 > **对应需求**：C4_RS_00090
 > **设计参考**：`c4/docs/design/c4_modbus_client.md` §3, §6
 
-C4_FUN_00062：Agent 生成 Modbus/TCP 采集 MCP 服务的配置文件后，启动 MCP 服务，MCP 服务根据配置文件启动多个 Modbus/TCP Client。
+C4_FUN_00062：Agent 生成 Modbus/TCP 采集 MCP 服务的配置文件后，经 Unix socket 调用该服务的
+`start` 工具拉起数据路径实例（MCP 服务进程为常驻系统服务，不由 Agent 拉起——见
+c4_architecture.md §3.1.1），MCP 服务根据配置文件启动多个 Modbus/TCP Client。
 
 ---
 
@@ -17,7 +19,7 @@ C4_FUN_00062：Agent 生成 Modbus/TCP 采集 MCP 服务的配置文件后，启
 3. 以 `O_RDWR` 附加已有共享内存并校验 magic
 4. 构建 `(uid, fun, addr) → shm_id` 映射索引
 5. 为每个配置实例启动一个 goroutine，`net.Dial` 主动连接 Modbus/TCP 设备（modbusd）
-6. 全部实例连接成功才返回 `"success"`；任一失败则 tear down 并返回 `CONNECT_FAILED`
+6. 实例进入运行态后 `start` 即返回 `"success"`；设备不可达不作为 tool 错误，由实例按 T0 周期后台重拨（连接成功不作为返回条件）
 7. 各错误码正确返回
 
 ---
@@ -110,11 +112,12 @@ c4_modbus_client 的 `fun`（Modbus 功能码 1/2/3/4）与 modbusd 的 `funcode
 
 ### 2.6 连接验证
 
-`start` 返回 `"success"` 即证明**全部实例的 TCP 连接已建立**（设计文档 §3.2：
-全部连接成功才返回 success）。无需额外连接探测。
+T0 语义下 `start` 返回 `"success"` 只表示各实例已进入运行态；TCP 连接由各实例 goroutine
+按 t0 周期后台建立/重拨（c4_modbus_client.md §3.2），连接成功不作为 `start` 返回条件。
 
-`CONNECT_FAILED` 场景（TC12）：c4 配置指向**无 modbusd 监听的端口**，
-`net.DialTimeout` 超时失败。
+连接成功的验证手段：实例的 shm block `write_seq` 持续递增（轮询写入成立即连接已建立）。
+设备不可达场景（TC12）：c4 配置指向**无 modbusd 监听的端口**，该实例保持未连接态、
+按 T0 周期后台重拨，`start` 仍返回 success。
 
 ### 2.7 conftest.py 导出 fixture 契约
 
@@ -185,7 +188,8 @@ c4_modbus_client 的 `fun`（Modbus 功能码 1/2/3/4）与 modbusd 的 `funcode
 - **前置**：启动 redis + modbusd（1 point，§3.1），redis_tool 写 `MB_PT_001` 值，c4 配置（§3.2）
 - **操作**：启动 SUT → MCP initialize → 调用 `start`（传入 config_path）
 - **预期**：`start` 返回 `"success"`（`isError: false`）
-- **说明**：`start` 要求全部实例连接成功才返回 `"success"`，返回 success 即证明 modbusd 连接已建立
+- **说明**：`start` 使实例进入运行态即返回 `"success"`；modbusd 连接由实例按 T0 周期后台建立，
+  通过 `write_seq` 递增验证连接与轮询正常
 
 ### TC2: 多实例启动 — 3 个实例各自连接
 
@@ -201,11 +205,12 @@ c4_modbus_client 的 `fun`（Modbus 功能码 1/2/3/4）与 modbusd 的 `funcode
 - **操作**：调用 `start`
 - **预期**：返回 `"success"`（无实例需连接，但仍需 shm_open + mmap + magic 校验）
 
-### TC4: 重复调用 start → ALREADY_RUNNING
+### TC4: 重复调用 start → ALREADY_RUNNING（幂等成功）
 
 - **前置**：TC1 已成功启动
 - **操作**：再次调用 `start`（同一 SUT 进程，无间隔 `stop`）
-- **预期**：`isError: true`，`content[0].text` 以 `ALREADY_RUNNING` 开头
+- **预期**：`isError: false`，`content[0].text` 含 `ALREADY_RUNNING`——重复 start 属成功
+  路径的幂等结果，**不是错误**（c4_architecture.md §3.1.2）；全部实例连接保持，轮询不中断
 
 ### TC5: start 未调用前调用 stop → 幂等 success
 
@@ -219,13 +224,17 @@ c4_modbus_client 的 `fun`（Modbus 功能码 1/2/3/4）与 modbusd 的 `funcode
 - **操作**：调用 `start`，提供 `instance_id` 但不提供 `config_path` 参数（`arguments: {"instance_id": "c4_fun62tc6"}`）
 - **预期**：`isError: true`，错误码 `CONFIG_PATH_MISSING`
 
-### TC7: 配置文件格式错误 → CONFIG_PARSE_ERROR
+### TC7: 配置文件格式错误
 
 - **前置**：共享内存正常。`pytest.mark.parametrize` 子场景：
   - (a) JSON 语法错误：`{invalid json`
   - (b) 合法 JSON 但缺 key：`{"c4_shm_manager": {...}}`（无 `c4_modbus_client` 段）
 - **操作**：调用 `start`（传入对应 config_path）
-- **预期**：`isError: true`，错误码 `CONFIG_PARSE_ERROR`
+- **预期**：
+  - (a) `isError: true`，错误码 `CONFIG_PARSE_ERROR`——`CONFIG_PARSE_ERROR` 仅针对文件不可读
+    或 JSON 非法（c4_architecture.md §3.3.1）
+  - (b) 空/缺失配置段 = 期望状态零实例（合法），`start` 幂等返回 `"success"`（`isError: false`），
+    不启动任何实例（c4_architecture.md §3.1.2/§3.3.1 空配置段语义）
 
 ### TC8: 共享内存不存在 → SHM_OPEN_FAILED
 
@@ -264,22 +273,23 @@ c4_modbus_client 的 `fun`（Modbus 功能码 1/2/3/4）与 modbusd 的 `funcode
 - **操作**：调用 `start`
 - **预期**：`isError: true`，错误码 `INVALID_POINT`，消息指明具体字段与取值
 
-### TC12: 设备不可达 → CONNECT_FAILED（tear down）
+### TC12: 设备不可达 — start 成功，实例按 T0 周期后台重拨
 
 - **前置**：共享内存正常。配置 2 个实例：实例 1 指向正常 modbusd，实例 2 指向无监听的端口
 - **操作**：调用 `start`
 - **预期**：
-  - `isError: true`，`content[0].text` 以 `CONNECT_FAILED` 开头，携带失败实例的 `ip:port`
-  - **tear down**：SUT 恢复到调用前状态（未运行），实例 1 的连接也被关闭
+  - `start` 返回 `"success"`（`isError: false`）——连接成功不作为返回条件；不可达的实例 2 保持
+    未连接态，按 T0 周期后台重拨（c4_modbus_client.md §3.2/§6.1）
+  - 实例 1 不受影响，正常轮询写入
   - 随后调用 `stop` 幂等返回 `"success"`
-- **tear-down 验证**：
-  1. 记录实例 1 对应 shm block（shm_id=1）的 `write_seq` 为 `seq_before`
-  2. 等待 3 个轮询周期（300ms）后重读，断言 `write_seq == seq_before`
-     （实例 1 的 goroutine 已被 tear down，不再轮询写入）
-- **说明**：验证设计文档 §3.2「全部连接成功才 success，任一失败则 tear down」。
-  注：该负向断言是「实例 1 不再写入」的必要信号，依赖设计文档 §3.2「tear-down 与
-  start 返回同步完成」的约定；若实例 1 在失败前从未写入（`state=0, write_seq=0`），
-  断言平凡成立，属弱信号但不会误报。
+- **验证**：
+  1. `start` 返回后记录实例 1 对应 shm block（shm_id=1）的 `write_seq` 为 `seq_before`
+  2. 等待 3 个轮询周期（300ms）后重读，断言 `write_seq > seq_before`
+     （实例 1 正常轮询写入；业务层网络错误不影响其他实例）
+- **说明**：验证 T0 语义（c4_modbus_client.md §3.2/§6.1、c4_architecture.md §3.3.1 错误分类）：
+  `start` 使实例进入运行态即返回 success；TCP 连接失败属运行态业务错误，仅记录日志并按
+  t0 周期重连，禁止作为 tool 错误返回，也禁止 tear down 已连接实例。注：若实例 1 在
+  观察窗口内尚未建立连接（`write_seq` 未递增），属弱信号，可延长等待窗口重试。
 
 ---
 

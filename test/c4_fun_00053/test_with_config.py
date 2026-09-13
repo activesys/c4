@@ -61,6 +61,12 @@ def _make_config(writer_sections=None, reader_sections=None,
 # ──────────────────────────────────────────────
 
 
+def _assert_mcp_success(resp):
+    """验证 MCP 响应为成功：isError=false 且文本为 success。"""
+    assert resp["result"].get("isError", False) is False, f"Expected success, got: {resp}"
+    assert resp["result"]["content"][0]["text"] == "success"
+
+
 def _assert_mcp_error(resp, expected_prefix):
     assert resp["result"]["isError"] is True, f"Expected isError, got: {resp}"
     text = resp["result"]["content"][0]["text"]
@@ -480,9 +486,14 @@ class TestWithConfigShmCreation:
         finally:
             os.unlink(config_path)
 
-    # ── TC20: 分支 2 重复创建 ──────────────────
+    # ── TC20: 分支 2 重复创建 → 幂等附加成功（create-or-attach） ──────────────────
 
     def test_tc20_duplicate_create_with_config(self, mcp, isolated_shm):
+        """TC20: 带 config 创建两次 → 第二次幂等附加，返回 success。
+
+        额外验证：首次创建回填的 shm_id 分配保持不变，配置文件不被二次改写
+        （create_shm 幂等 create-or-attach，段已存在即附加，不重复分配）。
+        """
         iid = "c4_testtc20"
         isolated_shm(iid)
 
@@ -506,10 +517,28 @@ class TestWithConfigShmCreation:
             )
             assert resp1["result"].get("isError", False) is False
 
+            with open(config_path, "r") as f:
+                content_after_first = f.read()
+
             resp2 = mcp.call_tool(
                 "create_shm", {"instance_id": iid, "config_path": config_path},
             )
-            _assert_mcp_error(resp2, "SHM_ALREADY_EXISTS")
+            _assert_mcp_success(resp2)
+
+            # 段已存在 → 附加路径：不重复分配、不回填 → 配置文件不被二次改写
+            with open(config_path, "r") as f:
+                content_after_second = f.read()
+            assert content_after_second == content_after_first, (
+                "config file was rewritten by the idempotent create_shm attach"
+            )
+
+            # 首次创建回填的 shm_id 分配保持不变
+            with open(config_path, "r") as f:
+                cfg = json.load(f)
+            writer_pts = cfg["c4_modbus_client"][0]["points"]
+            reader_pts = cfg["c4_asfp2_client"][0]["points"]
+            assert all(pt["shm_id"] > 0 for pt in writer_pts)
+            assert reader_pts[0]["shm_id"] == writer_pts[0]["shm_id"]
         finally:
             os.unlink(config_path)
 

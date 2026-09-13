@@ -1,4 +1,10 @@
-"""C4_FUN_00084 测试栈 — 复用 00082 基建，instance c4_ft84。"""
+"""C4_FUN_00084 测试栈 — 复用 00082 基建，instance c4_ft84。
+
+独立服务模型（c4_architecture.md §3.1.1）：测试栈经 C4_SOCK_DIR 自启常驻
+c4_shm_manager（仅监听 socket、零实例），Agent 是 MCP 客户端、经 socket 连接、
+从不拉起 MCP 进程。降级场景（TC15/TC17）kill 的是本栈自启的常驻 shm_manager
+（按 C4_SOCK_DIR 定位，非 Agent 子进程）。
+"""
 
 import importlib.util
 import json
@@ -7,7 +13,9 @@ import socket
 import subprocess
 import tempfile
 import time
+import urllib.request
 from pathlib import Path
+from typing import TextIO
 
 import pytest
 
@@ -56,11 +64,18 @@ def _agent_entry() -> list[str]:
 
 
 class AgentStack:
-    def __init__(self, base_url: str, shm_path: str, proc: subprocess.Popen, tmp: Path):
+    sock_dir: str
+    proc: subprocess.Popen
+    shm_proc: subprocess.Popen
+    shm_log: TextIO
+
+    def __init__(self, base_url: str, shm_path: str, tmp: Path):
         self.base_url = base_url
         self.shm_path = shm_path
-        self.proc = proc
         self.tmp = tmp
+        self.proc = None  # type: ignore[assignment]  # _spawn() 填充
+        self.shm_proc = None  # type: ignore[assignment]
+        self.shm_log = None  # type: ignore[assignment]
 
     def shm_ids(self) -> dict:
         """key → shm_id（create_shm 回填后的 tmp config.json）。"""
@@ -72,16 +87,36 @@ class AgentStack:
         return out
 
     def restart(self) -> None:
+        """重启整栈（Agent + 常驻 c4_shm_manager）。
+
+        shm_manager 被杀后无自愈（恢复途径＝整机重启/进程重启，README 00084 TC17），
+        故 restart 同时拉起两者；shm 段持久（不 unlink），write_seq 不归零（TC18）。
+        """
         self.proc.terminate()
         try:
             self.proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
             self.proc.kill()
+        if self.shm_proc is not None:
+            self.shm_proc.terminate()
+            try:
+                self.shm_proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.shm_proc.kill()
         self._spawn()
 
     def _spawn(self) -> None:
+        # 常驻 c4_shm_manager 先行（Agent 连接前置；unlink-before-bind 自清残留 socket）
         env = os.environ.copy()
+        env["C4_SOCK_DIR"] = str(self.tmp / "socks")
         env.setdefault("DEEPSEEK_API_KEY", "test-dummy-key")
+        self.shm_log = open(self.tmp / "shm_manager.log", "w")
+        self.shm_proc = subprocess.Popen(
+            [_find_shm_binary()], stdin=subprocess.DEVNULL,
+            stdout=self.shm_log, stderr=subprocess.STDOUT, env=env,
+        )
+        poll_until(lambda: (self.tmp / "socks" / "c4_shm_manager.sock").exists(),
+                   deadline_s=10, interval_s=0.1)
         self.proc = subprocess.Popen(
             _agent_entry() + ["--config-dir", str(self.tmp)],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env,
@@ -89,7 +124,6 @@ class AgentStack:
         self._wait_ready()
 
     def _wait_ready(self, deadline_s: float = 60.0) -> None:
-        import urllib.request
         end = time.time() + deadline_s
         while time.time() < end:
             try:
@@ -101,11 +135,29 @@ class AgentStack:
             time.sleep(0.5)
         raise RuntimeError("Agent 未在截止时间内就绪")
 
+    def _teardown(self) -> None:
+        self.proc.terminate()
+        try:
+            self.proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            self.proc.kill()
+        if self.shm_proc is not None:
+            self.shm_proc.terminate()
+            try:
+                self.shm_proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.shm_proc.kill()
+        if self.shm_log is not None:
+            self.shm_log.close()
+
 
 @pytest.fixture(scope="session")
 def agent_stack():
+    """Agent REST 栈：instance c4_ft84（独立服务模型：测试栈自启常驻
+    c4_shm_manager，Agent 经 socket 连接、从不拉起 MCP 进程）。"""
     tmp = Path(tempfile.mkdtemp(prefix="c4_ft84_"))
     (tmp / "registry").mkdir()
+    (tmp / "socks").mkdir()
     port = _free_port()
     agent_json = {
         "instance_id": INSTANCE,
@@ -120,22 +172,21 @@ def agent_stack():
     (tmp / "agent.json").write_text(json.dumps(agent_json, indent=2))
     (tmp / "config.json").write_text(json.dumps(FIXTURE_CONFIG, indent=2))
 
-    env = os.environ.copy()
-    env.setdefault("DEEPSEEK_API_KEY", "test-dummy-key")
-    proc = subprocess.Popen(
-        _agent_entry() + ["--config-dir", str(tmp)],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env,
-    )
     stack = AgentStack(base_url=f"http://127.0.0.1:{port}",
-                       shm_path=f"/dev/shm/{INSTANCE}", proc=proc, tmp=tmp)
+                       shm_path=f"/dev/shm/{INSTANCE}", tmp=tmp)
+    stack.sock_dir = str(tmp / "socks")
     try:
-        stack._wait_ready()
+        stack._spawn()
+        # 等启动恢复（瀑布 L2 create_shm 回填 shm_id）完成
+        def shm_ids_backfilled():
+            try:
+                return all(v > 0 for v in stack.shm_ids().values())
+            except Exception:
+                return False
+        assert poll_until(shm_ids_backfilled, deadline_s=30, interval_s=0.5), \
+            "瀑布 create_shm 未回填 shm_id"
         time.sleep(1)
         yield stack
     finally:
-        proc.terminate()
-        try:
-            proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            proc.kill()
+        stack._teardown()
         shm_unlink(f"/{INSTANCE}")

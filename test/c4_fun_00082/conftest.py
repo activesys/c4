@@ -216,9 +216,16 @@ class AgentStack:
 
 @pytest.fixture(scope="session")
 def agent_stack():
-    """§3 Agent REST 栈：instance c4_ft82，agent 自启的 c4_shm_manager。"""
+    """§3 Agent REST 栈：instance c4_ft82。
+
+    独立服务模型（c4_architecture.md §3.1.1）：测试栈经 C4_SOCK_DIR 自启常驻
+    c4_shm_manager（仅监听 socket），Agent 是 MCP 客户端、经 socket 连接、
+    从不拉起 MCP 进程。
+    """
     tmp = Path(tempfile.mkdtemp(prefix="c4_ft82_"))
     (tmp / "registry").mkdir()
+    sock_dir = tmp / "socks"
+    sock_dir.mkdir()
     port = _free_port()
     shm_bin = _shm_manager_binary()
     agent_json = {
@@ -235,7 +242,17 @@ def agent_stack():
     (tmp / "config.json").write_text(json.dumps(FIXTURE_CONFIG, indent=2))
 
     env = os.environ.copy()
+    env["C4_SOCK_DIR"] = str(sock_dir)
     env.setdefault("DEEPSEEK_API_KEY", "test-dummy-key")
+    # 常驻 c4_shm_manager（stdin=/dev/null → resident 模式，零实例零 attach）
+    shm_log = open(tmp / "shm_manager.log", "w")
+    shm_proc = subprocess.Popen(
+        [shm_bin], stdin=subprocess.DEVNULL,
+        stdout=shm_log, stderr=subprocess.STDOUT, env=env,
+    )
+    # 等 socket 就绪（Agent 连接前置）
+    sock_path = sock_dir / "c4_shm_manager.sock"
+    poll_until(lambda: sock_path.exists(), deadline_s=10, interval_s=0.1)
     proc = subprocess.Popen(
         _agent_entry() + ["--config-dir", str(tmp)],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env,
@@ -244,9 +261,10 @@ def agent_stack():
                        shm_path=f"/dev/shm/{INSTANCE_AGENT}",
                        config_json=tmp / "config.json", proc=proc)
     stack.tmp_dir = tmp
+    stack.sock_dir = str(sock_dir)
     try:
         stack._wait_ready()
-        # 等启动恢复（create_shm 回填 shm_id）完成
+        # 等启动恢复（瀑布 L2 create_shm 回填 shm_id）完成
         poll_until(
             lambda: json.loads(
                 urllib.request.urlopen(stack.base_url + "/api/state", timeout=2).read()
@@ -261,6 +279,12 @@ def agent_stack():
             proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
             proc.kill()
+        shm_proc.terminate()
+        try:
+            shm_proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            shm_proc.kill()
+        shm_log.close()
         shm_unlink(f"/{INSTANCE_AGENT}")
 
 

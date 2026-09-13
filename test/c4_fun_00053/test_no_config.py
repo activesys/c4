@@ -153,10 +153,15 @@ class TestNoConfigShmCreation:
         finally:
             os.unlink(tmp_path)
 
-    # ── TC4: 重复创建 → SHM_ALREADY_EXISTS ──────────
+    # ── TC4: 重复创建 → 幂等附加成功（create-or-attach） ──────────
 
     def test_tc4_duplicate_create(self, mcp, isolated_shm):
-        """TC4: 同一 instance_id 创建两次 → 第二次返回 SHM_ALREADY_EXISTS。"""
+        """TC4: 同一 instance_id 创建两次 → 第二次幂等附加，返回 success。
+
+        create_shm 幂等 create-or-attach（c4_shm_manager.md §1.3/§3.1）：
+        段已存在且 magic/版本校验通过 → 附加并成功返回，段不被重建。
+        SHM_ALREADY_EXISTS 已随幂等语义移除。
+        """
         iid = "c4_testtc4"
         isolated_shm(iid)
 
@@ -167,12 +172,29 @@ class TestNoConfigShmCreation:
         )
         assert resp1["result"].get("isError", False) is False
 
-        # 第二次创建 — 应失败
+        # 首次创建后的段快照（大小 + Header 全字段）
+        path = shm_path(iid)
+        size_before = get_shm_size(path)
+        header_before = read_shm_header(path)
+
+        # 第二次创建 — 幂等附加，返回 success（isError: false）
         resp2 = mcp.call_tool(
             "create_shm",
             {"instance_id": iid},
         )
-        _assert_mcp_error(resp2, "SHM_ALREADY_EXISTS")
+        _assert_mcp_success(resp2)
+
+        # 段未被重建：大小与 Header 字段与首次创建后一致
+        assert get_shm_size(path) == size_before, (
+            f"shm size changed after duplicate create: {size_before} → {get_shm_size(path)}"
+        )
+        header_after = read_shm_header(path)
+        for field in ("magic", "version", "reserved", "point_count", "max_points",
+                      "global_write_seq"):
+            assert header_after[field] == header_before[field], (
+                f"Header field '{field}' changed after duplicate create: "
+                f"{header_before[field]} → {header_after[field]}"
+            )
 
     # ── TC5: Header 全字段校验 ─────────────────────
 

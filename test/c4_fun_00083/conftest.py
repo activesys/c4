@@ -56,6 +56,8 @@ def _agent_entry() -> list[str]:
 
 
 class AgentStack:
+    sock_dir: str
+
     def __init__(self, base_url: str, shm_path: str, proc: subprocess.Popen, tmp: Path):
         self.base_url = base_url
         self.shm_path = shm_path
@@ -81,6 +83,7 @@ class AgentStack:
 
     def _spawn(self) -> None:
         env = os.environ.copy()
+        env["C4_SOCK_DIR"] = str(self.tmp / "socks")
         env.setdefault("DEEPSEEK_API_KEY", "test-dummy-key")
         self.proc = subprocess.Popen(
             _agent_entry() + ["--config-dir", str(self.tmp)],
@@ -104,9 +107,11 @@ class AgentStack:
 
 @pytest.fixture(scope="session")
 def agent_stack():
-    """Agent REST 栈：instance c4_ft83。"""
+    """Agent REST 栈：instance c4_ft83（独立服务模型：测试栈经 C4_SOCK_DIR 自启
+    常驻 c4_shm_manager，Agent 经 socket 连接、从不拉起 MCP 进程）。"""
     tmp = Path(tempfile.mkdtemp(prefix="c4_ft83_"))
     (tmp / "registry").mkdir()
+    (tmp / "socks").mkdir()
     port = _free_port()
     agent_json = {
         "instance_id": INSTANCE,
@@ -122,13 +127,22 @@ def agent_stack():
     (tmp / "config.json").write_text(json.dumps(FIXTURE_CONFIG, indent=2))
 
     env = os.environ.copy()
+    env["C4_SOCK_DIR"] = str(tmp / "socks")
     env.setdefault("DEEPSEEK_API_KEY", "test-dummy-key")
+    shm_log = open(tmp / "shm_manager.log", "w")
+    shm_proc = subprocess.Popen(
+        [_find_shm_binary()], stdin=subprocess.DEVNULL,
+        stdout=shm_log, stderr=subprocess.STDOUT, env=env,
+    )
+    poll_until(lambda: (tmp / "socks" / "c4_shm_manager.sock").exists(),
+               deadline_s=10, interval_s=0.1)
     proc = subprocess.Popen(
         _agent_entry() + ["--config-dir", str(tmp)],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env,
     )
     stack = AgentStack(base_url=f"http://127.0.0.1:{port}",
                        shm_path=f"/dev/shm/{INSTANCE}", proc=proc, tmp=tmp)
+    stack.sock_dir = str(tmp / "socks")
     try:
         stack._wait_ready()
         time.sleep(1)
@@ -139,6 +153,12 @@ def agent_stack():
             proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
             proc.kill()
+        shm_proc.terminate()
+        try:
+            shm_proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            shm_proc.kill()
+        shm_log.close()
         shm_unlink(f"/{INSTANCE}")
 
 

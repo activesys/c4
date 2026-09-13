@@ -8,8 +8,10 @@ import json
 import mmap
 import os
 import struct
+import subprocess
 import sys
 import tempfile
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -22,6 +24,12 @@ from conftest import (
     _make_partial_unreachable_config,
 )
 from shm_helpers import read_shm_header
+
+
+def _has_established_connection(port):
+    """检查本机是否存在到 127.0.0.1:<port> 的 ESTAB TCP 连接。"""
+    out = subprocess.run(["ss", "-tn"], capture_output=True, text=True).stdout
+    return f"127.0.0.1:{port}" in out
 
 
 class TestStart:
@@ -152,9 +160,23 @@ class TestStart:
         resp1 = mcp.call_tool("start", args)
         _assert_mcp_success(resp1)
 
-        # 第二次 start — 应返回 ALREADY_RUNNING
+        # 等待实例与 asfp2_server 建链
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and not _has_established_connection(9904):
+            time.sleep(0.1)
+        assert _has_established_connection(9904), "client did not connect to 9904"
+
+        # 第二次 start — ALREADY_RUNNING 为正常结果（isError: false），无动作
         resp2 = mcp.call_tool("start", args)
-        _assert_mcp_error(resp2, "ALREADY_RUNNING")
+        assert resp2["result"].get("isError", False) is False, (
+            f"ALREADY_RUNNING is a success-path result, got: {resp2}"
+        )
+        assert "ALREADY_RUNNING" in resp2["result"]["content"][0]["text"]
+
+        # 连续性：已建链的实例与 TCP 连接保持不变，数据路径不中断
+        assert _has_established_connection(9904), (
+            "connection to 9904 lost after ALREADY_RUNNING response"
+        )
 
     # ──────────────────────────────────────────────
     #  TC5: start 未调用前调用 stop → 幂等 success
@@ -222,16 +244,17 @@ class TestStart:
                 pass
 
     # ──────────────────────────────────────────────
-    #  TC7: 配置文件格式错误 → CONFIG_PARSE_ERROR
+    #  TC7: 配置缺失 c4_asfp2_client key → 零实例期望，幂等 success
     # ──────────────────────────────────────────────
 
-    def test_tc7_config_parse_error(
+    def test_tc7_missing_section_zero_instances(
         self, mcp, prepare_environment, isolated_shm
     ):
         """
         前置：SHM 正常。配置缺失 c4_asfp2_client key。
         操作：调用 start。
-        预期：isError: true，CONFIG_PARSE_ERROR。
+        预期：isError: false，返回 success —— 段缺失与空数组在 schema 层等价，
+        期望状态为零实例（c4_architecture.md §3.1.2/§3.3.1 空配置段语义）。
         """
         instance_id = "c4_tc7"
         isolated_shm(instance_id)
@@ -253,7 +276,12 @@ class TestStart:
         resp = mcp.call_tool(
             "start", {"instance_id": instance_id, "config_path": config_path},
         )
-        _assert_mcp_error(resp, "CONFIG_PARSE_ERROR")
+        assert resp["result"].get("isError", False) is False, (
+            f"missing section = zero instances, start must succeed: {resp}"
+        )
+        assert resp["result"]["content"][0]["text"] == "success"
+
+        _assert_mcp_success(mcp.call_tool("stop", {}))
 
     # ──────────────────────────────────────────────
     #  TC8: config_path 指向不存在的文件 → CONFIG_PATH_MISSING

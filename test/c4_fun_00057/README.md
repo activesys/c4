@@ -4,7 +4,9 @@
 > **对应需求**：C4_RS_00095
 > **设计参考**：`docs/design/c4_asfp2_server.md`
 
-C4_FUN_00057：Agent 生成 ASFP2 接收 MCP 服务的配置文件后，启动 MCP 服务，MCP 服务根据配置文件启动多个 ASFP2 Server。
+C4_FUN_00057：Agent 生成 ASFP2 接收 MCP 服务的配置文件后，经 Unix socket 调用该服务的
+`start` 工具拉起数据路径实例（MCP 服务进程为常驻系统服务，不由 Agent 拉起——见
+c4_architecture.md §3.1.1），MCP 服务根据配置文件启动多个 ASFP2 Server。
 
 ---
 
@@ -147,11 +149,14 @@ Python 通过 `socket.create_connection(("127.0.0.1", port), timeout=1)` 验证�
 - **预期**：返回 `"success"`（无实例需启动，无端口需监听，但仍需 shm_open + mmap）
 - **注意**：`adjust_shm` 的 writer_points=0 时，shm 是默认 10 万点大小。asfp2_server 的 start 不依赖 point_count，仅需 shm 存在且 magic 有效。
 
-### TC4: 重复调用 start → ALREADY_STARTED
+### TC4: 重复调用 start → ALREADY_RUNNING（幂等成功）
 
 - **前置**：TC1 已成功启动
-- **操作**：再次调用 `start`（同一 SUT 进程）
-- **预期**：`isError: true`，错误码 `ALREADY_STARTED`
+- **操作**：再次调用 `start`（同一 SUT 进程，不经 `stop`）
+- **预期**：返回 `isError: false`，结果含 `ALREADY_RUNNING`——重复 start 属成功路径的
+  幂等结果，**不是错误**；实例保持运行、端口 9000 持续监听，数据路径不中断、不被重建
+- **说明**：ALREADY_RUNNING 是一等成功路径结果（c4_architecture.md §3.1.2 第 2 级收敛：
+  ALREADY_RUNNING ＝ 实例本就在运行 → 无动作）
 
 ### TC5: start 未调用前调用 stop → 幂等 success
 
@@ -184,17 +189,16 @@ Python 通过 `socket.create_connection(("127.0.0.1", port), timeout=1)` 验证�
 - **操作**：调用 `start`，提供 `instance_id` 但不提供 `config_path` 参数（`arguments: {"instance_id": "c4_testtc9"}`）
 - **预期**：返回 `isError: true`，错误码 `CONFIG_PATH_MISSING`
 
-### TC10: 配置文件格式错误 → CONFIG_PARSE_ERROR
+### TC10: 配置文件格式错误
 
-- **前置**：传入格式错误的配置文件。共享内存正常创建。
+- **前置**：传入格式错误的配置文件。共享内存正常。
 - **操作**：调用 `start`
-- **预期**：`isError: true`，错误码 `CONFIG_PARSE_ERROR`
 - **子场景**（`pytest.mark.parametrize`）：
 
-  | 子场景 | 配置内容 | 触发条件 |
-  |--------|---------|---------|
-  | (a) JSON 语法错误 | `{invalid json` | JSON 解析失败 |
-  | (b) 合法 JSON 但缺 key | `{"c4_shm_manager": {...}}` | `c4_asfp2_server` 顶层 key 不存在 |
+  | 子场景 | 配置内容 | 触发条件 | 预期 |
+  |--------|---------|---------|------|
+  | (a) JSON 语法错误 | `{invalid json` | JSON 解析失败 | `isError: true`，错误码 `CONFIG_PARSE_ERROR`（`CONFIG_PARSE_ERROR` 仅针对文件不可读或 JSON 非法，c4_architecture.md §3.3.1） |
+  | (b) 合法 JSON 但缺 key | `{"c4_shm_manager": {...}}` | `c4_asfp2_server` 顶层 key 不存在 | 空/缺失配置段 = 期望状态零实例（合法），`start` 幂等返回 `"success"`（`isError: false`），不启动任何实例（c4_architecture.md §3.1.2/§3.3.1 空配置段语义） |
 
 ---
 
@@ -222,7 +226,7 @@ TC6 需要确保端口在测试前未被占用。建议 conftest.py 的 `isolate
 ### 5.4 共享内存操作
 
 - Python 通过 `mmap` 直接读写共享内存进行验证
-- 修改 Header magic（TC8）：`mmap[0:4] = struct.pack(">I", 0xDEADBEEF)`
+- 修改 Header magic（TC8）：`mmap[0:4] = struct.pack("=I", 0xDEADBEEF)`（本机序，同 §5.7）
 - 路径：`/dev/shm/{instance_id}`
 - 测试结束后必须 `shm_unlink`，建议在 fixture teardown 中清理
 
@@ -240,11 +244,12 @@ TC6 需要确保端口在测试前未被占用。建议 conftest.py 的 `isolate
 
 ### 5.7 字节序
 
-共享内存中所有多字节字段为大端存储。Python `struct.unpack` 使用 `>` 前缀：
+共享内存中所有多字节字段按**本机序**存储（`c4_architecture.md` §2.2：Writer 与 Reader
+同机运行，无网络序转换，同 C4_FUN_00053 §4.3）。Python `struct.unpack` 使用 `=` 前缀：
 
 | 字段 | 格式 |
 |------|------|
-| magic | `>I` |
-| version | `>H` |
-| point_count | `>I` |
-| max_points | `>I` |
+| magic | `=I` |
+| version | `=H` |
+| point_count | `=I` |
+| max_points | `=I` |

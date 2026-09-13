@@ -30,9 +30,10 @@ shm_unlink）。shm 播种为测试线程受控周期 seqlock 直写。
 | TC7 | 降级期不污染统计 | 会话运行中 kill c4_shm_manager（轮询截止 10s 等 degraded=true），持续 ≥3 轮 | `degraded=true` 期间 `freq.count` 与 `tick` 均不推进 |
 | TC8 | 自适应阈值（slow，~140s） | 点 C 周期 25s 写入 ≥55s（≥2 变位，观测平均 ≈25s → 有效阈值 75s，**窗口剪空后保留**） | 静默 65s（<75s）时 state 仍 `ok`；**轮询至 `stale`（截止静默 90s）**（>75s 后转 `stale`） |
 
-> TC4/TC5/TC8 为长时用例，`pytest.mark.slow` 标注。TC7 的恢复路径（shm_manager
-> 重生后自动续读）依赖 Agent MCP 故障自愈（C4_FUN_00021，❌ 未实现），自愈落地后
-> 补充恢复断言（与 `c4_fun_00084` TC17 注一致）。
+> TC4/TC5/TC8 为长时用例，`pytest.mark.slow` 标注。TC7 的恢复路径（c4_shm_manager 进程
+> 重启、socket 重新监听后，Agent 退避重连并按 c4_architecture.md §3.1.2 瀑布收敛、自动
+> 续读；测试栈内无 systemd，由测试手动重启进程模拟）依赖 MCP 服务异常重启与重连收敛
+> （C4_FUN_00021，❌ 未实现），落地后补充恢复断言（与 `c4_fun_00084` TC17 注一致）。
 
 ---
 

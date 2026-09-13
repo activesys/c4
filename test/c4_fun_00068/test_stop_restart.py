@@ -104,7 +104,7 @@ class TestInfluxdbStopRestart:
         resp = client.call_tool("stop", {})
         _assert_mcp_success(resp)
 
-    # ── TC3: start — 已运行时重复调用 ──────────
+    # ── TC3: start — 已运行时重复调用（幂等成功） ──────────
 
     def test_tc3_start_already_running(
         self, influxdb, create_database, prepare_environment,
@@ -116,10 +116,19 @@ class TestInfluxdbStopRestart:
             prepare_environment, start_influxdb_client, isolated_shm,
             influxdb, db, instance_id, [_single_point()], ["pt1"],
         )
+
+        # 再次 start — ALREADY_RUNNING 为正常结果（isError: false），无动作
         resp = client.call_tool(
             "start", {"instance_id": instance_id, "config_path": config_path}
         )
-        _assert_mcp_error(resp, "ALREADY_RUNNING")
+        assert resp["result"].get("isError", False) is False, (
+            f"ALREADY_RUNNING is a success-path result, got: {resp}"
+        )
+        assert "ALREADY_RUNNING" in resp["result"]["content"][0]["text"]
+
+        # 连续性：HTTP 写入循环保持运行 — 新数据仍被写入 InfluxDB
+        write_shm_block(shm_path(instance_id), 1, 10, 3.3, TS)
+        _wait_value(influxdb, db, "wind_turbine", "windspeed", 3.3)
 
     # ── TC4: 简单重启（stop → start） ──────────
 

@@ -2,17 +2,22 @@
 C4 Agent 功能测试公共基础设施 — conftest.py
 
 提供:
-  - McpClient: MCP stdio JSON-RPC 客户端
+  - SocketMcpClient: Unix-socket MCP JSON-RPC 客户端（连接常驻 MCP 服务）
+  - McpStackHandle: 常驻 MCP 测试栈（shm_manager + 5 个数据服务，C4_SOCK_DIR 指向临时目录）
   - AgentHandle: Agent 进程 + HTTP API 封装
   - SSEEventStream: HTTP SSE 流客户端
   - ChatHelper: 对话辅助（send / send_with_file / confirm）
-  - Fixtures: agent_binary, shm_manager_binary, registry_dir, agent, chat, abbr_registry
-  - Helpers: write_agent_json, write_config_json, corrupt_config_json, write_config_bak,
-    write_abbr_registry
+  - Fixtures: agent_binary, shm_manager_binary, registry_dir, mcp_stack, agent, chat, abbr_registry
+  - Helpers: write_agent_json, write_config_json, corrupt_config_json, write_config_prev,
+    write_pending_marker, clear_transaction_files, write_abbr_registry
   - pytest markers: llm (L2 tests)
 
+测试栈契约（c4_architecture.md §3.1.1 独立服务模型）:
+  - MCP 服务进程由测试栈自启（常驻、零实例、仅监听 socket——C4_SOCK_DIR 指向临时目录）；
+  - Agent 是 MCP 客户端，经 socket 连接、从不拉起 MCP 进程；
+  - config.json 事务文件：pending_change.json + config.json.prev.1~.3（无 .bak）。
+
 设计依据: c4/test/agent/README.md §2.2-2.3
-参考实现: c4/test/c4_fun_00057/conftest.py (McpClient pattern)
 """
 
 import atexit
@@ -24,6 +29,7 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 from http.client import HTTPConnection
 from pathlib import Path
@@ -41,44 +47,56 @@ import pytest  # type: ignore
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
 _CONFIG_DIR = _PROJECT_ROOT / "config"
 
+# 全部 MCP 服务（含 c4_shm_manager）——常驻测试栈的进程集合
+ALL_MCP_SERVICES = [
+    "c4_shm_manager",
+    "c4_modbus_client",
+    "c4_iec104_client",
+    "c4_asfp2_client",
+    "c4_asfp2_server",
+    "c4_influxdb_client",
+]
+
+# 会话级 socket 目录（pytest_configure 设置，Agent 子进程经环境变量继承）
+_SOCK_DIR: str = ""
+
 
 # ──────────────────────────────────────────────
-#  MCP Stdio Client (adapt from c4_fun_00057)
+#  Unix-Socket MCP Client
 # ──────────────────────────────────────────────
 
 
-class McpClient:
-    """通过 MCP stdio JSON-RPC 与 SUT 进程通信。"""
+class SocketMcpClient:
+    """通过 Unix-socket MCP JSON-RPC 与常驻 MCP 服务通信（一行一条 JSON）。"""
 
-    def __init__(self, binary_path: str):
-        self.process = subprocess.Popen(
-            [binary_path],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-        assert self.process.stdin is not None
-        assert self.process.stdout is not None
-        self._stdin = self.process.stdin
-        self._stdout = self.process.stdout
+    def __init__(self, service_type: str, sock_dir: str = "", timeout: float = 10.0):
+        sock_dir = sock_dir or _SOCK_DIR
+        assert sock_dir, "C4_SOCK_DIR 未设置（pytest_configure 未运行？）"
+        self.sock_path = os.path.join(sock_dir, f"{service_type}.sock")
+        self.timeout = timeout
+        self._sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self._sock.settimeout(timeout)
+        self._sock.connect(self.sock_path)
+        self._buf = b""
         self._next_id = 0
-        self._closed = False
         self._initialize()
 
     def _send(self, msg: dict) -> None:
-        line = json.dumps(msg, ensure_ascii=False)
-        self._stdin.write(line + "\n")
-        self._stdin.flush()
+        self._sock.sendall((json.dumps(msg, ensure_ascii=False) + "\n").encode("utf-8"))
 
     def _recv(self) -> dict:
-        line = self._stdout.readline()
-        if not line:
-            raise EOFError("MCP process exited unexpectedly")
-        return json.loads(line)
+        while True:
+            idx = self._buf.find(b"\n")
+            if idx >= 0:
+                line = self._buf[:idx]
+                self._buf = self._buf[idx + 1:]
+                return json.loads(line.decode("utf-8"))
+            chunk = self._sock.recv(65536)
+            if not chunk:
+                raise EOFError("MCP socket closed")
+            self._buf += chunk
 
     def _initialize(self) -> None:
-        """MCP 握手: initialize → 读响应 → initialized 通知。"""
         self._next_id += 1
         self._send({
             "jsonrpc": "2.0",
@@ -86,32 +104,17 @@ class McpClient:
             "method": "initialize",
             "params": {
                 "protocolVersion": "2024-11-05",
-                "capabilities": {"roots": {"listChanged": True}},
+                "capabilities": {},
                 "clientInfo": {"name": "c4_test", "version": "1.0.0"},
             },
         })
         resp = self._recv()
         if "error" in resp:
             raise RuntimeError(f"MCP initialize failed: {resp['error']}")
-        self._stdin.write(
-            json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n"
-        )
-        self._stdin.flush()
+        self._send({"jsonrpc": "2.0", "method": "notifications/initialized"})
 
-    def list_tools(self) -> dict:
-        """发送 tools/list 请求并返回响应。"""
-        self._next_id += 1
-        req_id = self._next_id
-        self._send({"jsonrpc": "2.0", "id": req_id, "method": "tools/list", "params": {}})
-        while True:
-            msg = self._recv()
-            if "id" in msg and msg["id"] == req_id:
-                return msg
-
-    def call_tool(
-        self, tool_name: str, arguments: dict, on_request: Optional[Callable] = None
-    ) -> dict:
-        """调用 MCP 工具。on_request 签名 (method, params, request_id) → dict | None。"""
+    def call_tool(self, tool_name: str, arguments: dict) -> dict:
+        """调用 MCP 工具，返回完整 JSON-RPC 响应。"""
         self._next_id += 1
         req_id = self._next_id
         self._send({
@@ -124,32 +127,99 @@ class McpClient:
             msg = self._recv()
             if "id" in msg and msg["id"] == req_id:
                 return msg
-            if "method" in msg and on_request is not None:
-                method = msg["method"]
-                params = msg.get("params", {})
-                response = on_request(method, params, msg["id"])
-                if response is not None:
-                    self._send(response)
+
+    def call_tool_text(self, tool_name: str, arguments: dict) -> tuple[str, bool]:
+        """调用工具，返回 (text, is_error)。"""
+        resp = self.call_tool(tool_name, arguments)
+        result = resp.get("result", {})
+        parts = [
+            c.get("text", "")
+            for c in (result.get("content") or [])
+            if isinstance(c, dict) and c.get("type") == "text"
+        ]
+        return ("\n".join(parts), bool(result.get("isError")))
+
+    def read_points(self, shm_ids: list[int]) -> dict:
+        """read_points 封装（返回 {reads: [...], errors: [...]}）。"""
+        text, is_err = self.call_tool_text("read_points", {"shm_ids": shm_ids})
+        assert not is_err, f"read_points failed: {text[:200]}"
+        return json.loads(text)
 
     def close(self) -> None:
-        """关闭 MCP 客户端并终止进程。"""
-        if self._closed:
+        try:
+            self._sock.close()
+        except Exception:
+            pass
+
+
+# ──────────────────────────────────────────────
+#  常驻 MCP 测试栈
+# ──────────────────────────────────────────────
+
+
+class McpStackHandle:
+    """常驻 MCP 服务测试栈：进程由测试自启，Agent 仅连接。"""
+
+    def __init__(self, sock_dir: str, log_dir: Path):
+        self.sock_dir = sock_dir
+        self.log_dir = log_dir
+        self.processes: dict[str, subprocess.Popen] = {}
+
+    def start_service(self, service_type: str) -> None:
+        """启动单个常驻 MCP 服务（stdin=/dev/null → resident 模式，仅监听 socket）。"""
+        if service_type in self.processes and self.processes[service_type].poll() is None:
             return
-        try:
-            self._stdin.close()
-        except Exception:
-            pass
-        try:
-            self._stdout.close()
-        except Exception:
-            pass
-        self.process.terminate()
-        try:
-            self.process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            self.process.kill()
-            self.process.wait()
-        self._closed = True
+        binary = _find_binary(f"C4_{service_type.removeprefix('c4_').upper()}_PATH", service_type)
+        log = open(self.log_dir / f"{service_type}.log", "w")
+        env = dict(os.environ)
+        env["C4_SOCK_DIR"] = self.sock_dir
+        self.processes[service_type] = subprocess.Popen(
+            [binary],
+            stdin=subprocess.DEVNULL,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            env=env,
+        )
+
+    def stop_service(self, service_type: str) -> None:
+        """停止单个服务（模拟服务下线——降级/重连测试用）。"""
+        proc = self.processes.pop(service_type, None)
+        if proc and proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+        sock = Path(self.sock_dir) / f"{service_type}.sock"
+        if sock.exists():
+            sock.unlink()
+
+    def start_all(self) -> None:
+        for svc in ALL_MCP_SERVICES:
+            self.start_service(svc)
+
+    def stop_all(self) -> None:
+        for svc in list(self.processes):
+            self.stop_service(svc)
+
+    def wait_socket(self, service_type: str, timeout: float = 10.0) -> bool:
+        deadline = time.time() + timeout
+        sock = Path(self.sock_dir) / f"{service_type}.sock"
+        while time.time() < deadline:
+            if sock.exists():
+                return True
+            time.sleep(0.1)
+        return False
+
+
+def _cleanup_instance_shm(instance_id: str) -> None:
+    """清理实例共享内存段（shm_unlink：/dev/shm/c4_<instance_id>）。"""
+    path = f"/dev/shm/{instance_id}"
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
 
 
 # ──────────────────────────────────────────────
@@ -280,7 +350,9 @@ class SSEEventStream:
                 content = payload.get("content")
                 if isinstance(content, str):
                     parts.append(content)
-        return "\n".join(parts)
+        # SSE 流按 token 分片（每片一个 text 事件）——空串拼接还原原文，
+        # 与 run_cases.chat() 一致；换行拼接会把 "hnals_wt1" 切成 "hn als _w t 1"
+        return "".join(parts)
 
 
 # ──────────────────────────────────────────────
@@ -361,6 +433,14 @@ def _find_agent_binary() -> str:
     return ""  # unreachable
 
 
+def agent_command(agent_binary: str, config_dir: Path) -> list[str]:
+    """构造 Agent 启动命令（.js 入口经 node 启动）。"""
+    cmd = [agent_binary, "--config-dir", str(config_dir)]
+    if agent_binary.endswith(".js"):
+        cmd = ["node", *cmd]
+    return cmd
+
+
 # ──────────────────────────────────────────────
 #  Port Utilities
 # ──────────────────────────────────────────────
@@ -371,6 +451,30 @@ def _find_free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
+
+
+def port_is_listening(port: int, timeout: float = 1.0) -> bool:
+    """TCP 端口监听探测——实例运行状态的断言依据（生命周期双层模型：
+    MCP 进程常驻，进程存在 ≠ 实例运行；端口监听 / write_seq 推进才是）。"""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(timeout)
+        try:
+            s.connect(("127.0.0.1", port))
+            return True
+        except OSError:
+            return False
+
+
+def wait_port(port: int, want: bool, timeout: float = 15.0) -> None:
+    """轮询端口监听状态直至满足或超时（poll-until-deadline，禁固定 sleep 单次断言）。"""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if port_is_listening(port) == want:
+            return
+        time.sleep(0.3)
+    raise AssertionError(
+        f"端口 {port} {'监听' if want else '释放'}超时（{timeout}s）"
+    )
 
 
 # ──────────────────────────────────────────────
@@ -404,6 +508,9 @@ def write_agent_json(
             "port": port,
             "cors_origin": "*",
         },
+        # 场站绑定（agent.md §3.2.1.3a：site 存于 agent.json 权威配置；
+        # site 缺失流程由 write_abbr_registry("site_missing") 单独覆盖）
+        "site": {"name": "华能阿拉善", "abbr": "hnals"},
         "mcp_registry": {
             "path": str(registry_dir),
         },
@@ -448,11 +555,44 @@ def corrupt_config_json(config_dir: Path) -> None:
         config_path.write_text(raw[:idx])
 
 
-def write_config_bak(config_dir: Path, content: dict) -> None:
-    """写入 config.json.bak（用于损坏恢复测试）。"""
+def write_config_prev(config_dir: Path, content: dict) -> None:
+    """
+    写入 config.json.prev.1（回滚源，滚动保留 .prev.1~.3）。
+    用于 L0 恢复/事务回滚测试（c4_architecture.md §3.1.2）。
+    """
     config_dir.mkdir(parents=True, exist_ok=True)
-    bak_path = config_dir / "config.json.bak"
-    bak_path.write_text(json.dumps(content, indent=2, ensure_ascii=False))
+    prev_path = config_dir / "config.json.prev.1"
+    prev_path.write_text(json.dumps(content, indent=2, ensure_ascii=False))
+
+
+def write_pending_marker(
+    config_dir: Path,
+    services: Optional[list[str]] = None,
+    description: str = "测试构造：崩溃于变更事务中",
+) -> Path:
+    """
+    写入 pending_change.json 事务标记（模拟崩溃于变更事务中）。
+    返回标记路径。
+    """
+    config_dir.mkdir(parents=True, exist_ok=True)
+    marker_path = config_dir / "pending_change.json"
+    marker_path.write_text(json.dumps({
+        "description": description,
+        "services": services or [],
+        "rollback_source": str(config_dir / "config.json.prev.1"),
+        "created_at": "2026-01-01T00:00:00Z",
+    }, indent=2, ensure_ascii=False))
+    return marker_path
+
+
+def clear_transaction_files(config_dir: Path) -> None:
+    """清除事务文件组：pending_change.json + config.json.prev.1~.3（测试隔离用）。"""
+    config_dir.mkdir(parents=True, exist_ok=True)
+    names = ["pending_change.json"] + [f"config.json.prev.{i}" for i in (1, 2, 3)]
+    for name in names:
+        p = config_dir / name
+        if p.exists():
+            p.unlink()
 
 
 # abbr 记忆库内容（agent.md §3.2.1.3a）
@@ -590,9 +730,6 @@ class AgentHandle:
             with agent.upload("/path/to/points.xlsx", "接入此设备") as stream:
                 text = stream.text_content()
         """
-        import email.parser
-        from io import BytesIO
-
         boundary = "----C4TestBoundary"
         body_lines: list[str] = []
         body_lines.append(f"--{boundary}")
@@ -651,11 +788,8 @@ class AgentHandle:
             # 尝试从 agent.json 推断
             agent_binary = _find_agent_binary()
 
-        cmd = [agent_binary, "--config-dir", str(self.config_dir)]
-        if agent_binary.endswith(".js"):
-            cmd = ["node", *cmd]
         self.process = subprocess.Popen(
-            cmd,
+            agent_command(agent_binary, self.config_dir),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -719,6 +853,15 @@ class ChatHelper:
         if text:
             self._history.append({"role": "assistant", "content": text})
 
+    def reset_conversation(self) -> None:
+        """清空客户端历史——开启全新会话（与 run_cases 每用例新建 Conv 等价）。
+
+        多阶段用例在长历史下继续追问时，LLM 会因上下文污染陷入确认死循环
+        （实测：两轮完整接入历史 + 修改请求 → 确认后反复询问，永不产出
+        output_plan_steps）；独立会话是 E2E runner 验证过的交互模型。
+        """
+        self._history = []
+
     def confirm(self, interrupt_id: str) -> SSEEventStream:
         """
         发送确认消息以通过 interrupt 检查点。
@@ -728,15 +871,14 @@ class ChatHelper:
 
 
 # ──────────────────────────────────────────────
-#  Shm Cleanup Helpers
+#  Session-level cleanup
 # ──────────────────────────────────────────────
 
-# 全局注册表：session 级 shmid 集合，atexit 兜底清理
 _SESSION_SHM_IDS: set[int] = set()
 
 
 def _cleanup_shm_ids(shm_ids: set[int]) -> None:
-    """清理共享内存段：ipcrm -M <shmid>。"""
+    """清理共享内存段：ipcrm -M <shmid>（兼容 SysV 残留）。"""
     for shmid in shm_ids:
         try:
             subprocess.run(
@@ -774,8 +916,35 @@ def _collect_shm_ids_from_config(config: dict) -> set[int]:
 
 
 # ──────────────────────────────────────────────
-#  Fixtures
+#  Pytest hooks & Fixtures
 # ──────────────────────────────────────────────
+
+
+def pytest_configure(config):
+    """注册 pytest 标记 + 会话级 socket 目录（独立服务模型：Agent 经 env 继承）。"""
+    config.addinivalue_line(
+        "markers",
+        "llm: L2 tests that require LLM inference (DEEPSEEK_API_KEY needed)",
+    )
+    global _SOCK_DIR
+    if not _SOCK_DIR:
+        _SOCK_DIR = tempfile.mkdtemp(prefix="c4_agent_test_socks_")
+    os.environ["C4_SOCK_DIR"] = _SOCK_DIR
+
+
+def pytest_collection_modifyitems(config, items):
+    """
+    L2 测试自动跳过：若 DEEPSEEK_API_KEY 未设置，
+    标记 llm 的测试项自动 skip。
+    """
+    has_api_key = bool(os.environ.get("DEEPSEEK_API_KEY"))
+    if has_api_key:
+        return
+
+    skip_llm = pytest.mark.skip(reason="DEEPSEEK_API_KEY not set — skipping L2 test")
+    for item in items:
+        if "llm" in item.keywords:
+            item.add_marker(skip_llm)
 
 
 @pytest.fixture(scope="session")
@@ -796,9 +965,33 @@ def shm_manager_binary() -> str:
     return _find_binary("C4_SHM_MANAGER_PATH", "c4_shm_manager")
 
 
+@pytest.fixture(scope="session")
+def mcp_stack(tmp_path_factory) -> Generator[McpStackHandle, None, None]:
+    """
+    Session 级常驻 MCP 测试栈。
+
+    启动全部 6 个 MCP 服务（resident 模式：仅监听 <sock-dir>/<service>.sock、
+    零数据路径实例），Agent 经 C4_SOCK_DIR 指向同一目录连接。
+    teardown: 逐个 SIGTERM → SIGKILL → 清理 socket 与 /dev/shm 残段。
+    """
+    log_dir = Path(tempfile.mkdtemp(prefix="c4_agent_test_mcp_logs_"))
+    stack = McpStackHandle(_SOCK_DIR, log_dir)
+    stack.start_all()
+    for svc in ALL_MCP_SERVICES:
+        assert stack.wait_socket(svc, timeout=10), f"{svc} socket 未就绪"
+
+    yield stack
+
+    stack.stop_all()
+    for leftover in Path(_SOCK_DIR).glob("*.sock"):
+        leftover.unlink(missing_ok=True)
+    for seg in Path("/dev/shm").glob("c4_test*"):
+        seg.unlink(missing_ok=True)
+    shutil.rmtree(log_dir, ignore_errors=True)
+
+
 def _find_binary_for_service(service_type: str) -> str | None:
     """Find the actual binary path for a given MCP service type."""
-    import pytest
     try:
         binary = _find_binary(f"C4_{service_type.removeprefix('c4_').upper()}_PATH", service_type)
         return binary
@@ -831,6 +1024,7 @@ def agent(
     agent_binary: str,
     shm_manager_binary: str,
     registry_dir: Path,
+    mcp_stack: McpStackHandle,
     tmp_path: Path,
 ) -> Generator[AgentHandle, None, None]:
     """
@@ -838,11 +1032,11 @@ def agent(
 
     生命周期:
       1. 制备 tmp_path 作为配置目录（agent.json + config.json + mcp-registry/）
-      2. 启动 c4_shm_manager
-      3. 启动 c4_agent --config-dir <tmp_path>
+      2. MCP 常驻栈已由 mcp_stack fixture 就绪（Agent 仅经 socket 连接、从不拉起）
+      3. 启动 c4_agent --config-dir <tmp_path>（C4_SOCK_DIR 经环境继承）
       4. 轮询 GET /api/services 直到返回 200（Agent 就绪）
       5. yield AgentHandle(base_url, process, config_dir)
-      6. teardown: SIGTERM → 等待 10s → SIGKILL → ipcrm 清理 shm → session atexit 兜底
+      6. teardown: SIGTERM → 等待 10s → SIGKILL → 清理实例 shm 段 → session atexit 兜底
     """
     config_dir = tmp_path / "c4_config"
     port = _find_free_port()
@@ -851,16 +1045,14 @@ def agent(
     write_agent_json(config_dir, registry_dir, shm_manager_binary, port)
 
     # 2. 默认不创建 config.json（模拟首次启动），各测试自行调用 write_config_json
+    clear_transaction_files(config_dir)
     config_path = config_dir / "config.json"
     if config_path.exists():
         config_path.unlink()
 
-    # 3. 启动 c4_agent
-    cmd = [agent_binary, "--config-dir", str(config_dir)]
-    if agent_binary.endswith(".js"):
-        cmd = ["node", *cmd]
+    # 3. 启动 c4_agent（C4_SOCK_DIR 已在 pytest_configure 写入 os.environ，子进程继承）
     process = subprocess.Popen(
-        cmd,
+        agent_command(agent_binary, config_dir),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -924,7 +1116,18 @@ def agent(
             except subprocess.TimeoutExpired:
                 pass
 
-    # Step 3: 清理 shm（ipcrm）
+    # Step 3: 停掉本测试拉起的数据路径实例（常驻 MCP 进程不重启，仅停实例——
+    # 函数级隔离，下一测试从零实例状态开始）+ 清理实例 shm 段
+    for svc in ALL_MCP_SERVICES:
+        if svc == "c4_shm_manager":
+            continue
+        try:
+            client = SocketMcpClient(svc, _SOCK_DIR or "", timeout=5.0)
+            client.call_tool_text("stop", {})
+            client.close()
+        except Exception:
+            pass
+    _cleanup_instance_shm("c4_test")
     _cleanup_shm_ids(shm_ids)
 
     # Step 4: 注册到 session atexit 兜底
@@ -957,52 +1160,3 @@ def abbr_registry(agent: AgentHandle) -> Callable[..., Path]:
         return write_abbr_registry(agent.config_dir, mode)
 
     return _write
-
-
-# ──────────────────────────────────────────────
-#  Pytest Markers
-# ──────────────────────────────────────────────
-
-# L2 测试标记 — 需要 LLM API key
-# 用法: @pytest.mark.llm
-# 运行: pytest -m llm        (仅 L2)
-#       pytest -m "not llm"   (仅 L1)
-#       pytest                 (全跑，L2 无 API key 时自动 skip)
-
-
-def pytest_configure(config):
-    """注册 pytest 标记。"""
-    config.addinivalue_line(
-        "markers",
-        "llm: L2 tests that require LLM inference (DEEPSEEK_API_KEY needed)",
-    )
-
-
-def pytest_collection_modifyitems(config, items):
-    """
-    L2 测试自动跳过：若 DEEPSEEK_API_KEY 未设置，
-    标记 llm 的测试项自动 skip。
-    """
-    has_api_key = bool(os.environ.get("DEEPSEEK_API_KEY"))
-    if has_api_key:
-        return
-
-    skip_llm = pytest.mark.skip(reason="DEEPSEEK_API_KEY not set — skipping L2 test")
-    for item in items:
-        if "llm" in item.keywords:
-            item.add_marker(skip_llm)
-
-
-# ──────────────────────────────────────────────
-#  L2 测试批处理建议
-# ──────────────────────────────────────────────
-# L2 测试执行时间较长（每个用例 10–60s LLM 响应），建议按以下策略优化：
-#
-# 1. 同一对话流的测试合并为一个测试函数内的多步骤验证
-#    （如完整接入流），减少 Agent 重复启动
-#
-# 2. L2 测试按 batch 分组（参见 pytest.mark.llm 注册时的 batch 参数），
-#    批次间添加 cooling_off 间隔（如 10s）避免 API 限速
-#
-# 3. 错误恢复测试（§4.8）使用预构造的 JSON 文件绕过 LLM，
-#    直接测试执行模块

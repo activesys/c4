@@ -131,13 +131,13 @@ class TestStopRestart:
         sut = start_iec104_client()
         _assert_mcp_success(sut.call_tool("stop", {}))
 
-    # ── TC3: start — 已运行时重复调用 ──────────
+    # ── TC3: start — 已运行时重复调用（幂等成功）──────────
 
     def test_tc3_start_while_running(
         self, start_iec104d, write_redis, prepare_environment,
         start_iec104_client, isolated_shm,
     ):
-        """TC3: start 在已运行状态返回 ALREADY_RUNNING。"""
+        """TC3: start 在已运行状态返回 ALREADY_RUNNING（成功路径，isError: false）。"""
         instance_id = "c4_fun66tc3"
         sut, config_path, sp, _ = _setup_standard(
             start_iec104d, write_redis, prepare_environment, start_iec104_client,
@@ -145,10 +145,17 @@ class TestStopRestart:
         )
 
         _assert_mcp_success(sut.call_tool("start", {"instance_id": instance_id, "config_path": config_path}))
-        _assert_mcp_error(
-            sut.call_tool("start", {"instance_id": instance_id, "config_path": config_path}),
-            "ALREADY_RUNNING",
+
+        # 再次 start — ALREADY_RUNNING 为正常结果（isError: false），无动作
+        resp = sut.call_tool("start", {"instance_id": instance_id, "config_path": config_path})
+        assert resp["result"].get("isError", False) is False, (
+            f"ALREADY_RUNNING is a success-path result, got: {resp}"
         )
+        assert "ALREADY_RUNNING" in resp["result"]["content"][0]["text"]
+
+        # 连续性：实例与 TCP 连接保持，write_seq 持续递增，数据路径不中断
+        seq0 = read_shm_block(sp, 1)["write_seq"]
+        wait_write_seq_advanced(sp, 1, seq0)
 
     # ── TC4: 简单重启（stop → start，无配置变更）──────────
 

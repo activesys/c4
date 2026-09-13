@@ -14,7 +14,7 @@ C4_FUN_00058：Agent 停止全部 ASFP2 接收端口实例，配置调整后重�
 
 1. `stop` 在运行状态返回 `"success"` 并释放端口
 2. `stop` 在未启动状态幂等返回 `"success"`
-3. `start` 在已运行状态返回 `ALREADY_RUNNING`
+3. `start` 在已运行状态幂等返回 `ALREADY_RUNNING`（成功路径，`isError: false`，数据路径不中断）
 4. `stop` → `start` 简单重启后端口重新监听、数据流恢复
 5. `stop` → `c4_shm_manager.adjust_shm()` → `start` 完整 Stop-Start 协议正确执行
 6. 多次 `stop` / `start` 循环，每次均正确
@@ -189,12 +189,15 @@ def wait_port_released(port: int, timeout: float = 3.0, interval: float = 0.1):
 - **预期**：`stop` 幂等返回 `"success"`（`isError: false`）
 - **说明**：`stop` 幂等——即使 `start` 从未调用过也直接返回 `"success"`，不报错
 
-### TC3: start — 已运行时重复调用
+### TC3: start — 已运行时重复调用（幂等成功）
 
 - **前置**：已按 §3.1 标准配置完成 prepare_environment，`start` 调用成功
 - **操作**：再次调用 `start`（同一 SUT 进程，无间隔 `stop`）
-- **预期**：`isError: true`，`content[0].text` 以 `ALREADY_RUNNING` 开头
-- **说明**：`start` 在 `stop` 之前不得重复调用
+- **预期**：`isError: false`，`content[0].text` 含 `ALREADY_RUNNING`——重复 start 是
+  成功路径的幂等结果，**不是错误**（c4_architecture.md §3.1.2：ALREADY_RUNNING ＝
+  实例本就在运行 → 无动作）
+- **额外验证**：端口 9000 持续监听（数据路径不中断、不被销毁重建），已运行的 goroutine 保持不变
+- **说明**：`start` 可安全重复调用，调用方无需先 `stop`
 
 ### TC4: 简单重启（stop → start，无配置变更）
 

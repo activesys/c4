@@ -4,7 +4,9 @@
 > **对应需求**：C4_RS_00095
 > **设计参考**：`c4/docs/design/c4_asfp2_client.md` §3
 
-C4_FUN_00059：Agent 生成 ASFP2 发送 MCP 服务的配置文件后，启动 MCP 服务，MCP 服务根据配置文件启动多个 ASFP2 Client。
+C4_FUN_00059：Agent 生成 ASFP2 发送 MCP 服务的配置文件后，经 Unix socket 调用该服务的
+`start` 工具拉起数据路径实例（MCP 服务进程为常驻系统服务，不由 Agent 拉起——见
+c4_architecture.md §3.1.1），MCP 服务根据配置文件启动多个 ASFP2 Client。
 
 ---
 
@@ -142,11 +144,12 @@ writer_points=2，max_points=4。pt_a → shm_id=1，pt_b → shm_id=2。
 - **预期**：返回 `"success"`（无实例需启动，调用 `shm_open` + `mmap` 后直接返回）
 - **注意**：若 SHM 不存在（连创建都不做），预期返回 `SHM_OPEN_FAILED`。本 TC 验证 normal 路径（SHM 存在但无 client 实例）
 
-### TC4: 重复调用 start → ALREADY_RUNNING
+### TC4: 重复调用 start → ALREADY_RUNNING（幂等成功）
 
 - **前置**：TC1 已成功启动
 - **操作**：再次调用 `start`
-- **预期**：`isError: true`，错误码 `ALREADY_RUNNING`
+- **预期**：`isError: false`，结果含 `ALREADY_RUNNING`——重复 start 属成功路径的幂等结果，
+  **不是错误**（c4_architecture.md §3.1.2）；已建链的实例与 TCP 连接保持不变，数据路径不中断
 
 ### TC5: start 未调用前调用 stop → 幂等 success
 
@@ -204,7 +207,7 @@ writer_points=2，max_points=4。pt_a → shm_id=1，pt_b → shm_id=2。
 
 ### 5.2 SMH magic 修改（TC10）
 
-Python 通过 mmap + `struct.pack(">I", 0xDEADBEEF)` 修改 Header 前 4 字节。
+Python 通过 mmap + `struct.pack("=I", 0xDEADBEEF)`（本机序）修改 Header 前 4 字节。
 
 ### 5.3 隔离性
 

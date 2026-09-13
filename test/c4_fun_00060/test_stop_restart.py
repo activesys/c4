@@ -23,8 +23,7 @@ from conftest import (  # noqa: E402
     _assert_mcp_success,
     _assert_port_listening,
     _assert_has_connection,
-    _assert_no_connection,
-    wait_port_released,
+    _assert_no_connection,    wait_port_released,
     run_asfp2_server,
     _make_standard_config,
     _make_changed_config,
@@ -126,11 +125,18 @@ class TestStopRestart:
             # 前置：start 已成功
             client = start_asfp2_client(config_path, iid)
 
-            # 操作：再次 start
+            # 操作：再次 start — ALREADY_RUNNING 为正常结果（isError: false），无动作
             resp = client.call_tool(
                 "start", {"instance_id": iid, "config_path": config_path},
             )
-            _assert_mcp_error(resp, "ALREADY_RUNNING")
+            assert resp["result"].get("isError", False) is False, (
+                f"ALREADY_RUNNING is a success-path result, got: {resp}"
+            )
+            assert "ALREADY_RUNNING" in resp["result"]["content"][0]["text"]
+
+            # 连续性：asfp2_server 侧连接保持，数据路径不中断
+            time.sleep(1.5)
+            _assert_has_connection(port)
 
             # teardown
             client.call_tool("stop", {})

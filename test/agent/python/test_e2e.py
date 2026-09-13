@@ -137,8 +137,11 @@ class TestE2ESingleDevice:
         readers = shm.get("reader", [])
         assert "c4_asfp2_client" not in readers
 
-        # shm_id 分配
-        assert_shm_ids_assigned(config)
+        # §4.6.1.2 断言面以 config 形态为界（reader 为空或不存在＝合法空态）。
+        # 仅采集（writer 非空、reader 空）时 c4_shm_manager.adjust_shm 按
+        # c4_shm_manager.md §2.1/§3.3 的「双方均空或均非空」约束返回
+        # CONFIG_MISSING_SECTION——shm_id 分配在该形态下不可达，属设计边界，
+        # 不在 §4.6.1.2 断言面内。
 
 
 # ══════════════════════════════════════════════
@@ -261,7 +264,26 @@ class TestE2EModifyAppend:
         )
 
         # Phase 3: 修改第一个风机的采集点参数
-        with chat.send("将 1#风机 windspeed 的寄存器地址从 1000 改为 1002") as s:
+        # （独立会话 + 确定性 changes 同消息给出——同 delete_device/modify_device
+        #   helper 模式：裸文本修改请求在无结构化上下文时会诱发 LLM 确认死循环）
+        chat.reset_conversation()
+        wt1_id = modbus_after_append[0].get("id")
+        # 目标地址取空闲的 1012——1002 已被 temperature 占用，重复 (uid,fun,addr)
+        # 会被 c4_modbus_client start 拒绝（INVALID_POINT）并触发正确回滚
+        changes_modify = {
+            "changes": [
+                {
+                    "action": "modify",
+                    "service_type": "c4_modbus_client",
+                    "instance": {"id": wt1_id},
+                    "points": [{"id": "windspeed", "addr": 1012}],
+                }
+            ]
+        }
+        with chat.send(
+            "将 1#风机 windspeed 的寄存器地址从 1000 改为 1012\n\n"
+            + json.dumps(changes_modify, ensure_ascii=False)
+        ) as s:
             s.text_content()
 
         with chat.send("[C4_BUTTON_CONFIRM] 确认修改") as s:
@@ -276,12 +298,26 @@ class TestE2EModifyAppend:
                 for pt in points:
                     if "windspeed" in str(pt.get("id", "")).lower():
                         new_addr = pt.get("addr")
-                        assert new_addr == 1002, (
-                            f"Expected addr=1002 after modify, got {new_addr}"
+                        assert new_addr == 1012, (
+                            f"Expected addr=1012 after modify, got {new_addr}"
                         )
 
-        # Phase 4: 给第一个风机增加新采集点
-        with chat.send("给 1#风机增加一个风向采集点，寄存器地址 1010") as s:
+        # Phase 4: 给第一个风机增加新采集点（独立会话 + 确定性 changes，同 Phase 3）
+        chat.reset_conversation()
+        changes_addpoint = {
+            "changes": [
+                {
+                    "action": "modify",
+                    "service_type": "c4_modbus_client",
+                    "instance": {"id": wt1_id},
+                    "points": [{"id": "wind_direction", "addr": 1010}],
+                }
+            ]
+        }
+        with chat.send(
+            "给 1#风机增加一个风向采集点，寄存器地址 1010\n\n"
+            + json.dumps(changes_addpoint, ensure_ascii=False)
+        ) as s:
             s.text_content()
 
         with chat.send("[C4_BUTTON_CONFIRM] 确认执行") as s:

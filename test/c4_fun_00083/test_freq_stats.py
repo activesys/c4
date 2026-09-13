@@ -165,22 +165,21 @@ def test_tc7_degraded_no_stats_pollution(agent_stack):
 
 
 def _kill_stack_shm_manager(agent_stack):
+    """kill 本栈的常驻 c4_shm_manager（独立服务模型：非 Agent 子进程，
+    按环境变量 C4_SOCK_DIR 定位本栈实例，同 c4_fun_00082 做法）。"""
     import os
-    agent_pid = agent_stack.proc.pid
+    sock_dir = agent_stack.sock_dir
     for pid in os.listdir("/proc"):
         if not pid.isdigit():
             continue
         try:
-            with open(f"/proc/{pid}/stat") as f:
-                ppid = int(f.read().split(")")[-1].split()[1])
-        except (OSError, ValueError, IndexError):
-            continue
-        if ppid != agent_pid:
-            continue
-        try:
             with open(f"/proc/{pid}/cmdline", "rb") as f:
                 cmd = f.read().decode(errors="replace")
-            if "c4_shm_manager" in cmd:
+            if "c4_shm_manager" not in cmd:
+                continue
+            with open(f"/proc/{pid}/environ", "rb") as f:
+                env = f.read().decode(errors="replace")
+            if f"C4_SOCK_DIR={sock_dir}" in env:
                 os.kill(int(pid), 9)
                 return True
         except OSError:

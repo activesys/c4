@@ -788,16 +788,24 @@ class TestAbbrSiteFlow:
 
     @retry_llm(max_attempts=3)
     def test_first_start_asks_site_then_fixes(
-        self, chat: Any, agent: Any, tmp_path: Path
+        self, chat: Any, agent: Any, tmp_path: Path, abbr_registry: Callable
     ) -> None:
         """4.6.4.10: site 首次询问固化。
 
-        首次启动（无 abbr_registry.json，无 config.json）→ 发起接入。
-        预期：Agent 询问场站名称+缩写；用户提供后写入 site 字段。
+        首次启动（agent.json 无 site，无 abbr_registry.json，无 config.json）→
+        发起接入。预期：Agent 询问场站名称+缩写；用户提供后写入 site 字段。
         """
-        # 前置：agent fixture 默认无 config.json / abbr_registry.json
-        assert not (agent.config_dir / "abbr_registry.json").exists()
+        # 前置：移除 agent.json 的 site（fixture 默认预置 site——site-ask 门
+        # 在 config.site 非空时永不触发）+ 清掉记忆库，回到"首次启动"空态，
+        # 重启使 agent.json 变更生效
+        abbr_registry("site_missing")
+        registry_path = agent.config_dir / "abbr_registry.json"
+        if registry_path.exists():
+            registry_path.unlink()
+        assert not registry_path.exists()
         assert not (agent.config_dir / "config.json").exists()
+        agent.kill()
+        agent.restart()
 
         csv_path = create_full_csv(tmp_path)
         with chat.send_with_file("接入华能阿拉善1#风机", str(csv_path)) as stream:

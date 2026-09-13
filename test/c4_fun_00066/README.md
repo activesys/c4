@@ -14,7 +14,7 @@ C4_FUN_00066：Agent 停止 IEC104 采集 MCP 服务的全部实例，配置调�
 
 1. `stop` 在运行状态返回 `"success"` 并销毁全部实例（先发 STOPDT act 尽力停用数据传输，再关闭 TCP 连接）
 2. `stop` 在未启动状态（`start` 从未成功）幂等返回 `"success"`
-3. `start` 在已运行状态返回 `ALREADY_RUNNING`
+3. `start` 在已运行状态幂等返回 `ALREADY_RUNNING`（成功路径，`isError: false`，数据流不中断）
 4. `stop` → `start` 简单重启后数据流恢复
 5. `stop` → `c4_shm_manager.adjust_shm()` → `start` 完整 Stop-Start 协议正确执行
 6. 多次 `stop` / `start` 循环，每次均正确
@@ -101,11 +101,13 @@ redis_tool ──写值──> Redis ──MGET──> iec104d ──IEC104响�
 - **说明**：与 `c4_asfp2_server`（返回 `SERVICE_NOT_READY`）不同，`c4_iec104_client` 的
   `stop` 幂等（同 `c4_modbus_client`）
 
-### TC3: start — 已运行时重复调用
+### TC3: start — 已运行时重复调用（幂等成功）
 
 - **前置**：`start` 调用成功
 - **操作**：再次调用 `start`（同一 SUT 进程，无间隔 `stop`）
-- **预期**：`isError: true`，`content[0].text` 以 `ALREADY_RUNNING` 开头
+- **预期**：`isError: false`，`content[0].text` 含 `ALREADY_RUNNING`——重复 start 属成功
+  路径的幂等结果，**不是错误**（c4_architecture.md §3.1.2）；实例与 TCP 连接保持，
+  `write_seq` 持续递增，数据路径不中断
 
 ### TC4: 简单重启（stop → start，无配置变更）
 

@@ -2,7 +2,7 @@
 
 > **对应功能**：`docs/specification/c4_function.md` C4_FUN_00053
 > **对应需求**：C4_RS_00096
-> **设计参考**：`docs/design/c4_architecture.md` §2.2, §3.3
+> **设计参考**：`docs/design/c4_architecture.md` §2.2, §3.3；`docs/design/c4_shm_manager.md` §1.3, §3.1（create_shm 幂等 create-or-attach 契约）
 
 C4_FUN_00053 有两条分支：
 
@@ -124,11 +124,14 @@ Python 通过 `os.open("/dev/shm/{instance_id}", os.O_RDONLY)` + `mmap` 直接�
 - **额外验证**：`/tmp/c4_empty_config.json` 未被修改（内容仍为 `{}`）
 - **清理**：`shm_unlink("/c4_testtc3")`，删除 `/tmp/c4_empty_config.json`
 
-### TC4: 重复创建 → SHM_ALREADY_EXISTS
+### TC4: 重复创建 → 幂等附加成功（create-or-attach）
 
 - **前置**：TC1 或 TC2 或 TC3 已成功创建 shm
 - **操作**：对同一 `instance_id` 再次调用 `create_shm`
-- **预期**：返回 `isError: true`，错误码 `SHM_ALREADY_EXISTS`
+- **预期**：返回 `"success"`（`isError: false`）——幂等 create-or-attach：段已存在且
+  magic/版本校验通过 → 附加该段并成功返回，不报错。`SHM_ALREADY_EXISTS` 已随幂等
+  语义移除（c4_shm_manager.md §5 注）；仅内部保留 `ALREADY_ATTACHED` 竞态护栏，正常流程不出现
+- **额外验证**：shm 段未被重建——大小与内容（Header 字段、已分配 shm_id）与首次创建后一致
 - **清理**：`shm_unlink`
 
 ### TC5: Header 全字段校验
@@ -180,7 +183,8 @@ Python 通过 `os.open("/dev/shm/{instance_id}", os.O_RDONLY)` + `mmap` 直接�
 ### 4.2 共享内存清理
 
 - 测试结束后必须 `shm_unlink`（Python: `os.unlink("/dev/shm/{instance_id}")` 或通过 ctypes 调用 `shm_unlink`）
-- 建议在 `conftest.py` 的 fixture **setup** 中先尝试 `shm_unlink` 预防性清理（防止前一次运行崩溃残留 shm 导致 `O_EXCL` 失败）
+- 建议在 `conftest.py` 的 fixture **setup** 中先尝试 `shm_unlink` 预防性清理（`create_shm`
+  为幂等 create-or-attach——不预清理会附加到前一次运行崩溃残留的旧段，破坏测试隔离）
 - fixture **teardown** 中再次清理，确保无论测试成败都释放共享内存
 
 ### 4.3 字节序
@@ -329,10 +333,12 @@ Python 通过 `os.open("/dev/shm/{instance_id}", os.O_RDONLY)` + `mmap` 直接�
 - **配置**：JSON 仅有 `c4_modbus_client` 段，无 `c4_shm_manager` 顶层 key
 - **预期**：`isError: true`，错误码 `CONFIG_MISSING_SECTION`
 
-### TC20: 分支 2 重复创建 → SHM_ALREADY_EXISTS
+### TC20: 分支 2 重复创建 → 幂等附加成功（create-or-attach）
 
 - **配置**：同 TC9（modbus 2 点），第一次创建成功后再次调用 `create_shm`
-- **预期**：第二次返回 `isError: true`，错误码 `SHM_ALREADY_EXISTS`
+- **预期**：第二次返回 `"success"`（`isError: false`）——段已存在且 magic/版本校验通过
+  即附加（幂等 create-or-attach，不报 `SHM_ALREADY_EXISTS`）
+- **额外验证**：首次创建回填的 shm_id 分配保持不变，配置文件不被二次改写
 
 ### TC21: writer 引用的 service 类型在 config 中无对应 section
 

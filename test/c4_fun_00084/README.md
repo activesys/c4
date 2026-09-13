@@ -15,7 +15,8 @@
 测试栈自建（硬约束与栈契约同 `c4_fun_00082/README.md` §1：tmp config-dir、独立
 instance `c4_ft84`、服务端口 19xxx 避让、无 systemd、无 sudo；**点位 fixture 同
 `c4_fun_00082/README.md` §4**——wt1.windspeed / wt1.power / wt1.oiltemp）。
-shm 播种为测试线程受控周期 seqlock 直写。c4_shm_manager 由 Agent 栈自启。
+shm 播种为测试线程受控周期 seqlock 直写。c4_shm_manager 由测试栈自启（监听 tmp Unix
+socket，Agent 经 socket 连接——Agent 是 MCP 客户端，从不拉起 MCP 进程）。
 
 ---
 

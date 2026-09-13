@@ -81,13 +81,13 @@ class TestStopRestart:
         _assert_mcp_success(resp)
 
     # ═══════════════════════════════════════════════
-    #  TC3: start — 已运行时重复调用
+    #  TC3: start — 已运行时重复调用（幂等成功）
     # ═══════════════════════════════════════════════
 
     def test_tc3_start_while_running(
         self, prepare_environment, start_asfp2_server, isolated_shm
     ):
-        """TC3: start 在已运行状态返回 ALREADY_RUNNING。"""
+        """TC3: start 在已运行状态返回 ALREADY_RUNNING（成功路径，isError: false）。"""
         iid = "c4_testtc3"
         isolated_shm(iid)
         port = 9000
@@ -100,11 +100,18 @@ class TestStopRestart:
         )
         _assert_mcp_success(resp)
 
-        # 同一 SUT 进程，无间隔 stop — 再次调用 start
+        # 同一 SUT 进程，无间隔 stop — 再次调用 start：
+        # ALREADY_RUNNING 为正常结果（isError: false），无动作、不重建实例
         resp = start_asfp2_server.call_tool(
         "start", {"instance_id": iid, "config_path": config_path},
         )
-        _assert_mcp_error(resp, "ALREADY_RUNNING")
+        assert resp["result"].get("isError", False) is False, (
+            f"ALREADY_RUNNING is a success-path result, got: {resp}"
+        )
+        assert "ALREADY_RUNNING" in resp["result"]["content"][0]["text"]
+
+        # 连续性：端口持续监听，数据路径不中断
+        _assert_port_listening(port)
 
         # teardown
         start_asfp2_server.call_tool("stop", {})

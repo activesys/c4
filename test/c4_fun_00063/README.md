@@ -14,13 +14,13 @@ C4_FUN_00063：Modbus/TCP 采集 MCP 服务支持停止和重启 — Agent 可�
 
 1. `stop` 在运行状态返回 `"success"` 并停止轮询（释放 TCP 连接）
 2. `stop` 在未启动状态幂等返回 `"success"`
-3. `start` 在已运行状态返回 `ALREADY_RUNNING`
+3. `start` 在已运行状态幂等返回 `ALREADY_RUNNING`（成功路径，`isError: false`，连接与轮询不中断）
 4. 简单重启（`stop` → `start`）后连接恢复、数据流恢复
 5. 完整 Stop-Start 协议（`stop` → `adjust_shm` → `start`）
 6. 多次 `stop`/`start` 循环正确
 7. 连续两次 `stop`（double-stop）幂等
 8. 重启时配置变更（新端口 / 新 point）生效
-9. `start` 失败（CONNECT_FAILED）后修正配置恢复成功
+9. 设备不可达时 `start` 仍返回 success（T0 后台重拨），修正配置重启后恢复采集成功
 
 ---
 
@@ -47,7 +47,8 @@ Go 编译的 `c4_modbus_client` 二进制，通过 MCP stdio JSON-RPC 控制（�
 - **轮询停止验证**：`stop` 后 shm block 的 `write_seq` 停止递增（轮询停止，连接已释放）。
   等待 2~3 个轮询周期（timer=100ms）后重读，断言 `write_seq` 不变
 - **轮询恢复验证**：`start` 后 `write_seq` 恢复递增（数据流恢复）
-- **连接建立验证**：`start` 返回 `"success"` 即证明连接已建立（§3.2 全部连接成功才 success）
+- **连接建立验证**：`start` 返回 `"success"` 表示实例已进入运行态；连接建立通过 `write_seq`
+  恢复递增验证（T0 语义下连接成功不作为 `start` 返回条件，c4_modbus_client.md §3.2）
 
 ---
 
@@ -131,11 +132,13 @@ Go 编译的 `c4_modbus_client` 二进制，通过 MCP stdio JSON-RPC 控制（�
 - **操作**：调用 `stop`
 - **预期**：`isError: false`，返回 `"success"`（stop 幂等）
 
-### TC3: start — 已运行时重复调用
+### TC3: start — 已运行时重复调用（幂等成功）
 
 - **前置**：标准配置，`start` 已成功
 - **操作**：再次调用 `start`（无间隔 `stop`）
-- **预期**：`isError: true`，`content[0].text` 以 `ALREADY_RUNNING` 开头
+- **预期**：`isError: false`，`content[0].text` 含 `ALREADY_RUNNING`——重复 start 属成功
+  路径的幂等结果，**不是错误**（c4_architecture.md §3.1.2）；TCP 连接与轮询保持，
+  `write_seq` 持续递增，数据路径不中断
 
 ### TC4: 简单重启（stop → start，无配置变更）
 
@@ -185,17 +188,19 @@ Go 编译的 `c4_modbus_client` 二进制，通过 MCP stdio JSON-RPC 控制（�
 - **预期**：配置变更（端口 + 新 point）均已生效，采集恢复正常
 - **说明**：验证 C4_FUN_00063 核心语义——"重启时自动重读配置，调整采集地址和端口"
 
-### TC9: start 失败后错误恢复
+### TC9: 设备不可达后修正配置恢复采集
 
 - **前置**：标准配置，SUT 已 `start`
 - **操作**：
   1. `stop` → `"success"`
   2. 配置改为不可达目标（`ip: "192.0.2.1", port: 502`）→ `adjust_shm`
-  3. `start` → 预期 `isError: true`，`CONNECT_FAILED`
+  3. `start` → 预期 `"success"`（`isError: false`）——不可达实例保持未连接态、按 T0 周期
+     后台重拨，连接成功不作为返回条件（c4_modbus_client.md §3.2/§6.1）
   4. 配置改回标准配置（可达 modbusd）→ `adjust_shm`
   5. `start` → 预期 `"success"`，轮询恢复（`write_seq` 递增）
 - **预期**：失败后允许修正配置重试，无需重启 SUT 进程
-- **说明**：`start` 失败后 SUT 回到未启动状态（§3.2 tear down），Agent 可修正配置重试
+- **说明**：业务层网络错误禁止作为 tool 错误（c4_architecture.md §3.3.1 错误分类）；
+  不可达期间实例保持运行态并按 t0 周期重拨，修正配置并重启后收敛到新目标
 
 ---
 

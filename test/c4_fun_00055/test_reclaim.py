@@ -49,7 +49,7 @@ def set_block_state(shm_path_arg, shm_id, state):
 
 
 def set_header_point_count(shm_path_arg, count):
-    """设置 Header 的 point_count 字段（偏移 = 8，大端 uint32）。"""
+    """设置 Header 的 point_count 字段（偏移 = 8，本机序 uint32）。"""
     fd = None
     _shm = None
     try:

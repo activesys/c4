@@ -28,7 +28,7 @@
 
 | 接口 | 来源 | 说明 |
 |------|------|------|
-| Agent 启动流程 | agent.md §3.2.3 | 启动时的配置加载、MCP 连接、无条件 Stop-Start |
+| Agent 启动流程 | agent.md §3.2.3（c4_architecture.md §3.1.2） | 启动时的配置加载、四级瀑布收敛（L0 config 健康 → L1 连接 → L2 收敛 → L3 监控接续） |
 | `GET /api/services` | agent.md §3.3, §3.5 | Registry L1 服务摘要查询 |
 | `GET /api/state` | agent.md §3.2.1.7 | Agent 运行时状态查询：`phase`、`hasAccessPlan`、`lastError` |
 | `POST /api/chat` (SSE) | agent.md §3.1, §3.5 | SuperWorker 对话、子代理调度、方案生成、执行触发 |
@@ -42,7 +42,7 @@
 │ 不依赖 LLM 推理 — 精确值/精确状态断言                            │
 │                                                               │
 │ · Registry 加载 → GET /api/services 响应结构                    │
-│ · Agent 启动恢复 → 各崩溃时刻的 config / shm / 进程状态一致性     │
+│ · Agent 启动恢复 → 各崩溃时刻的 config / shm / 实例状态一致性    │
 │ · 执行模块产物 → 完整数据流完成后 config.json / MCP 服务状态      │
 └──────────────────────────────────────────────────────────────┘
                                │
@@ -110,8 +110,9 @@ def agent(agent_binary, shm_manager_binary, registry_dir, tmp_path):
 
     生命周期:
       1. 制备 tmp_path 作为配置目录（~/.local/c4/ 等效）替代（agent.json + config.json + mcp-registry/）
-      2. 启动 c4_shm_manager（MCP 进程）
-      3. 启动 c4_agent --config-dir <tmp_path>
+      2. 启动 c4_shm_manager（监听 tmp 目录 Unix socket——测试栈无 systemd，MCP 服务进程由
+         测试自启；Agent 是 MCP 客户端，仅经 socket 连接、从不拉起 MCP 进程）
+      3. 启动 c4_agent --config-dir <tmp_path>（经连接配置指向上述 socket 接入）
       4. 轮询 GET /api/services 直到返回 200（Agent 就绪）
       5. yield AgentHandle(base_url, process, config_dir)
       6. teardown: SIGTERM → wait(10s) → SIGKILL → 清理 shm（含 ipcrm 强制清理 + session 级 atexit 兜底）
@@ -143,8 +144,11 @@ def write_config_json(config_dir: Path, content: dict | None) -> None:
 def corrupt_config_json(config_dir: Path) -> None:
     """将 config.json 截断为损坏的 JSON。"""
 
-def write_config_bak(config_dir: Path, content: dict) -> None:
-    """写入 config.json.bak（用于损坏恢复测试）。"""
+def write_config_prev(config_dir: Path, content: dict) -> None:
+    """写入 config.json.prev.1（回滚源，滚动保留 .prev.1~.3；用于 L0 恢复/事务回滚测试）。"""
+
+def write_pending_marker(config_dir: Path, content: dict) -> None:
+    """写入 pending_change.json 事务标记（模拟崩溃于变更事务中）。"""
 
 # ── L2 测试批处理建议（conftest.py 文档注释） ──
 
@@ -216,7 +220,10 @@ class AgentHandle:
 
 ### 3.2 Agent 启动恢复
 
-**被测对象**：Agent 启动时的无条件 Stop-Start 协议（agent.md §3.2.3）
+**被测对象**：Agent 启动/恢复四级瀑布（agent.md §3.2.3；c4_architecture.md §3.1.2：
+L0 config 健康 → L1 连接 → L2 收敛 → L3 监控接续）。旧「无条件 Stop-Start」规则已随
+架构变更废止——无在途事务标记时收敛仅 start（ALREADY_RUNNING 无动作），完整 Stop-Start
+（stop → adjust_shm → start）仅在恢复已回滚事务的配置时执行。
 
 **被测接口**：Agent 进程启动行为 + 文件系统副作用
 
@@ -225,57 +232,62 @@ class AgentHandle:
 | 维度 | 验证方法 |
 |------|---------|
 | Agent 就绪 | `GET /api/services` 返回 200 |
-| config.json 状态 | 读取 config.json + config.json.bak，比较内容 |
-| MCP 服务进程状态 | `ps aux | grep` 检查数据路径 MCP 进程是否存在 |
+| config.json 状态 | 读取 config.json + config.json.prev.1，比较内容 |
+| 实例运行状态 | 端口监听探测 / shm `write_seq` 推进——MCP 进程为常驻系统服务，进程存在与否**不**作为实例运行依据（生命周期双层模型，c4_architecture.md §3.1.1） |
 | 共享内存状态 | 通过 c4_shm_manager MCP 调用检查 shm 块分配（可选深验证） |
 
 #### 3.2.1 首次启动
 
 | # | 用例 | 初始态 | 断言 |
 |---|------|--------|------|
-| 3.2.1.1 | 无 config.json — 首次启动 | `config.json` 不存在 | Agent 就绪，不创建 config.json，无数据路径 MCP 进程；adjust_shm 在此场景下会由 c4_shm_manager 自动创建默认 shm（100k 点），shm 存在即视为正确 |
-| 3.2.1.2 | 无 config.json — 仅 c4_shm_manager 在运行 | 同上 | c4_shm_manager 进程存活，其余 MCP 无进程；shm 段存在 |
+| 3.2.1.1 | 无 config.json — 首次启动 | `config.json` 不存在 | Agent 就绪，不创建 config.json，数据服务**零实例**（期望状态零实例合法）；瀑布对账 c4_shm_manager：段不存在则 `create_shm`（幂等 create-or-attach，无配置 → 默认 100k 点），shm 存在即视为正确 |
+| 3.2.1.2 | 无 config.json — 仅 c4_shm_manager 可连 | 同上 | c4_shm_manager socket 可连，其余数据服务零实例（进程由 systemd/测试栈管理，不作为断言面）；shm 段存在 |
 
 #### 3.2.2 正常重启
 
 | # | 用例 | 初始态 | 断言 |
 |---|------|--------|------|
-| 3.2.2.1 | 有效 config.json，服务未运行 | config.json 含 1 个 c4_modbus_client + 1 个 c4_asfp2_client | Agent 就绪；stop(幂等) → adjust_shm → start；两服务进程均启动 |
-| 3.2.2.2 | 有效 config.json，服务已在运行 | 先启动 Agent（同 3.2.2.1），再重启 Agent | 同 3.2.2.1；重启过程中数据中断应尽量短 |
+| 3.2.2.1 | 有效 config.json，实例未运行 | config.json 含 1 个 c4_modbus_client + 1 个 c4_asfp2_client | Agent 就绪；L2 收敛对全部服务 start（无 pending_change.json 标记 → **不执行 Stop-Start**）；两服务实例按配置拉起（start 返回 success）；MCP 进程常驻不退出 |
+| 3.2.2.2 | 有效 config.json，实例已在运行 | 先启动 Agent（同 3.2.2.1），再重启 Agent | Agent 就绪；对已在运行的服务 start 返回 ALREADY_RUNNING（一等成功路径结果，无动作）；数据路径**零中断**（c4_architecture.md §3.1.1 故障矩阵：Agent 崩溃/重启不影响 MCP 实例，C4_RS_00030/00031） |
 
 #### 3.2.3 配置损坏恢复
 
 | # | 用例 | 初始态 | 断言 |
 |---|------|--------|------|
-| 3.2.3.1 | config 损坏，.bak 有效 | config.json = 截断 JSON；config.json.bak = 完好的配置（含 1 个 modbus） | Agent 从 .bak 恢复 config.json 后正常启动，服务运行 |
-| 3.2.3.2 | config 损坏，.bak 不存在 | config.json = 截断 JSON；无 .bak | 等同于首次启动（3.2.1.1） |
-| 3.2.3.3 | config 损坏，.bak 也损坏 | 两者都损坏 | 等同于首次启动（3.2.1.1） |
+| 3.2.3.1 | config 损坏，.prev.1 有效 | config.json = 截断 JSON；config.json.prev.1 = 完好配置（含 1 个 modbus 实例） | L0：校验 .prev.1（parse + schema）通过 → 恢复为 config.json（获得权威地位）→ 正常启动并按恢复后的配置收敛；向用户显式报告恢复情况（不得静默） |
+| 3.2.3.2 | config 损坏，.prev.1 不存在 | config.json = 截断 JSON；无 .prev.1 | L0：.prev 缺失 → **不得覆盖**、保留当前 config.json、删除 pending_change.json（防重入）、报告异常等待人工介入（文件存在但损坏 ≠ 首次启动的合法空态） |
+| 3.2.3.3 | config 损坏，.prev.1 也损坏 | 两者都损坏 | L0：.prev 不可用 → 同 3.2.3.2：保留 config.json、报告异常等待人工介入 |
+| 3.2.3.4 | pending_change.json 存在（崩溃于变更事务中） | pending_change.json 完好 + config.json.prev.1 有效 | L0：发现标记 → 恢复 .prev.1 → 以恢复后的配置执行完整 Stop-Start（含 adjust_shm）→ 向用户报告「上次接入变更未完成，已回滚，接入不成功」→ 继续瀑布（变更作废不续做，C4_RS_00066） |
 
 #### 3.2.4 崩溃恢复
 
-**统一路径原则**（agent.md §3.2.3）：无论崩溃在 stop/adjust_shm/start 哪一步，
-重启后全路径重走，保证 config.json ↔ shm ↔ 进程状态三者一致。
+**事务边界原则**（agent.md §3.2.3、c4_architecture.md §3.1.2）：崩溃是否落在变更事务内由
+`pending_change.json` 标记显式界定——无标记 → 收敛仅 start（ALREADY_RUNNING 无动作）；
+有标记 → 变更作废：恢复 .prev.1 → 完整 Stop-Start（含 adjust_shm，禁止只 restart 不调
+adjust_shm）→ 报告「接入不成功」。半截变更不得静默续做。
 
-**测试策略**：不尝试在精确时刻 kill 进程（Stop-Start 全流程 < 5ms，外部 SIGKILL
-无法精确定位代码行）。改为验证**恢复结果的一致性**：构造不同崩溃场景的初始态 →
-kill Agent → restart → 断言三者一致。
+**测试策略**：事务窗口通过预构造 `pending_change.json` / `config.json.prev.1` 文件显式
+模拟崩溃时刻，无需精确 kill。改为验证**恢复结果的一致性**：构造不同崩溃场景的初始态 →
+kill Agent → restart → 断言 config.json ↔ shm ↔ 实例状态三者一致。
 
 模拟方法：先让 Agent 正常运行 → `agent.kill()` 杀掉进程 → 重新 `agent.restart()` → 验证。
 
 | # | 用例 | 初始态构造方法 | 断言（重启后三者一致） |
 |---|------|--------------|----------------------|
-| 3.2.4.1 | 正常运行中崩溃 | 启动 Agent 含 config.json + 运行中的服务 → kill | config.json 内容不变；所有 config 中声明的 MCP 服务进程恢复运行；shm 块分配与 config 一致 |
-| 3.2.4.2 | config 更新后未 stop 时崩溃 | 手动写入新 config.json（比当前多 1 个服务）→ kill（不经过 Agent 重启） | 重启后 config.json = 新版本；shm 分配反映新 config；新服务进程运行 |
-| 3.2.4.3 | stop 完成后崩溃 | 重启 Agent → 等待就绪 → kill（此时 stop 已执行，start 可能未完成） | 同 3.2.4.1 |
-| 3.2.4.4 | start 中途崩溃 | 重启 Agent → 等待就绪 → kill（同上） | 同 3.2.4.1 |
+| 3.2.4.1 | 正常运行中崩溃（无在途事务） | 启动 Agent 含 config.json + 运行中的实例 → kill | config.json 内容不变；实例保持运行（Agent 崩溃期间数据路径不中断——MCP 常驻，C4_RS_00030/00031）；重启后 start 返回 ALREADY_RUNNING 无动作；shm 块分配与 config 一致 |
+| 3.2.4.2 | rename 后、删除标记前崩溃 | 构造变更中途态：pending_change.json 存在 + config.json = 新版本 + .prev.1 = 旧版本 → kill | 重启后 config.json = .prev.1（旧版生效，半截变更作废）；报告「接入不成功」；以恢复后的配置执行完整 Stop-Start（含 adjust_shm）；shm 分配与恢复后的 config 一致 |
+| 3.2.4.3 | 写标记后、rename 前崩溃 | 构造变更中途态：pending_change.json 存在 + config.json 仍为旧版 + .prev.1 = 旧版 → kill | 重启后恢复 .prev.1（与当前一致）→ 完整 Stop-Start（含 adjust_shm）→ 报告「接入不成功」→ 收敛完成 |
+| 3.2.4.4 | 无标记、收敛中途崩溃 | 正常收敛进行中 kill（无 pending_change.json） | 同 3.2.4.1——无在途事务标记即保证 config 与运行状态一致，start 幂等（ALREADY_RUNNING 无动作） |
 
 > **一致性验证方法**：
 > - `config.json`：文件内容与写入前快照一致（含所有服务实例、point 定义）
 > - `shm`：通过 c4_shm_manager MCP 调用确认 config 中的每个 point 有对应已分配的 shm 块（shm_id ≠ 0）
-> - `进程`：config 中声明的每种 MCP service_type 对应至少一个运行中的进程
+> - `实例`：config 中声明的每种服务存在运行中的数据路径实例（端口监听 / write_seq 推进；
+>   MCP 进程常驻，进程存在 ≠ 实例运行）
 
-> **注**：3.2.4.2 需预先准备两份 config.json（旧版 1 服务、新版 2 服务），不依赖 LLM。
-> 标记为 L1 可直接运行。其余三个场景均基于同一套初始 config.json + 正常启动后 kill。
+> **注**：3.2.4.2/3.2.4.3 需预置旧版 config.json + config.json.prev.1 + 新版 config.json +
+> pending_change.json（不依赖 LLM），标记为 L1 可直接运行。其余两个场景均基于同一套
+> 初始 config.json + 正常启动后 kill。
 
 ---
 
@@ -342,13 +354,15 @@ pytest                # 全跑（L2 在无 API key 时自动 skip）
 | 4.3.3 | 上传不支持的文件格式 | 上传 .txt 或二进制文件 | Agent 给出友好提示（非技术语言的错误描述），不崩溃 |
 | 4.3.4 | 上传损坏的 xlsx | 上传截断/损坏的 Excel | 同上 |
 | 4.3.5 | 点表缺少必填字段 | 缺少 `source=plan` 且 `default=null` 的实例参数（如 IP） | Agent 列出已有信息 + 明确指出缺失字段（如 IP），逐个询问用户补齐（C4_FUN_00005 缺失引导） |
-| 4.3.6 | 协议：从点表字段唯一推断 | 点表含 `uid/fun/type/swap` 列（仅 Modbus 匹配） | 协议确定为 Modbus，不询问用户 |
-| 4.3.7 | 协议：从用户描述推断 | 多协议点表字段无法区分 + 用户说"采集 Modbus 设备" | 协议确定为 Modbus，不询问 |
-| 4.3.8 | 协议：前两层无法确定 → 询问 | 点表字段无法区分 + 用户未提协议 | Agent 主动询问协议（非技术语言），得知后用该协议 point_fields 重新理解点表列 |
-| 4.3.9 | 协议：Reader（转发协议）推断 | 用户说"转发到上级系统" / "入库" | 转发协议从转发目标描述推断（→ ASFP2 / InfluxDB），不询问；转发目标实例参数缺失时逐个询问补齐 |
+| 4.3.6 | 协议：用户必供——点表字段不参与推断 | 点表含 `uid/fun/type/swap` 列（形态仅 Modbus 匹配）+ 用户未提协议 | Agent 必须询问协议（协议由用户提供、禁止推断——agent.md §3.2，func_test_case 用例 13 用户裁定）；未确认协议前不进入方案确认 |
+| 4.3.7 | 协议：用户描述即视为提供 | 多协议点表字段无法区分 + 用户说"采集 Modbus 设备" | 用户已提供协议 → 不再询问 |
+| 4.3.8 | 协议：未提供 → 询问 | 点表字段无法区分 + 用户未提协议 | Agent 主动询问协议（非技术语言），得知后用该协议 point_fields 重新理解点表列 |
+| 4.3.9 | 转发协议：未提供 → 询问 | 用户说"转发到上级系统" / "入库"但未提转发协议 | 转发意图被识别，但转发协议必须逐项询问（与接收协议相互独立，禁止按目标描述推断）；转发目标实例参数缺失时逐个询问补齐 |
 
-> **协议推断三层**（agent.md §3.2）：① 从点表字段唯一匹配 → ② 从用户描述推断 → ③ 询问用户兜底。
-> 推断成功后**不单独打断用户**，协议作为方案的一部分在 plan-generator 方案确认环节隐含确认。
+> **协议由用户提供（agent.md §3.2，func_test_case 用例 13 用户裁定）**：协议是必填业务信息，
+> **由用户提供，禁止推断或猜测**——点表字段形态不用于推断协议；用户消息中的协议名或协议描述
+> 即视为已提供，消息中无协议信息时必须先询问（接收协议与转发协议相互独立）。确定协议后
+> 不单独打断用户，协议作为方案的一部分在 plan-generator 方案确认环节隐含确认。
 
 ### 4.4 方案生成 (plan-generator)
 
@@ -387,7 +401,7 @@ pytest                # 全跑（L2 在无 API key 时自动 skip）
 |---|------|-------------------|-----------------|
 | 4.6.1.1 | 首次接入（Modbus + ASFP2 转发） | config.json 含 `c4_shm_manager` + `c4_modbus_client[]` + `c4_asfp2_client[]`；所有 `shm_id != 0`；default 字段已填充 | c4_modbus_client 和 c4_asfp2_client 进程运行中 (ps) |
 | 4.6.1.2 | 首次接入（仅采集，无转发） | config.json 含 `c4_modbus_client[]`，**不**含 `c4_asfp2_client[]`；reader 为空或不存在 | — |
-| 4.6.1.3 | 原子写入 | 无残留 .tmp 文件；config.json.bak 存在（首次接入时为 config.json 的副本；非首次时为写入前版本） | — |
+| 4.6.1.3 | 原子写入 | 无残留 .tmp 文件；非首次接入时 config.json.prev.1 存在（= 写入前版本，滚动保留 .prev.1~.3）；首次接入无 .prev.1（无可回滚对象）；事务完成后 pending_change.json 已删除 | — |
 | 4.6.1.4 | writer/reader 分类 | `c4_shm_manager.writer[]`/`reader[]` 只列实际使用（实例化）的服务类型，且每个条目在 Registry 中声明为对应角色（动态读取 Registry 验证） | — |
 | 4.6.1.5 | 追加设备（第二次接入） | 新实例追加到 `c4_modbus_client[]`，旧实例完整保留；`c4_shm_manager.writer[]` 不重复添加相同 service_type | 新服务启动，旧服务不受影响 |
 
@@ -398,7 +412,7 @@ pytest                # 全跑（L2 在无 API key 时自动 skip）
 | # | 用例 | 触发方式 | 预期 |
 |---|------|---------|------|
 | 4.6.2.1 | 修改实例参数（IP/端口） | 在已有设备的基础上，请求"将 1#风机的 IP 改为 192.168.110.5" | config.json 中 `hnals_wt1.ip` = 192.168.110.5，其余字段不变；服务重启后使用新 IP |
-| 4.6.2.2 | 修改采集点参数 | 请求"将 windspeed 的寄存器地址从 1000 改为 1002" | `hnals_wt1.points[]` 中 `windspeed.addr` = 1002；其他字段不变；shm_id 不变 |
+| 4.6.2.2 | 修改采集点参数 | 请求"将 windspeed 的寄存器地址从 1000 改为 1012"（目标地址须空闲——1002 已被 temperature 占用，重复 (uid,fun,addr) 会被服务拒绝并回滚） | `hnals_wt1.points[]` 中 `windspeed.addr` = 1012；其他字段不变；shm_id 不变 |
 | 4.6.2.3 | 新增采集点 | 请求"给 1#风机增加风向采集点" | `hnals_wt1.points[]` 末尾追加新 point（含新 `id`）；旧 point 保留且 shm_id 不变；adjust_shm 为新 point 分配 shm_id |
 | 4.6.2.4 | 删除采集点 | 请求"不再采集 1#风机的温度数据" | `hnals_wt1.points[]` 中移除 temperature；adjust_shm 回收对应 shm 块 |
 | 4.6.2.5 | 修改不存在的实例 | 请求修改一个不存在的设备 ID | Agent 返回友好错误提示（非技术语言），不修改 config.json |
@@ -472,18 +486,20 @@ pytest                # 全跑（L2 在无 API key 时自动 skip）
 
 ### 4.8 错误恢复路径
 
-**被测对象**：Stop-Start 安全协议中的错误处理分支（agent.md §3.2, §3.2.2）
+**被测对象**：变更事务中的错误处理分支（agent.md §3.2 executeStopAndStart；
+c4_architecture.md §3.1.2——任一阶段失败 → 恢复 .prev.1 → 以恢复后的配置执行完整
+Stop-Start（含 adjust_shm）→ 报告失败 → 删除事务标记，变更作废不续做）
 
 **测试策略**：通过构造错误条件（无效 config、冲突 key 等）触发 adjust_shm 的不同失败路径，
 验证恢复行为符合设计。
 
 | # | 用例 | 错误条件构造 | 预期恢复行为 |
 |---|------|------------|-------------|
-| 4.8.1 | adjust_shm 失败 — config 类错误（回退 .bak） | 在 config.json 中写入重复的 `{service_id}.{point_id}` 全局 key → 触发 `DUPLICATE_KEY` | config.json 恢复为 .bak 内容；已 stop 的服务被 restart；操作 abort；用户收到底层性的错误描述（但非技术语言） |
-| 4.8.2 | adjust_shm 失败 — config 类错误（缺失 section） | config.json 含 reader 但 writer 为空 → 触发 `CONFIG_MISSING_SECTION` | 同上（回退 config.json.bak → restart 服务） |
+| 4.8.1 | adjust_shm 失败 — config 类错误（回滚 .prev.1） | 在 config.json 中写入重复的 `{service_id}.{point_id}` 全局 key → 触发 `DUPLICATE_KEY` | config.json 恢复为 .prev.1 内容；以恢复后的配置执行完整 Stop-Start 协议（stop → adjust_shm → start，禁止只 restart 不调 adjust_shm）；删除事务标记；用户收到非技术语言的失败描述（变更作废） |
+| 4.8.2 | adjust_shm 失败 — config 类错误（缺失 section） | config.json 含 reader 但 writer 为空 → 触发 `CONFIG_MISSING_SECTION` | 同上（恢复 .prev.1 → 完整 Stop-Start 含 adjust_shm → 删除标记） |
 | 4.8.3 | adjust_shm 失败 — config 类错误（未知 reader key） | asfp2_client points[0].key 指向不存在的 writer → 触发 `UNKNOWN_READER_KEY` | 同上 |
-| 4.8.4 | adjust_shm 失败 — 非 config 类错误（不回退 config） | 挂载一个小容量 tmpfs 到 `/dev/shm`（`sudo mount -o remount,size=1M /dev/shm`）→ 触发 `SHM_SYSCALL_FAILED` | config.json **不**回退；已 stop 的服务被 restart；操作 abort；用户被告知"系统问题，请稍后重试" |
-| 4.8.5 | start 部分失败 | adjust_shm 成功，但某个 MCP 服务的 start 返回 error | 成功的服务保持运行；失败的服务被报告；用户收到失败列表 + "其余正常运行" |
+| 4.8.4 | adjust_shm 失败 — 非 config 类错误（shm/系统类） | 挂载一个小容量 tmpfs 到 `/dev/shm`（`sudo mount -o remount,size=1M /dev/shm`）→ 触发 `SHM_SYSCALL_FAILED` | config.json 恢复为 .prev.1（agent.md §3.2：adjust_shm 失败无论 config 类或 shm/系统类均回滚）；以恢复后的配置执行完整 Stop-Start（含 adjust_shm）；删除事务标记；用户被告知"系统问题，请稍后重试"（文案区别于配置类错误） |
+| 4.8.5 | start 部分失败 | adjust_shm 成功，但某个 MCP 服务的 start 返回 error | 恢复 .prev.1 → 完整 Stop-Start 回滚（含 adjust_shm）→ 删除事务标记 → 报告失败（变更作废，不残留半接入状态） |
 
 > **4.8.1–4.8.3 的实现依赖**：需要 step-decomposer 生成含冲突的 AccessPlanSteps。
 > 可通过构造特定的 AccessPlan JSON 文件作为 plan-generator 的 mock 输出来绕过 LLM
@@ -539,7 +555,7 @@ pytest                # 全跑（L2 在无 API key 时自动 skip）
 |---|------|------|-----------|
 | 5.1 | 单设备 Modbus 接入 + ASFP2 转发 | 上传点表 → 解析 → 生成方案 → 确认 → 执行 | §4.6.1.1 首次接入断言 + §4.7 非技术语言 + 启动恢复基本场景 |
 | 5.2 | 单设备 Modbus 接入（仅采集） | 同上，无转发 | §4.6.1.2 无 reader 服务断言 |
-| 5.3 | 首次接入后重启 | 完成 5.1 → kill Agent → restart | §3.2.4.1 崩溃恢复断言：config/shsm/进程三者一致 |
+| 5.3 | 首次接入后重启 | 完成 5.1 → kill Agent → restart | §3.2.4.1 崩溃恢复断言：config/shm/实例三者一致；数据路径零中断（ALREADY_RUNNING 无动作） |
 | 5.4 | 修改 + 追加完整生命周期 | 完成 5.1 → 追加第二个风机 → 修改第一个风机的采集点参数 → 给第一个风机增加新采集点 | §4.6.1.5 追加断言 + §4.6.2 修改断言；旧设备数据不受影响 |
 | 5.5 | Add → Modify → Delete 完整生命周期 | 完成 5.4 → 删除第二个风机 → 再删除第一个风机（含 Reader 引用的相关性检查） | §4.6.3.1 单删断言 + §4.6.3.3 相关性检查断言；最终 config.json 恢复到空 |
 

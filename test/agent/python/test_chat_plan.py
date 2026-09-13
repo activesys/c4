@@ -159,8 +159,9 @@ class TestPlanGeneration:
             f"Got: {text[:500]}"
         )
 
-        # 错误消息不应含技术黑名单
-        assert_no_technical_terms(text, allow_protocols=False)
+        # 无可用服务的回复属能力介绍场景（README §4.7：能力介绍时可用协议名，
+        # 如"当前可用的接入协议有……"）——协议名豁免；无例外黑名单仍全量检查
+        assert_no_technical_terms(text, allow_protocols=True)
 
 
 # ══════════════════════════════════════════════

@@ -23,7 +23,7 @@ C4_FUN_00054 对应 `adjust_shm` 工具——根据配置文件计算所需点�
 |------|-----|
 | 工具名 | `adjust_shm` |
 | 参数 | `config_path`（必填） |
-| 前置 | Agent 已通过 Pause-Resume 暂停所有 MCP 进程（测试中不涉及） |
+| 前置 | Agent 已通过 Stop-Start 协议暂停相关数据路径实例（stop 作用于实例、进程常驻不退出——见 c4_architecture.md §3.1.1 生命周期双层模型；测试中不涉及） |
 | 内部流程 | config_path 参数 → 读配置 → 计算 required_points → 比较 current_max_points → 分配/扩容 → 回填配置 → 写回磁盘 |
 | 成功返回 | `"success"` |
 
@@ -442,7 +442,9 @@ Python 修改配置文件发生在 `create_shm` 和 `adjust_shm` 之间，需确
 
 ### 5.4 字节序
 
-与 C4_FUN_00053 相同：所有多字节字段存储为大端（网络字节序），Python struct 使用 `>` 前缀。
+与 C4_FUN_00053 §4.3 相同：所有多字节字段按**本机序**存储（`c4_architecture.md` §2.2：
+Writer 与 Reader 同机运行，直接读写本机内存序，无网络序转换），Python struct 使用 `=`
+前缀（本机序，无对齐填充）。
 
 ### 5.5 共享内存清理
 

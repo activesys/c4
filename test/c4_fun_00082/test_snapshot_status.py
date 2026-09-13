@@ -147,6 +147,27 @@ def test_tc16_adaptive_threshold(agent_stack):
         t.join()
 
 
+def _kill_stack_shm_manager(sock_dir: str) -> bool:
+    """kill 本栈的常驻 c4_shm_manager（environ C4_SOCK_DIR 匹配），返回是否找到。"""
+    killed = False
+    for pid in os.listdir("/proc"):
+        if not pid.isdigit():
+            continue
+        try:
+            with open(f"/proc/{pid}/cmdline", "rb") as f:
+                cmd = f.read().decode(errors="replace")
+            if "c4_shm_manager" not in cmd:
+                continue
+            with open(f"/proc/{pid}/environ", "rb") as f:
+                env = f.read().decode(errors="replace")
+            if f"C4_SOCK_DIR={sock_dir}" in env:
+                os.kill(int(pid), 9)
+                killed = True
+        except (OSError, ValueError):
+            continue
+    return killed
+
+
 def test_tc17_degraded(agent_stack):
     """TC17 降级态：kill 栈内 c4_shm_manager → degraded=true，各点保持上次值。
 
@@ -172,29 +193,10 @@ def test_tc17_degraded(agent_stack):
 
     assert poll_until(lambda: alive(_get(agent_stack)), 5), "基线未建立"
 
-    # kill 栈内 c4_shm_manager（Agent 的直接子进程）
-    agent_pid = agent_stack.proc.pid
-    killed = False
-    for pid in os.listdir("/proc"):
-        if not pid.isdigit():
-            continue
-        try:
-            with open(f"/proc/{pid}/stat") as f:
-                fields = f.read()
-            ppid = int(fields.split(")")[-1].split()[1])
-        except (OSError, ValueError, IndexError):
-            continue
-        if ppid != agent_pid:
-            continue
-        try:
-            with open(f"/proc/{pid}/cmdline", "rb") as f:
-                cmd = f.read().decode(errors="replace")
-            if "c4_shm_manager" in cmd:
-                os.kill(int(pid), 9)
-                killed = True
-        except OSError:
-            continue
-    assert killed, "未找到栈内 c4_shm_manager 子进程"
+    # kill 栈内常驻 c4_shm_manager（独立服务模型：非 Agent 子进程，
+    # 按环境变量 C4_SOCK_DIR 定位本栈实例）
+    killed = _kill_stack_shm_manager(agent_stack.sock_dir)
+    assert killed, "未找到栈内 c4_shm_manager 进程"
 
     # 连续 ≥3 轮失败 → degraded=true（轮询截止 10s）
     assert poll_until(lambda: degraded(_get(agent_stack)), 10)

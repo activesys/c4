@@ -14,7 +14,7 @@ C4_FUN_00060：ASFP2 发送 MCP 服务支持停止和重启 — Agent 可停止�
 
 1. `stop` 在运行状态返回 `"success"` 并释放 TCP 连接
 2. `stop` 在未启动状态幂等返回 `"success"`
-3. `start` 在已运行状态返回 `ALREADY_RUNNING`
+3. `start` 在已运行状态幂等返回 `ALREADY_RUNNING`（成功路径，`isError: false`，连接不中断）
 4. 简单重启（`stop` → `start`）后连接恢复
 5. 完整 Stop-Start 协议（`stop` → `adjust_shm` → `start`）
 6. 多次 `stop`/`start` 循环正确
@@ -119,11 +119,12 @@ Go 编译的 `c4_asfp2_client` 二进制，通过 MCP stdio JSON-RPC 协议控�
 - **操作**：调用 `stop`
 - **预期**：`isError: false`，返回 `"success"`（stop 幂等）
 
-### TC3: start — 已运行时重复调用
+### TC3: start — 已运行时重复调用（幂等成功）
 
 - **前置**：`start` 已成功
 - **操作**：再次调用 `start`
-- **预期**：`isError: true`，`ALREADY_RUNNING`
+- **预期**：`isError: false`，结果含 `ALREADY_RUNNING`——重复 start 属成功路径的幂等结果，
+  **不是错误**（c4_architecture.md §3.1.2）；`asfp2_server` 侧连接保持，数据路径不中断
 
 ### TC4: 简单重启（stop → start，无配置变更）
 

@@ -1,15 +1,21 @@
 #!/usr/bin/env python3
-# func_test_case 用例 16~28（含用例 10）E2E runner —— 隔离 agent 实例
+# func_test_case 用例 16~29（含用例 10）E2E runner —— 隔离 agent 实例
 # （独立 config-dir / shm c4_e2e / 19xxx 端口映射，不与生产 agent 及用户 Web 测试互相干扰）。
+# 独立服务模型（c4_architecture.md §3.1.1）：测试栈自启六个 MCP 服务二进制
+# （RESIDENT 模式：stdin=/dev/null，仅监听 <sock-dir>/<service>.sock、零实例），
+# Agent 与 MCP 栈经同一 C4_SOCK_DIR 连接——Agent 从不拉起 MCP 进程。
 # 用法（root）: python3 run_cases.py <case>
-#   case: prereq|16|17|18|19|20|21|22|23|24|25|26|27|28|10|all
+#   case: prereq|16|17|18|19|20|21|22|23|24|25|26|27|28|29|10|all
 import json
 import os
 import re
 import shutil
+import signal
+import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.request
 
@@ -24,6 +30,146 @@ LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results.log")
 
 PORT_MAP = {"9001": "19001", "9002": "19002", "9900": "19900", "9901": "19901"}
 P_RECV1, P_RECV2, P_FWD1, P_FWD2 = 19001, 19002, 19900, 19901
+
+# ── 常驻 MCP 测试栈（独立服务模型）────────────────────────
+ALL_MCP_SERVICES = [
+    "c4_shm_manager",
+    "c4_modbus_client",
+    "c4_iec104_client",
+    "c4_asfp2_client",
+    "c4_asfp2_server",
+    "c4_influxdb_client",
+]
+SOCK_DIR = "/tmp/c4_e2e_socks"
+
+
+class SockClient:
+    """Unix-socket MCP JSON-RPC 客户端（一行一条 JSON，握手按连接进行）。"""
+
+    def __init__(self, service_type: str, timeout: float = 10.0):
+        self.sock_path = os.path.join(SOCK_DIR, f"{service_type}.sock")
+        self.timeout = timeout
+        self._sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self._sock.settimeout(timeout)
+        self._sock.connect(self.sock_path)
+        self._buf = b""
+        self._next_id = 0
+        self._send({"jsonrpc": "2.0", "id": 0, "method": "initialize",
+                    "params": {"protocolVersion": "2024-11-05", "capabilities": {},
+                               "clientInfo": {"name": "c4_e2e", "version": "1.0.0"}}})
+        resp = self._recv()
+        if "error" in resp:
+            raise RuntimeError(f"initialize failed: {resp['error']}")
+        self._send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+
+    def _send(self, msg: dict) -> None:
+        self._sock.sendall((json.dumps(msg) + "\n").encode("utf-8"))
+
+    def _recv(self) -> dict:
+        while True:
+            idx = self._buf.find(b"\n")
+            if idx >= 0:
+                line = self._buf[:idx]
+                self._buf = self._buf[idx + 1:]
+                return json.loads(line.decode("utf-8"))
+            chunk = self._sock.recv(65536)
+            if not chunk:
+                raise EOFError("MCP socket closed")
+            self._buf += chunk
+
+    def call_tool(self, name: str, arguments: dict) -> dict:
+        self._next_id += 1
+        rid = self._next_id
+        self._send({"jsonrpc": "2.0", "id": rid, "method": "tools/call",
+                    "params": {"name": name, "arguments": arguments}})
+        while True:
+            msg = self._recv()
+            if msg.get("id") == rid:
+                return msg
+
+    def call_tool_text(self, name: str, arguments: dict) -> tuple[str, bool]:
+        resp = self.call_tool(name, arguments)
+        result = resp.get("result", {})
+        parts = [c.get("text", "") for c in (result.get("content") or [])
+                 if isinstance(c, dict) and c.get("type") == "text"]
+        return ("\n".join(parts), bool(result.get("isError")))
+
+    def read_points(self, shm_ids: list[int]) -> dict:
+        text, is_err = self.call_tool_text("read_points", {"shm_ids": shm_ids})
+        if is_err:
+            raise Fail(f"read_points failed: {text[:200]}")
+        return json.loads(text)
+
+    def close(self) -> None:
+        try:
+            self._sock.close()
+        except OSError:
+            pass
+
+
+class McpStack:
+    """常驻 MCP 服务栈：进程由测试自启（RESIDENT：stdin=/dev/null），Agent 仅连接。"""
+
+    def __init__(self):
+        self.procs: dict[str, subprocess.Popen] = {}
+        self.logs: dict[str, object] = {}
+
+    @staticmethod
+    def sock_path(service_type: str) -> str:
+        return os.path.join(SOCK_DIR, f"{service_type}.sock")
+
+    def _sock_alive(self, service_type: str) -> bool:
+        p = self.sock_path(service_type)
+        if not os.path.exists(p):
+            return False
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            s.settimeout(2)
+            s.connect(p)
+            return True
+        except OSError:
+            return False
+        finally:
+            s.close()
+
+    def up(self):
+        os.makedirs(SOCK_DIR, exist_ok=True)
+        env = dict(os.environ)
+        env["C4_SOCK_DIR"] = SOCK_DIR
+        for svc in ALL_MCP_SERVICES:
+            if self._sock_alive(svc):
+                continue
+            if os.path.exists(self.sock_path(svc)):
+                os.unlink(self.sock_path(svc))
+            f = open(f"/tmp/e2e_mcp_{svc}.log", "w")
+            self.procs[svc] = subprocess.Popen(
+                [os.path.join("/usr/local/bin", svc)],
+                stdin=subprocess.DEVNULL, stdout=f, stderr=subprocess.STDOUT, env=env)
+            self.logs[svc] = f
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            if all(self._sock_alive(s) for s in ALL_MCP_SERVICES):
+                log(f"  常驻 MCP 栈就绪（C4_SOCK_DIR={SOCK_DIR}）")
+                return
+            time.sleep(0.2)
+        raise Fail("常驻 MCP 栈 20s 内 socket 未全部就绪（见 /tmp/e2e_mcp_*.log）")
+
+    def stop_instances(self):
+        """停全部数据路径实例（进程保留）——测试隔离，等价 cleanup 的实例层。"""
+        for svc in ALL_MCP_SERVICES:
+            if svc == "c4_shm_manager":
+                continue
+            if not self._sock_alive(svc):
+                continue
+            try:
+                c = SockClient(svc, timeout=5.0)
+                c.call_tool_text("stop", {})
+                c.close()
+            except Exception:
+                pass
+
+
+MCP_STACK = McpStack()
 
 MSG_CASE1 = (
     "现在需要接入1号风机的数据，第三方厂家通过asfp2协议给我们转来1#风机数据，10个点，从1000到1009，"
@@ -112,6 +258,7 @@ class Agent:
             json.dump(agent_json, f, ensure_ascii=False, indent=2)
         env = dict(os.environ)
         env["DEEPSEEK_API_KEY"] = load_api_key()
+        env["C4_SOCK_DIR"] = SOCK_DIR
         self.f = open(f"/tmp/e2e_agent_{time.strftime('%H%M%S')}.log", "w")
         self.p = subprocess.Popen(
             ["node", AGENT_JS, "--config-dir", self.dir],
@@ -129,12 +276,19 @@ class Agent:
         raise Fail("隔离 agent 60s 未就绪")
 
     def reset(self):
-        """清空配置与 shm，重启隔离 agent（等价 cleanup.sh 的隔离版）。"""
+        """清空配置与 shm，重启隔离 agent（等价 cleanup.sh 的隔离版）。
+
+        独立服务模型：先停数据路径实例（常驻 MCP 进程保留），再清 config 事务文件组
+        （config.json + .prev.1~.3 + pending_change.json）与实例 shm 段。
+        """
         self.stop()
         subprocess.run(["fuser", "-k", "19720/tcp"], capture_output=True, timeout=5)
         time.sleep(1)
+        MCP_STACK.stop_instances()
         if self.dir:
-            for name in ("config.json", "config.json.bak", "abbr_registry.json"):
+            names = ["config.json", "abbr_registry.json", "pending_change.json",
+                     "config.json.prev.1", "config.json.prev.2", "config.json.prev.3"]
+            for name in names:
                 p = os.path.join(self.dir, name)
                 if os.path.exists(p):
                     os.remove(p)
@@ -635,11 +789,148 @@ def case27():
 def case28():
     c = Conv()
     text = c.send("把风机都删了。")
-    if "是否确认" in text:
-        raise Fail(f"模糊指令直接出确认方案: {text[:200]}")
+    # func_test_case 用例 28 ①：必须先逐台列出受影响风机，并要求明确确认
+    #（列表 + 确认按钮同消息出现即合规）；仅当「未列清单就索要确认」才算
+    # 跳步（模糊指令直接出确认方案）。未确认时不得有任何风机被删（③，
+    # 由后续用例 25/26 的重建断言兜底验证 config 未被改写）。
+    listed = bool(re.search(r"1#", text) and re.search(r"2#", text))
+    if not listed and "是否确认" in text:
+        raise Fail(f"模糊指令直接出确认方案（未列清单）: {text[:200]}")
     if not re.search(r"1#|2#|哪些|哪台|列表|具体|哪一", text):
         raise Fail(f"既未列清单也未询问: {text[:200]}")
     log(f"  用例28 PASS ✓（回复片段: {text[:150]}）")
+
+
+def case29():
+    """用例 29：Agent 运行中 kill -9 的崩溃恢复（README §3）。
+
+    步骤1 kill -9 → 数据接入不中断（19001 持续监听、注入后 write_seq 递增、→19900 转发持续）；
+    步骤2 崩溃窗口内 HTTP 不可达（预期，不作缺陷断言失败）；
+    步骤3 重启 → 瀑布收敛（config 不被改写＝ALREADY_RUNNING 无动作、端口零中断）；
+    步骤4 删除类变更落地（2# 在线走用例25句式，否则用例26句式删至 0 台）；
+    步骤5 空态下重新 prereq 应完整接入。
+    """
+    prereq()
+    ids = {p["shm_id"] for p in
+           points_of(read_config(), "c4_asfp2_server", writer_of(read_config(), 1000)).values()}
+    base = _read_seqs(ids)
+
+    if AGENT.p is None:
+        raise Fail("Agent 进程不存在（case29 前置未就绪）")
+    agent_pid = AGENT.p.pid
+    os.kill(agent_pid, signal.SIGKILL)
+    AGENT.p.wait()
+    AGENT.p = None
+    wait_port(P_RECV1, True)
+
+    recv = start_receiver(P_FWD1)
+    try:
+        # asfp2_client 注入范围为 [b, e)：-e 1010 才覆盖 addr 1009（全部 10 点）
+        inject(P_RECV1, 1000, 1010, times=3)
+        # 接收端在 kill 后才拉起：reader（c4_asfp2_client）对 19900 的重连
+        # 按 T0 周期后台重拨（默认 30s），观察窗须覆盖一个重拨周期
+        deadline = time.time() + 20
+        advanced = False
+        while time.time() < deadline:
+            try:
+                now = _read_seqs(ids)
+                if all(now[i] > base[i] for i in ids):
+                    advanced = True
+                    break
+            except Exception:
+                pass
+            time.sleep(0.5)
+        if not advanced:
+            raise Fail("崩溃窗口内 write_seq 未递增——数据接入中断")
+        fwd_deadline = time.time() + 60
+        while time.time() < fwd_deadline:
+            if recv.out().strip():
+                break
+            time.sleep(1)
+        if not recv.out().strip():
+            raise Fail("崩溃窗口内转发 →19900 无数据")
+    finally:
+        recv.stop()
+
+    try:
+        state()
+        raise Fail("Agent 已 kill -9 但 HTTP 仍可达")
+    except Exception:
+        log("  步骤2: 崩溃窗口内配置变更不可达（连接拒绝，预期）")
+
+    cfg_before = read_config()
+    interrupt: list[str] = []
+    watching = threading.Event()
+    watching.set()
+
+    def _watch() -> None:
+        while watching.is_set():
+            if not listening(P_RECV1):
+                interrupt.append("port dropped during restart")
+                return
+            time.sleep(0.2)
+
+    watcher = threading.Thread(target=_watch, daemon=True)
+    watcher.start()
+    AGENT.up()
+    watching.clear()
+    watcher.join(timeout=2)
+    if interrupt:
+        raise Fail(f"重启期间数据路径中断（ALREADY_RUNNING 应无动作）: {interrupt}")
+    cfg_after = read_config()
+    if json.dumps(cfg_before, sort_keys=True) != json.dumps(cfg_after, sort_keys=True):
+        raise Fail("重启后 config.json 被改写（ALREADY_RUNNING 应无动作）")
+    log("  步骤3: 瀑布收敛完成（config 不变、端口零中断＝ALREADY_RUNNING 无动作）")
+
+    recv2 = start_receiver(P_FWD1)
+    try:
+        inject(P_RECV1, 1000, 1002, times=2)
+        # reader 对新接收端的重连按 T0 周期后台重拨——轮询等待而非固定短 sleep
+        fwd_deadline = time.time() + 60
+        while time.time() < fwd_deadline:
+            if recv2.out().strip():
+                break
+            time.sleep(1)
+        if not recv2.out().strip():
+            raise Fail("重启后转发路径无数据")
+    finally:
+        recv2.stop()
+
+    cfg = read_config()
+    if writer_of(cfg, 1100) is not None:
+        text, confirmed = send_flow(Conv(), "25", "删除2号风机。")
+        if not confirmed:
+            raise Fail(f"收敛后删除变更未受理: {text[:200]}")
+        wait_config(lambda c: writer_of(c, 1100) is None and writer_of(c, 1000) is not None,
+                    desc="2#整机删除落地")
+        wait_port(P_RECV2, False)
+        wait_port(P_RECV1, True)
+    else:
+        text, confirmed = send_flow(Conv(), "26", "删除1号风机。")
+        if not confirmed:
+            raise Fail(f"收敛后删除变更未受理: {text[:200]}")
+
+        def _all_deleted(c2):
+            return not [k for k in server_instances(c2)
+                        if k[0] in ("c4_asfp2_server", "c4_asfp2_client")]
+        wait_config(_all_deleted, desc="删至 0 台（整机删除落地）")
+        wait_port(P_RECV1, False, timeout=30)
+    log("  步骤4: 删除类变更落地——瀑布收敛后配置变更能力完整恢复")
+
+    prereq()
+    log("  步骤5: 空态重新接入 OK")
+    log("  用例29 PASS ✓")
+
+
+def _read_seqs(shm_ids: set[int]) -> dict[int, int]:
+    c = SockClient("c4_shm_manager")
+    try:
+        rp = c.read_points(sorted(shm_ids))
+    finally:
+        c.close()
+    if rp.get("errors"):
+        raise Fail(f"read_points errors: {rp['errors']}")
+    return {r["shm_id"]: int(r.get("seq", 0)) for r in rp["reads"]}
 
 
 def case10():
@@ -674,12 +965,13 @@ def case10():
 CASES = {
     "prereq": prereq, "16": case16, "17": case17, "18": case18, "19": case19,
     "20": case20, "21": case21, "22": case22, "23": case23, "24": case24,
-    "25": case25, "26": case26, "27": case27, "28": case28, "10": case10,
+    "25": case25, "26": case26, "27": case27, "28": case28, "29": case29,
+    "10": case10,
 }
 
 
 SEQUENCE = ["prereq", "16", "17", "10", "18", "19", "20",
-            "21", "25", "22", "23", "24", "27", "28", "25", "26"]
+            "21", "25", "22", "23", "24", "27", "28", "25", "26", "29"]
 
 
 def main():
@@ -690,6 +982,7 @@ def main():
             t0 = time.time()
             log(f"════ 用例 {c} 开始 ════")
             try:
+                MCP_STACK.up()
                 if not AGENT.p:
                     AGENT.up()
                 CASES[c]()
@@ -711,6 +1004,7 @@ def main():
     t0 = time.time()
     log(f"════ 用例 {case} 开始 ════")
     try:
+        MCP_STACK.up()
         if not AGENT.p:
             AGENT.up()
         CASES[case]()

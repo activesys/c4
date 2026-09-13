@@ -73,13 +73,14 @@ SUT 启动流程：`prepare_environment` → `start_asfp2_server` → `start` �
 Python 通过 `shm_helpers.read_shm_block(shm_path, shm_id)` 读取 Data Block，
 验证 `state`、`type`、`timestamp`、`value` 字段。
 
-- `value` 为 8 字节大端存储，按原类型解析：
-  - UINT16 → `struct.unpack(">H", value[6:8])`
-  - UINT32 → `struct.unpack(">I", value[4:8])`
-   - FLOAT32 → `struct.unpack("f", value[4:8])`（`-P 0`/`-P 7` 为本机序，`-P 8`（v2.1.1）用 `>f`）
+- `value` 为 8 字节**本机序**存储（`c4_architecture.md` §2.2：shm 内一律本机序），按原类型解析：
+  - UINT16 → `struct.unpack("=H", value[6:8])`
+  - UINT32 → `struct.unpack("=I", value[4:8])`
+  - FLOAT32 → `struct.unpack("=f", value[4:8])`（v2.0.0/v2.1.0 本机序直写；v2.1.1 线上网络序，
+    接收端 byte swap 转本机序后写入——见 TC14 与 §5.7）
   - BOOLEAN/BIT → `data_raw[31] & 1`（读 raw 字节最低位，非 unpacked int）
 - `type` 对应 ASFP2_TYPE_* 枚举值
-- `timestamp` 为 Unix 毫秒时间戳（大端 8 字节）
+- `timestamp` 为 Unix 毫秒时间戳（本机序 8 字节）
 - `state` 首次写入后应变为 `1`
 
 ---

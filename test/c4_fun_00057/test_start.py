@@ -219,12 +219,12 @@ class TestAsfp2ServerStart:
                 f"Port {port} should not be listening for empty instances"
             )
 
-    # ── TC4: 重复调用 start →     ALREADY_RUNNING ─────
+    # ── TC4: 重复调用 start → ALREADY_RUNNING（幂等成功）────
 
     def test_tc4_double_start(
         self, prepare_environment, start_asfp2_server, isolated_shm
     ):
-        """TC4: SELF-CONTAINED — 首次 start 成功，再次 start 返回     ALREADY_RUNNING。"""
+        """TC4: SELF-CONTAINED — 首次 start 成功，再次 start 返回 ALREADY_RUNNING（成功路径）。"""
         iid = "c4_testtc4"
         isolated_shm(iid)
 
@@ -238,11 +238,19 @@ class TestAsfp2ServerStart:
         assert resp1["result"].get("isError", False) is False
         assert resp1["result"]["content"][0]["text"] == "success"
 
-        # 再次 start — 应返回     ALREADY_RUNNING
+        # 再次 start — ALREADY_RUNNING 为正常结果（isError: false），无动作、不中断数据路径
         resp2 = start_asfp2_server.call_tool(
             "start", {"instance_id": iid, "config_path": config_path},
         )
-        _assert_mcp_error(resp2, "ALREADY_RUNNING")
+        assert resp2["result"].get("isError", False) is False, (
+            f"ALREADY_RUNNING is a success-path result, got: {resp2}"
+        )
+        assert "ALREADY_RUNNING" in resp2["result"]["content"][0]["text"]
+
+        # 连续性：实例保持运行，端口持续监听，数据路径不中断
+        assert _port_is_listening(9080), (
+            "Port 9080 stopped listening after ALREADY_RUNNING response"
+        )
 
     # ── TC5: start 未调用前调用 stop → 幂等 success
 
@@ -318,7 +326,7 @@ class TestAsfp2ServerStart:
         fd = os.open(path, os.O_RDWR)
         try:
             buf = mmap.mmap(fd, 4, mmap.MAP_SHARED, mmap.PROT_WRITE)
-            buf[0:4] = struct.pack(">I", 0xDEADBEEF)
+            buf[0:4] = struct.pack("=I", 0xDEADBEEF)
             buf.close()
         finally:
             os.close(fd)
@@ -338,26 +346,13 @@ class TestAsfp2ServerStart:
         )
         _assert_mcp_error(resp, "CONFIG_PATH_MISSING")
 
-    # ── TC10: 配置文件格式错误 → CONFIG_PARSE_ERROR ─
+    # ── TC10: 配置文件格式错误 / 段缺失 ─────────
 
-    @pytest.mark.parametrize(
-        "bad_config_content",
-        [
-            "{invalid json\n",
-            '{"c4_shm_manager": {"writer": [], "reader": []}}',
-        ],
-    )
-    def test_tc10_config_parse_error(
+    def test_tc10a_config_parse_error(
         self, shm_mgr_client, start_asfp2_server, isolated_shm,
-        bad_config_content,
     ):
-        """TC10: 格式错误的配置文件 — start 返回 CONFIG_PARSE_ERROR。
-
-        子场景:
-        (a) JSON 语法错误
-        (b) 合法 JSON 但缺少 c4_asfp2_server key
-        """
-        iid = f"c4_testtc10{abs(hash(bad_config_content)) % 100000}"
+        """TC10a: JSON 语法错误 → CONFIG_PARSE_ERROR。"""
+        iid = "c4_testtc10a"
         isolated_shm(iid)
 
         # 先创建 shm（无配置文件 → 默认 10 万点）
@@ -366,20 +361,55 @@ class TestAsfp2ServerStart:
             {"instance_id": iid},
         )
         assert resp["result"].get("isError", False) is False, (
-            f"create_shm failed for TC10: {resp}"
+            f"create_shm failed for TC10a: {resp}"
         )
 
-        # 创建格式错误的配置文件
         fd, bad_config_path = tempfile.mkstemp(
             suffix=".json", prefix="c4_config_bad_", text=True
         )
         with os.fdopen(fd, "w") as f:
-            f.write(bad_config_content)
+            f.write("{invalid json\n")
 
         try:
             resp = start_asfp2_server.call_tool(
                 "start", {"instance_id": iid, "config_path": bad_config_path},
             )
             _assert_mcp_error(resp, "CONFIG_PARSE_ERROR")
+        finally:
+            os.unlink(bad_config_path)
+
+    def test_tc10b_missing_section_zero_instances(
+        self, shm_mgr_client, start_asfp2_server, isolated_shm,
+    ):
+        """TC10b: 合法 JSON 但缺 c4_asfp2_server 段 → 零实例期望，幂等 success。
+
+        空配置段语义（c4_architecture.md §3.1.2/§3.3.1）：段缺失与空数组在 schema 层
+        等价，期望状态为零实例，start 幂等返回 success，不得作为错误。
+        """
+        iid = "c4_testtc10b"
+        isolated_shm(iid)
+
+        resp = shm_mgr_client.call_tool(
+            "create_shm",
+            {"instance_id": iid},
+        )
+        assert resp["result"].get("isError", False) is False, (
+            f"create_shm failed for TC10b: {resp}"
+        )
+
+        fd, bad_config_path = tempfile.mkstemp(
+            suffix=".json", prefix="c4_config_bad_", text=True
+        )
+        with os.fdopen(fd, "w") as f:
+            f.write('{"c4_shm_manager": {"writer": [], "reader": []}}')
+
+        try:
+            resp = start_asfp2_server.call_tool(
+                "start", {"instance_id": iid, "config_path": bad_config_path},
+            )
+            assert resp["result"].get("isError", False) is False, (
+                f"missing section = zero instances, start must succeed: {resp}"
+            )
+            assert resp["result"]["content"][0]["text"] == "success"
         finally:
             os.unlink(bad_config_path)

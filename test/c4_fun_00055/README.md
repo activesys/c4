@@ -60,13 +60,13 @@ def set_block_state(shm_path, shm_id, state):
 
 ```python
 def set_header_point_count(shm_path, count):
-    """设置 Header 的 point_count 字段（偏移 = 8，大端 uint32）。"""
+    """设置 Header 的 point_count 字段（偏移 = 8，本机序 uint32）。"""
     fd = None
     shm = None
     try:
         fd = os.open(shm_path, os.O_RDWR)
         shm = mmap.mmap(fd, 16, mmap.MAP_SHARED, prot=mmap.PROT_READ | mmap.PROT_WRITE)
-        shm[8:12] = struct.pack(">I", count)
+        shm[8:12] = struct.pack("=I", count)
     finally:
         if shm is not None:
             shm.close()

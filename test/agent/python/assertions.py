@@ -129,35 +129,30 @@ def assert_config_json_valid(config_path: Path) -> dict:
 
 def assert_shm_ids_assigned(config: dict) -> None:
     """
-    验证 config 中存在数据点定义且格式正确。
-    shm_id=0 是正常设计（由 c4_shm_manager.adjust_shm() 在共享内存中分配，
-    不回写到 config.json 磁盘文件）。
+    验证 config 中所有数据点均已分配 shm_id（shm_id != 0）。
+
+    目标语义（README §6）：adjust_shm 分配后回写 config.json——
+    writer 点以 id 标识、reader 点以 key 标识；段缺失/空数组为合法空态。
     """
-    unchecked = True
     for key, value in config.items():
         if key == "c4_shm_manager":
             continue
-        if isinstance(value, list):
-            for instance in value:
-                if isinstance(instance, dict) and "points" in instance:
-                    pts = instance["points"]
-                    assert isinstance(pts, list), (
-                        f"Service '{key}' points must be a list"
-                    )
-                    assert len(pts) > 0, (
-                        f"Service '{key}' must have at least one point"
-                    )
-                    for pt in pts:
-                        unchecked = False
-                        assert "id" in pt, (
-                            f"Point in service '{key}' missing 'id' field"
-                        )
-                        assert "shm_id" in pt, (
-                            f"Point '{pt.get('id', '<unnamed>')}' missing 'shm_id'"
-                        )
-    if unchecked:
-        # 没有 point 的 config 也算通过（空 config 场景）
-        pass
+        if not isinstance(value, list):
+            continue
+        for instance in value:
+            if not isinstance(instance, dict):
+                continue
+            pts = instance.get("points", [])
+            assert isinstance(pts, list), f"Service '{key}' points must be a list"
+            for pt in pts:
+                ident = pt.get("id") or pt.get("key")
+                assert ident, (
+                    f"Point in service '{key}' missing identity ('id' for writer / 'key' for reader): {pt}"
+                )
+                sid = pt.get("shm_id", 0)
+                assert sid != 0, (
+                    f"Point '{ident}' in service '{key}' has shm_id=0 — allocation missing"
+                )
 
 
 def assert_writer_reader_from_registry(config: dict, registry_dir: Path) -> None:

@@ -35,6 +35,7 @@ from conftest import (  # noqa: E402
     _make_modbusd_config,
     _make_modbusd_point,
     _write_config_file,
+    wait_write_seq_advanced,
 )
 from shm_helpers import shm_path, read_shm_block  # noqa: E402
 
@@ -161,8 +162,16 @@ class TestModbusClientStart:
         resp = sut.call_tool("start", {"instance_id": instance_id, "config_path": config_path})
         _assert_mcp_success(resp)
 
+        # 再次 start — ALREADY_RUNNING 为正常结果（isError: false），无动作、轮询不中断
         resp = sut.call_tool("start", {"instance_id": instance_id, "config_path": config_path})
-        _assert_mcp_error(resp, "ALREADY_RUNNING")
+        assert resp["result"].get("isError", False) is False, (
+            f"ALREADY_RUNNING is a success-path result, got: {resp}"
+        )
+        assert "ALREADY_RUNNING" in resp["result"]["content"][0]["text"]
+
+        # 连续性：连接与轮询保持，write_seq 持续递增
+        seq0 = read_shm_block(shm_path(instance_id), 1)["write_seq"]
+        wait_write_seq_advanced(shm_path(instance_id), 1, seq0)
 
     # ── TC5: start 未调用前调用 stop → 幂等 success ──────────
 
@@ -180,43 +189,63 @@ class TestModbusClientStart:
         resp = sut.call_tool("start", {"instance_id": "c4_fun62tc6"})
         _assert_mcp_error(resp, "CONFIG_PATH_MISSING")
 
-    # ── TC7: 配置文件格式错误 → CONFIG_PARSE_ERROR ──────────
+    # ── TC7: 配置文件格式错误 / 段缺失 ──────────
 
-    @pytest.mark.parametrize(
-        "bad_config_content",
-        [
-            "{invalid json\n",
-            '{"c4_shm_manager": {"writer": [], "reader": []}}',
-        ],
-    )
-    def test_tc7_config_parse_error(
-        self, shm_mgr_client, start_modbus_client, isolated_shm, bad_config_content,
+    def test_tc7a_config_parse_error(
+        self, shm_mgr_client, start_modbus_client, isolated_shm,
     ):
-        """TC7: 格式错误的配置文件 → CONFIG_PARSE_ERROR。
-
-        子场景:
-        (a) JSON 语法错误
-        (b) 合法 JSON 但缺少 c4_modbus_client 段
-        """
-        instance_id = f"c4_fun62tc7{abs(hash(bad_config_content)) % 100000}"
+        """TC7a: JSON 语法错误 → CONFIG_PARSE_ERROR。"""
+        instance_id = "c4_fun62tc7a"
         isolated_shm(instance_id)
 
         # 先创建共享内存（无配置文件 → 默认 10 万点）
         resp = shm_mgr_client.call_tool("create_shm", {"instance_id": instance_id})
         assert resp["result"].get("isError", False) is False, (
-            f"create_shm failed for TC7: {resp}"
+            f"create_shm failed for TC7a: {resp}"
         )
 
         fd, bad_config_path = tempfile.mkstemp(
             suffix=".json", prefix="c4_config_bad_"
         )
         with os.fdopen(fd, "w") as f:
-            f.write(bad_config_content)
+            f.write("{invalid json\n")
 
         try:
             sut = start_modbus_client()
             resp = sut.call_tool("start", {"instance_id": instance_id, "config_path": bad_config_path})
             _assert_mcp_error(resp, "CONFIG_PARSE_ERROR")
+        finally:
+            os.unlink(bad_config_path)
+
+    def test_tc7b_missing_section_zero_instances(
+        self, shm_mgr_client, start_modbus_client, isolated_shm,
+    ):
+        """TC7b: 合法 JSON 但缺 c4_modbus_client 段 → 零实例期望，幂等 success。
+
+        空配置段语义（c4_architecture.md §3.1.2/§3.3.1）：段缺失与空数组在 schema 层
+        等价，期望状态为零实例，start 幂等返回 success，不得作为错误。
+        """
+        instance_id = "c4_fun62tc7b"
+        isolated_shm(instance_id)
+
+        resp = shm_mgr_client.call_tool("create_shm", {"instance_id": instance_id})
+        assert resp["result"].get("isError", False) is False, (
+            f"create_shm failed for TC7b: {resp}"
+        )
+
+        fd, bad_config_path = tempfile.mkstemp(
+            suffix=".json", prefix="c4_config_bad_"
+        )
+        with os.fdopen(fd, "w") as f:
+            f.write('{"c4_shm_manager": {"writer": [], "reader": []}}')
+
+        try:
+            sut = start_modbus_client()
+            resp = sut.call_tool("start", {"instance_id": instance_id, "config_path": bad_config_path})
+            assert resp["result"].get("isError", False) is False, (
+                f"missing section = zero instances, start must succeed: {resp}"
+            )
+            assert resp["result"]["content"][0]["text"] == "success"
         finally:
             os.unlink(bad_config_path)
 
@@ -282,7 +311,7 @@ class TestModbusClientStart:
         fd = os.open(path, os.O_RDWR)
         try:
             buf = mmap.mmap(fd, 4, mmap.MAP_SHARED, mmap.PROT_WRITE)
-            buf[0:4] = struct.pack(">I", 0xDEADBEEF)
+            buf[0:4] = struct.pack("=I", 0xDEADBEEF)
             buf.close()
         finally:
             os.close(fd)
@@ -389,13 +418,17 @@ class TestModbusClientStart:
         resp = sut.call_tool("start", {"instance_id": instance_id, "config_path": config_path})
         _assert_mcp_error(resp, "INVALID_POINT")
 
-    # ── TC12: 设备不可达 → CONNECT_FAILED（tear down）──────────
+    # ── TC12: 设备不可达 → T0 后台重拨，start 不失败 ──────────
 
-    def test_tc12_connect_failed(
+    def test_tc12_unreachable_device_t0(
         self, start_modbusd, write_redis, prepare_environment,
         start_modbus_client, isolated_shm,
     ):
-        """TC12: 实例 1 可达、实例 2 不可达 → CONNECT_FAILED，实例 1 被 tear down。"""
+        """TC12: 实例 1 可达、实例 2 不可达 → start 返回 success（连接失败不作为 tool 错误）。
+
+        返回时机语义（c4_architecture.md §3.3.1 / c4_modbus_client.md §3.2）：start 只启动
+        goroutine，连接失败由实例按 T0 周期后台重拨——可达实例的轮询不受影响、持续写入。
+        """
         instance_id = "c4_fun62tc12"
         isolated_shm(instance_id)
         port = _free_port()
@@ -421,16 +454,12 @@ class TestModbusClientStart:
 
         sut = start_modbus_client()
         resp = sut.call_tool("start", {"instance_id": instance_id, "config_path": config_path})
-        _assert_mcp_error(resp, "CONNECT_FAILED")
+        _assert_mcp_success(resp)
 
-        # tear-down 验证：实例 1（shm_id=1）的 goroutine 已被 tear down，write_seq 不再递增
+        # 连续性：可达实例（shm_id=1）轮询不中断，write_seq 持续递增
         sp = shm_path(instance_id)
-        seq_before = read_shm_block(sp, 1)["write_seq"]
-        time.sleep(0.3)  # 3 个轮询周期（timer=100ms）
-        seq_after = read_shm_block(sp, 1)["write_seq"]
-        assert seq_after == seq_before, (
-            f"instance1 write_seq advanced after tear-down: {seq_before} → {seq_after}"
-        )
+        seq0 = read_shm_block(sp, 1)["write_seq"]
+        wait_write_seq_advanced(sp, 1, seq0)
 
         # 随后 stop 幂等返回 success
         resp = sut.call_tool("stop", {})

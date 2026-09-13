@@ -19,10 +19,12 @@
 1. `tmp_path` 写入测试 `agent.json`：`instance_id=c4_ft82`、`server.port` 取空闲端口、
    `shm_manager.config_path` 指向 tmp 测试 config.json；二进制路径来自环境变量
    `C4_AGENT_PATH` / `C4_SHM_MANAGER_PATH`（缺省 `/usr/local/bin/…`）
-2. spawn `c4_shm_manager`（§2 直连栈，独立实例 `c4_ft82s`）与
-   `c4_agent --config-dir <tmp>`（§3 REST 栈）；轮询 `GET /api/state` 直至就绪
-3. teardown：SIGTERM→SIGKILL **整组进程**（Agent、Agent 自启的 c4_shm_manager、§2 直连的
-   独立 c4_shm_manager——按进程组清理，防 SIGKILL 孤儿）+ `shm_unlink(/dev/shm/{instance_id})`
+2. spawn `c4_shm_manager`（§2 直连栈，独立实例 `c4_ft82s`，监听 tmp 目录 Unix socket）与
+   `c4_agent --config-dir <tmp>`（§3 REST 栈，经连接配置指向上述 socket）。测试栈内无
+   systemd，MCP 服务进程一律由**测试栈自启**；Agent 是 MCP 客户端，仅经 Unix socket
+   连接、从不拉起 MCP 进程（c4_architecture.md §3.1.1）。轮询 `GET /api/state` 直至就绪
+3. teardown：SIGTERM→SIGKILL **整组进程**（Agent、测试栈自启的各 c4_shm_manager——
+   按进程组清理，防 SIGKILL 孤儿）+ `shm_unlink(/dev/shm/{instance_id})`
 4. 测试以**普通用户**运行（无 sudo）；REST base URL 从 AgentHandle 读取（不硬编码 9988）；
    shm 路径为 `/dev/shm/c4_ft82`（非生产 `c4_main`）
 
@@ -60,7 +62,7 @@ McpClient）；shm 数据由测试按 seqlock 直写播种（`write_point` helpe
 | TC14 | 暂无数据 | 点不写（块 state=0） | `state=no_data`；value 为 null 或缺省，**不得为数值** |
 | TC15 | 已停止刷新 | 预写 ts=now−12min 后不再写 | `state=stale` + `staleForMs ∈ [700000, 740000]`（±tick 粒度） |
 | TC16 | 阈值自适应（slow，~150s） | 写线程周期 25s 运行 ≥55s（建立 ≥2 变位，观测平均 ≈25s）→ 停写后**轮询至 `stale`（截止静默 90s）** | 静默 65s 时**仍为 `ok`**（有效阈值保留 75s——窗口剪空后保留最近计算值，agent.md §3.6.2）；静默 ≥80s 后转 `stale`（量化边界余量 ~2s，故以轮询截止兜底） |
-| TC17 | 降级态 | kill Agent 栈内 c4_shm_manager 进程，轮询（截止 10s） | `degraded=true`，各点保持上次值与状态（不杜撰）；恢复断言 ❌ 待 C4_FUN_00021 |
+| TC17 | 降级态 | kill 测试栈自启、Agent 所连接的 c4_shm_manager 进程（测试栈无 systemd，由测试控制进程生死；生产中等价场景为 systemd 重启后 Agent 退避重连），轮询（截止 10s） | `degraded=true`，各点保持上次值与状态（不杜撰）；恢复断言 ❌ 待 C4_FUN_00021 |
 
 ## 4. 测试 fixture（conftest.py）
 
@@ -75,7 +77,8 @@ McpClient）；shm 数据由测试按 seqlock 直写播种（`write_point` helpe
 
 - schema 依据 `c4_architecture.md` §3.2.1：`c4_shm_manager.writer/reader` 为服务类型**字符串**；
   writer 点字段为 `id`；reader 点以 `key` 引用（服务端口取 19xxx 段避让生产 9001/9900；
-  服务进程由测试栈 Agent 启动，数据播种走直写、不依赖服务真实运行）
+  本套件不调用 `start`，数据服务以零实例状态常驻即可——期望状态零实例合法且 start 幂等
+  返回 success，数据播种走直写、不依赖任何数据服务真实运行）
 - shm_id 从 `create_shm` **回填后的 tmp config.json** 读取
 - `write_point(shm, shm_id, data_type, value, ts)` helper：seqlock 写（seq→data→seq+2），
   **本机序** `struct` 前缀 `=`（见 `c4_fun_00053/README.md` §4.3 历史勘误——勿按其旧版

@@ -22,8 +22,38 @@ from conftest import (  # noqa: E402
     _make_c4_config,
     _make_influx_instance,
     _make_influx_point,
+    query_latest,
 )
-from shm_helpers import shm_path  # noqa: E402
+import importlib.util  # noqa: E402
+
+_shm_spec = importlib.util.spec_from_file_location(
+    "c4_fun_00067_shm_helpers",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "shm_helpers.py"),
+)
+assert _shm_spec is not None and _shm_spec.loader is not None
+_shm_mod = importlib.util.module_from_spec(_shm_spec)
+_shm_spec.loader.exec_module(_shm_mod)
+shm_path = _shm_mod.shm_path
+write_shm_block = _shm_mod.write_shm_block
+
+TS = 1768848814264
+
+
+def _wait_value(url, db, measurement, field, expected, timeout=5.0):
+    """轮询 InfluxDB，直到 field 最新值等于 expected（float32 精度内，或超时失败）。"""
+    import math
+    import time
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        r = query_latest(url, db, measurement, field)
+        if r is not None and isinstance(r[2], (int, float)) and math.isclose(r[2], expected, rel_tol=1e-5):
+            return
+        time.sleep(0.05)
+    r = query_latest(url, db, measurement, field)
+    raise AssertionError(
+        f"latest value for {measurement}.{field}: expected {expected}, got {r}"
+    )
 
 
 # ──────────────────────────────────────────────
@@ -154,7 +184,14 @@ class TestInfluxdbClientStart:
         resp2 = sut.call_tool(
             "start", {"instance_id": instance_id, "config_path": config_path}
         )
-        _assert_mcp_error(resp2, "ALREADY_RUNNING")
+        assert resp2["result"].get("isError", False) is False, (
+            f"ALREADY_RUNNING is a success-path result, got: {resp2}"
+        )
+        assert "ALREADY_RUNNING" in resp2["result"]["content"][0]["text"]
+
+        # 连续性：写入循环保持运行不中断 — 新数据仍被写入 InfluxDB
+        write_shm_block(shm_path(instance_id), 1, 10, 7.7, TS)
+        _wait_value(influxdb, db, "wind_turbine", "windspeed", 7.7)
 
     # ── TC5: start 未调用前调用 stop → 幂等 success ──────────
 
@@ -180,30 +217,53 @@ class TestInfluxdbClientStart:
         resp = sut.call_tool("start", {"instance_id": instance_id})
         _assert_mcp_error(resp, "CONFIG_PATH_MISSING")
 
-    # ── TC7: 配置文件格式错误 → CONFIG_PARSE_ERROR ──────────
+    # ── TC7a: 配置文件格式错误 → CONFIG_PARSE_ERROR ──────────
 
-    @pytest.mark.parametrize(
-        "bad_content",
-        [
-            "{invalid json",
-            json.dumps({"c4_shm_manager": {"writer": ["c4_modbus_client"], "reader": ["c4_influxdb_client"]}}),
-        ],
-        ids=["json_syntax_error", "missing_section"],
-    )
-    def test_tc7_config_parse_error(
-        self, bad_content, start_influxdb_client, isolated_shm,
+    def test_tc7a_config_parse_error(
+        self, start_influxdb_client, isolated_shm,
     ):
-        instance_id = "c4_fun67tc7"
+        instance_id = "c4_fun67tc7a"
         isolated_shm(instance_id)
         fd, config_path = tempfile.mkstemp(suffix=".json", prefix="c4_config_")
         with os.fdopen(fd, "w") as f:
-            f.write(bad_content)
+            f.write("{invalid json")
 
         sut = start_influxdb_client()
         resp = sut.call_tool(
             "start", {"instance_id": instance_id, "config_path": config_path}
         )
         _assert_mcp_error(resp, "CONFIG_PARSE_ERROR")
+
+    # ── TC7b: 合法 JSON 但缺 c4_influxdb_client 段 → 零实例期望，幂等 success ──
+
+    def test_tc7b_missing_section_zero_instances(
+        self, shm_mgr_client, start_influxdb_client, isolated_shm,
+    ):
+        """空配置段语义（c4_architecture.md §3.1.2/§3.3.1）：段缺失与空数组在 schema 层
+        等价，期望状态为零实例，start 幂等返回 success，不得作为错误。
+        """
+        instance_id = "c4_fun67tc7b"
+        isolated_shm(instance_id)
+
+        resp = shm_mgr_client.call_tool("create_shm", {"instance_id": instance_id})
+        assert resp["result"].get("isError", False) is False, (
+            f"create_shm failed for TC7b: {resp}"
+        )
+
+        fd, config_path = tempfile.mkstemp(suffix=".json", prefix="c4_config_")
+        with os.fdopen(fd, "w") as f:
+            f.write(json.dumps(
+                {"c4_shm_manager": {"writer": ["c4_modbus_client"], "reader": ["c4_influxdb_client"]}}
+            ))
+
+        sut = start_influxdb_client()
+        resp = sut.call_tool(
+            "start", {"instance_id": instance_id, "config_path": config_path}
+        )
+        assert resp["result"].get("isError", False) is False, (
+            f"missing section = zero instances, start must succeed: {resp}"
+        )
+        assert resp["result"]["content"][0]["text"] == "success"
 
     # ── TC8: 共享内存不存在 → SHM_OPEN_FAILED ──────────
 

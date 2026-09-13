@@ -8,6 +8,7 @@ import json
 import os
 import time
 import urllib.request
+from pathlib import Path
 
 from conftest import poll_until, write_point
 
@@ -26,26 +27,26 @@ def _create(base, body):
 
 
 def _kill_stack_shm_manager(agent_stack) -> bool:
-    agent_pid = agent_stack.proc.pid
+    """kill 本栈的常驻 c4_shm_manager（独立服务模型：非 Agent 子进程，
+    按环境变量 C4_SOCK_DIR 定位本栈实例，同 c4_fun_00082 做法）。"""
+    sock_dir = agent_stack.sock_dir
+    killed = False
     for pid in os.listdir("/proc"):
         if not pid.isdigit():
             continue
         try:
-            with open(f"/proc/{pid}/stat") as f:
-                ppid = int(f.read().split(")")[-1].split()[1])
-        except (OSError, ValueError, IndexError):
-            continue
-        if ppid != agent_pid:
-            continue
-        try:
             with open(f"/proc/{pid}/cmdline", "rb") as f:
                 cmd = f.read().decode(errors="replace")
-            if "c4_shm_manager" in cmd:
+            if "c4_shm_manager" not in cmd:
+                continue
+            with open(f"/proc/{pid}/environ", "rb") as f:
+                env = f.read().decode(errors="replace")
+            if f"C4_SOCK_DIR={sock_dir}" in env:
                 os.kill(int(pid), 9)
-                return True
-        except OSError:
+                killed = True
+        except (OSError, ValueError):
             continue
-    return False
+    return killed
 
 
 def test_tc15_degraded_not_terminating(agent_stack):
@@ -97,6 +98,10 @@ def test_tc18_agent_restart(agent_stack):
     active=false 且无 lastSession（会话仅内存）；shm 持久——write_seq 不归零，
     测试直写仍可继续。
     """
+    import sys
+    _project_root = Path(__file__).resolve().parents[2]
+    if str(_project_root / "test" / "c4_fun_00053") not in sys.path:
+        sys.path.insert(0, str(_project_root / "test" / "c4_fun_00053"))
     import shm_helpers
     _create(agent_stack.base_url, {"pointKeys": ["wt1.windspeed"]})
     time.sleep(1)

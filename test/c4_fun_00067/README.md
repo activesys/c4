@@ -4,7 +4,9 @@
 > **对应需求**：C4_RS_00094
 > **设计参考**：`c4/docs/design/c4_influxdb_client.md` §2, §3, §5, §6
 
-C4_FUN_00067：Agent 生成 InfluxDB 写入 MCP 服务的配置文件后，启动 MCP 服务，MCP 服务根据配置文件将共享内存中的数据写入 InfluxDB。
+C4_FUN_00067：Agent 生成 InfluxDB 写入 MCP 服务的配置文件后，经 Unix socket 调用该服务的
+`start` 工具拉起数据路径实例（MCP 服务进程为常驻系统服务，不由 Agent 拉起——见
+c4_architecture.md §3.1.1），MCP 服务根据配置文件将共享内存中的数据写入 InfluxDB。
 
 ---
 
@@ -20,7 +22,7 @@ C4_FUN_00067：Agent 生成 InfluxDB 写入 MCP 服务的配置文件后，启�
 6. **`start` 不等待与 InfluxDB 的连接建立**——所有实例均已启动即返回 `"success"`，InfluxDB 不可达/写入失败属运行时事件（记日志 + 重试），不导致 `start` 返回错误
 7. 各错误码正确返回
 
-> **与 `c4_modbus_client` 的关键差异**：modbus 的 `start` 要求「全部连接成功才 success、任一失败 tear down 并返回 `CONNECT_FAILED`」；`c4_influxdb_client` 的 `start` **不等待连接**（见 [c4_influxdb_client.md §5.1](c4_influxdb_client.md) 与 [c4_architecture.md §3.3.1](c4_architecture.md) 返回时机语义），故**无 `CONNECT_FAILED` 错误码**，取而代之的是「InfluxDB 不可达时 `start` 仍返回 `success`」（TC13）。
+> **与 `c4_modbus_client` 的关键差异**：modbus 的 `start` 同样在实例进入运行态后即返回 `"success"`——设备不可达不作为 tool 错误，由实例按 T0 周期后台重拨，连接成功不作为返回条件（见 [c4_modbus_client.md](c4_modbus_client.md) 返回时机语义）。`c4_influxdb_client` 的 `start` 同样**不等待连接**（见 [c4_influxdb_client.md §5.1](c4_influxdb_client.md) 与 [c4_architecture.md §3.3.1](c4_architecture.md) 返回时机语义），故**无 `CONNECT_FAILED` 错误码**，「InfluxDB 不可达时 `start` 仍返回 `success`」（TC13）。
 
 ---
 
@@ -181,11 +183,12 @@ influxdb 的 `key: "fake_writer.pt1"` 被回填 shm_id=1。
 - **操作**：调用 `start`
 - **预期**：返回 `"success"`（无实例需启动，但仍需 shm_open + mmap + magic 校验）
 
-### TC4: 重复调用 start → ALREADY_RUNNING
+### TC4: 重复调用 start → ALREADY_RUNNING（幂等成功）
 
 - **前置**：TC1 已成功启动
 - **操作**：再次调用 `start`（同一 SUT 进程，无间隔 `stop`）
-- **预期**：`isError: true`，`content[0].text` 以 `ALREADY_RUNNING` 开头
+- **预期**：`isError: false`，`content[0].text` 含 `ALREADY_RUNNING`——重复 start 属成功
+  路径的幂等结果，**不是错误**（c4_architecture.md §3.1.2）；全部实例与写入循环保持运行，不中断
 
 ### TC5: start 未调用前调用 stop → 幂等 success
 
@@ -199,13 +202,17 @@ influxdb 的 `key: "fake_writer.pt1"` 被回填 shm_id=1。
 - **操作**：调用 `start`，提供 `instance_id` 但不提供 `config_path` 参数
 - **预期**：`isError: true`，错误码 `CONFIG_PATH_MISSING`
 
-### TC7: 配置文件格式错误 → CONFIG_PARSE_ERROR
+### TC7: 配置文件格式错误
 
 - **前置**：共享内存正常。`pytest.mark.parametrize` 子场景：
   - (a) JSON 语法错误：`{invalid json`
   - (b) 合法 JSON 但缺 key：`{"c4_shm_manager": {...}}`（无 `c4_influxdb_client` 段）
 - **操作**：调用 `start`（传入对应 config_path）
-- **预期**：`isError: true`，错误码 `CONFIG_PARSE_ERROR`
+- **预期**：
+  - (a) `isError: true`，错误码 `CONFIG_PARSE_ERROR`——`CONFIG_PARSE_ERROR` 仅针对文件不可读
+    或 JSON 非法（c4_architecture.md §3.3.1）
+  - (b) 空/缺失配置段 = 期望状态零实例（合法），`start` 幂等返回 `"success"`（`isError: false`），
+    不启动任何实例（c4_architecture.md §3.1.2/§3.3.1 空配置段语义）
 
 ### TC8: 共享内存不存在 → SHM_OPEN_FAILED
 

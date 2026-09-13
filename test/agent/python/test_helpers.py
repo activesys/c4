@@ -14,6 +14,7 @@ C4 Agent L2 功能测试共享辅助模块 — test_helpers.py
 """
 
 import functools
+import re
 import json
 import os
 import struct
@@ -44,6 +45,33 @@ def retry_llm(max_attempts: int = 3, delay: float = 2.0):
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
             last_exception = None
+
+            def _reset_fixture_state() -> None:
+                # 重置状态：清空对话历史 + 持久化文件（config/abbr_registry），
+                # 避免重试时历史与文件残留导致 LLM 命中旧记录而困惑。
+                # pytest 以关键字传参注入 fixture——args 与 kwargs 都要遍历
+                #（只遍历 args 时清理是死代码，重试将在脏 config 上运行）。
+                for a in tuple(args) + tuple(kwargs.values()):
+                    if hasattr(a, "_history"):
+                        a._history = []
+                    config_dir = getattr(a, "config_dir", None)
+                    if isinstance(config_dir, Path):
+                        for name in (
+                            "config.json",
+                            "abbr_registry.json",
+                            "config.json.tmp",
+                            "pending_change.json",
+                            "config.json.prev.1",
+                            "config.json.prev.2",
+                            "config.json.prev.3",
+                        ):
+                            p = config_dir / name
+                            if p.exists():
+                                try:
+                                    p.unlink()
+                                except OSError:
+                                    pass
+
             for attempt in range(1, max_attempts + 1):
                 try:
                     return func(*args, **kwargs)
@@ -51,25 +79,7 @@ def retry_llm(max_attempts: int = 3, delay: float = 2.0):
                     last_exception = e
                     if attempt < max_attempts:
                         time.sleep(delay * attempt)  # 递增退避
-                        # 重置状态：清空对话历史 + 持久化文件（config/abbr_registry），
-                        # 避免重试时历史与文件残留导致 LLM 命中旧记录而困惑
-                        for a in args:
-                            if hasattr(a, "_history"):
-                                a._history = []
-                            config_dir = getattr(a, "config_dir", None)
-                            if isinstance(config_dir, Path):
-                                for name in (
-                                    "config.json",
-                                    "abbr_registry.json",
-                                    "config.json.bak",
-                                    "config.json.tmp",
-                                ):
-                                    p = config_dir / name
-                                    if p.exists():
-                                        try:
-                                            p.unlink()
-                                        except OSError:
-                                            pass
+                        _reset_fixture_state()
                         continue
                     raise
             # unreachable 原因：最后一次循环总会 raise 或 return
@@ -432,6 +442,35 @@ def create_device_txt(target_dir: Path, filename: str = "device_info.txt") -> Pa
 # ──────────────────────────────────────────────
 
 
+def _plan_qa_answer(text: str, allow_forward: bool = True) -> Optional[str]:
+    """
+    接入流程中 Agent 追问的应答表（镜像 func_case_e2e/run_cases 的多轮模式）：
+    需要转发时三要素一次给全；仅采集时明确拒绝转发；设备信息按序补齐；
+    确认句式 → 按钮确认。
+    """
+    if re.search(r"是否确认|确认执行|是否在|确认后我将", text):
+        return "[C4_BUTTON_CONFIRM] 确认"
+    if re.search(r"转发", text):
+        if allow_forward:
+            return "转发采用asfp2协议，转发到127.0.0.1:19900，转发地址5000~5009"
+        return "本次仅采集，不需要转发"
+    if re.search(r"设备名称|哪台设备|设备叫什么|名称是", text):
+        return "设备名称：华能阿拉善1#风机"
+    if re.search(r"采用什么协议|什么协议|协议是", text):
+        return "采用modbus协议"
+    if re.search(r"IP|ip地址|地址是", text):
+        return "IP是192.168.110.1"
+    if re.search(r"端口", text):
+        return "端口502"
+    if re.search(r"请提供|请补充|必要信息|缺少|未提供", text):
+        if allow_forward:
+            return ("设备名称：华能阿拉善1#风机，IP是192.168.110.1，端口502，"
+                    "采用modbus协议；转发采用asfp2协议，转发到127.0.0.1:19900，"
+                    "转发地址5000~5009")
+        return "设备名称：华能阿拉善1#风机，IP是192.168.110.1，端口502，采用modbus协议，本次仅采集不需要转发"
+    return None
+
+
 def find_interrupt_id(stream: Any) -> Optional[str]:
     """
     从 SSE 流中提取 interrupt 事件的 ID。
@@ -603,21 +642,88 @@ def full_access_flow(
         "config_json": None,
     }
 
-    # Step 1: 上传点表
-    with chat.send_with_file(upload_msg, file_path) as stream:
+    # Step 1: 上传点表——随消息给全设备信息（名称/IP/端口/协议，必填项用户提供，
+    # 镜像 run_cases MSG_CASE1 单消息模式），设备信息从点表文件解析得出
+    #（点表带 device 列时以其为准，否则回退标准 1#风机 modbus 形态）
+    result["upload_json"] = _parse_csv_to_device_json(file_path)
+    enriched_upload = upload_msg
+    if not re.search(r"IP|协议|端口", upload_msg):
+        dev0 = (result["upload_json"].get("devices") or [{}])[0]
+        conn = dev0.get("connection") or {}
+        dev_name = dev0.get("name") or "华能阿拉善1#风机"
+        dev_ip = conn.get("ip") or "192.168.110.1"
+        dev_port = conn.get("port") or 502
+        dev_proto = dev0.get("protocol") or "modbus"
+        enriched_upload += (
+            f"，设备名称：{dev_name}，IP是{dev_ip}，"
+            f"端口{dev_port}，采用{dev_proto}协议"
+        )
+    with chat.send_with_file(enriched_upload, file_path) as stream:
         result["upload_text"] = stream.text_content()
     chat.record_response(result["upload_text"])
 
-    # 直接从 CSV 文件解析设备数据（不依赖 SSE event 时序）
-    result["upload_json"] = _parse_csv_to_device_json(file_path)
+    # 上传阶段追问 → Q&A 补齐（设备信息 / 协议）。转发意向跟随 plan_msg：
+    # 计划要转发时转发追问以三要素应答（与 plan 阶段一致），明确"仅采集/不需要转发"
+    # 时才拒绝——否则上传期的拒绝应答会污染后续方案（LLM 据此漏掉 forward_targets，
+    # 生成 writer-only 配置，被 c4_shm_manager adjust_shm 依规格拒绝并回滚）
+    want_forward = bool(
+        re.search(r"转发", plan_msg)
+        and not re.search(r"不需要转发|仅采集", plan_msg)
+    )
+    if not re.search(r"是否确认|确认执行", result["upload_text"]):
+        text = result["upload_text"]
+        for _ in range(4):
+            answer = _plan_qa_answer(text, allow_forward=want_forward)
+            if answer is None:
+                break
+            if text == result["upload_text"] and "请提供" not in text and "缺少" not in text and "未提供" not in text and "什么" not in text and "名称" not in text:
+                break
+            with chat.send(answer) as stream:
+                text = stream.text_content()
+            chat.record_response(text)
+            result["upload_text"] += "\n" + text
+            if "是否确认" in text or "方案" in text:
+                break
 
-    # Step 2: 生成方案 — 嵌入上一步的设备信息
+    # Step 2: 生成方案 — 嵌入上一步的设备信息；消息要求转发时随消息给全
+    # 转发三要素（协议/目标/点表，镜像 run_cases MSG_CASE1 的单消息模式），
+    # Agent 仍追问时按 Q&A 应答表驱动到方案确认
     upload_context = result["upload_text"]
     plan_with_context = f"{plan_msg}\n\n上一步解析结果:\n{upload_context}" if upload_context else plan_msg
+    if "转发" in plan_msg and "asfp2" not in plan_msg:
+        plan_with_context += "\n\n转发采用asfp2协议，转发到127.0.0.1:19900，转发地址5000~5009"
     with chat.send(plan_with_context) as stream:
         result["plan_text"] = stream.text_content()
         result["interrupt_id"] = find_interrupt_id(stream)
     chat.record_response(result["plan_text"])
+
+    allow_forward = "转发" in plan_msg
+    plan_ready = (
+        "是否确认" in result["plan_text"]
+        or "确认后我将" in result["plan_text"]
+        or ("方案" in result["plan_text"] and "确认" in result["plan_text"])
+    )
+    if not plan_ready:
+        extra_turns: list[tuple[str, str]] = []
+        text = result["plan_text"]
+        for _ in range(5):
+            answer = _plan_qa_answer(text, allow_forward=allow_forward)
+            if answer is None:
+                break
+            if text in [t for _, t in extra_turns[-1:]]:
+                break  # 应答未推进（同一追问重复）——交回调用方断言
+            with chat.send(answer) as stream:
+                text = stream.text_content()
+                interrupt_id = find_interrupt_id(stream)
+                if interrupt_id:
+                    result["interrupt_id"] = interrupt_id
+            chat.record_response(text)
+            extra_turns.append((answer, text))
+            if "是否确认" in text or ("方案" in text and "确认" in text):
+                break
+        result["plan_text"] = "\n".join(
+            [result["plan_text"]] + [t for _, t in extra_turns]
+        )
 
     # Step 3: 确认 — 嵌入设备 JSON
     if confirm:
@@ -666,9 +772,6 @@ def delete_device(chat: Any, agent: Any, device_name: str) -> None:
             break
     assert instance_id, f"未在 config 中找到设备 {device_name} 的实例"
 
-    with chat.send(f"停用 {device_name}") as s:
-        s.text_content()
-
     changes = {
         "changes": [
             {
@@ -678,7 +781,14 @@ def delete_device(chat: Any, agent: Any, device_name: str) -> None:
             }
         ]
     }
-    with chat.send(f"确认删除\n\n{json.dumps(changes, ensure_ascii=False)}") as s:
+    # 变更意图与确定性 changes 同消息给出（LLM 据此直接产出 planSteps），按钮确认执行；
+    # 确认消息内重复携带 changes——确认后服务端注入的指令要求"立即调用
+    # output_plan_steps"，changes 与指令同消息可避免 LLM 从历史重建失败
+    with chat.send(f"停用 {device_name}\n\n{json.dumps(changes, ensure_ascii=False)}") as s:
+        s.text_content()
+    with chat.send(
+        f"[C4_BUTTON_CONFIRM] 确认删除\n\n{json.dumps(changes, ensure_ascii=False)}"
+    ) as s:
         s.text_content()
 
 
@@ -712,9 +822,6 @@ def modify_device(
             break
     assert instance_id, f"未在 config 中找到设备 {device_name} 的实例"
 
-    with chat.send(f"修改 {device_name} 的 {field} 为 {value}") as s:
-        s.text_content()
-
     changes = {
         "changes": [
             {
@@ -724,5 +831,7 @@ def modify_device(
             }
         ]
     }
-    with chat.send(f"确认修改\n\n{json.dumps(changes, ensure_ascii=False)}") as s:
+    with chat.send(f"修改 {device_name} 的 {field} 为 {value}\n\n{json.dumps(changes, ensure_ascii=False)}") as s:
+        s.text_content()
+    with chat.send(f"[C4_BUTTON_CONFIRM] 确认修改") as s:
         s.text_content()

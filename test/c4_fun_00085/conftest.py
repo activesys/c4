@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 import time
 from pathlib import Path
+from typing import TextIO
 
 import pytest
 
@@ -23,6 +24,7 @@ _spec.loader.exec_module(_ft82)
 
 shm_unlink = _ft82.shm_unlink
 write_point = _ft82.write_point
+poll_until = _ft82.poll_until
 
 FIXTURE_CONFIG = {
     "c4_shm_manager": {"writer": ["c4_asfp2_server"], "reader": ["c4_asfp2_client"]},
@@ -73,15 +75,31 @@ def _agent_entry() -> list[str]:
 
 
 class AgentStack:
-    def __init__(self, base_url: str, shm_path: str, proc: subprocess.Popen, tmp: Path):
+    sock_dir: str
+    proc: subprocess.Popen
+    shm_proc: subprocess.Popen
+    shm_log: TextIO
+
+    def __init__(self, base_url: str, shm_path: str, tmp: Path):
         self.base_url = base_url
         self.shm_path = shm_path
-        self.proc = proc
         self.tmp = tmp
+        self.proc = None  # type: ignore[assignment]  # _spawn() 填充
+        self.shm_proc = None  # type: ignore[assignment]
+        self.shm_log = None  # type: ignore[assignment]
 
     def _spawn(self) -> None:
+        # 常驻 c4_shm_manager 先行（Agent 连接前置；unlink-before-bind 自清残留 socket）
         env = os.environ.copy()
+        env["C4_SOCK_DIR"] = str(self.tmp / "socks")
         env.setdefault("DEEPSEEK_API_KEY", "test-dummy-key")
+        self.shm_log = open(self.tmp / "shm_manager.log", "w")
+        self.shm_proc = subprocess.Popen(
+            [_find_shm_binary()], stdin=subprocess.DEVNULL,
+            stdout=self.shm_log, stderr=subprocess.STDOUT, env=env,
+        )
+        poll_until(lambda: (self.tmp / "socks" / "c4_shm_manager.sock").exists(),
+                   deadline_s=10, interval_s=0.1)
         self.proc = subprocess.Popen(
             _agent_entry() + ["--config-dir", str(self.tmp)],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env,
@@ -104,8 +122,11 @@ class AgentStack:
 
 @pytest.fixture(scope="session")
 def agent_stack():
+    """Agent REST 栈：instance c4_ft85（独立服务模型：测试栈自启常驻
+    c4_shm_manager，Agent 经 socket 连接、从不拉起 MCP 进程）。"""
     tmp = Path(tempfile.mkdtemp(prefix="c4_ft85_"))
     (tmp / "registry").mkdir()
+    (tmp / "socks").mkdir()
     port = _free_port()
     agent_json = {
         "instance_id": INSTANCE,
@@ -120,22 +141,35 @@ def agent_stack():
     (tmp / "agent.json").write_text(json.dumps(agent_json, indent=2))
     (tmp / "config.json").write_text(json.dumps(FIXTURE_CONFIG, indent=2))
 
-    env = os.environ.copy()
-    env.setdefault("DEEPSEEK_API_KEY", "test-dummy-key")
-    proc = subprocess.Popen(
-        _agent_entry() + ["--config-dir", str(tmp)],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env,
-    )
     stack = AgentStack(base_url=f"http://127.0.0.1:{port}",
-                       shm_path=f"/dev/shm/{INSTANCE}", proc=proc, tmp=tmp)
+                       shm_path=f"/dev/shm/{INSTANCE}", tmp=tmp)
+    stack.sock_dir = str(tmp / "socks")
     try:
-        stack._wait_ready()
+        stack._spawn()
+        # 等启动恢复（瀑布 L2 create_shm 回填 shm_id）完成
+        def shm_ids_backfilled():
+            try:
+                config = json.loads((tmp / "config.json").read_text())
+                ids = [int(pt["shm_id"])
+                       for inst in config["c4_asfp2_server"]
+                       for pt in inst["points"]]
+                return len(ids) > 0 and all(v > 0 for v in ids)
+            except Exception:
+                return False
+        assert poll_until(shm_ids_backfilled, deadline_s=30, interval_s=0.5), \
+            "瀑布 create_shm 未回填 shm_id"
         time.sleep(1)
         yield stack
     finally:
-        proc.terminate()
+        stack.proc.terminate()
         try:
-            proc.wait(timeout=10)
+            stack.proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
-            proc.kill()
+            stack.proc.kill()
+        stack.shm_proc.terminate()
+        try:
+            stack.shm_proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            stack.shm_proc.kill()
+        stack.shm_log.close()
         shm_unlink(f"/{INSTANCE}")

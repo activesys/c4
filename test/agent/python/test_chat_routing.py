@@ -299,8 +299,13 @@ class TestProtocolInference:
     ]
 
     @retry_llm(max_attempts=3)
-    def test_protocol_infer_from_fields(self, chat, agent, tmp_path):
-        """4.3.6: 点表含 uid/fun/type/swap（仅 Modbus 匹配）→ 确定 Modbus，不询问"""
+    def test_protocol_required_even_with_identifiable_fields(self, chat, agent, tmp_path):
+        """4.3.6: 点表含 uid/fun/type/swap（仅 Modbus 匹配）但用户未提协议 → 必须询问
+
+        目标语义（agent.md §3.2「协议由用户提供，禁止推断或猜测」，func_test_case
+        用例 13 用户裁定）：点表字段不再用于推断协议——消息中无协议信息时 Agent
+        必须询问协议，不得自行确定。
+        """
         csv_path = create_test_csv(tmp_path)
 
         with chat.send_with_file("接入这个设备", str(csv_path)) as stream:
@@ -308,25 +313,24 @@ class TestProtocolInference:
 
         assert len(text) > 0, "Response should not be empty"
 
-        # 推断成功 → 不打断用户（协议不单独询问）
-        asked = [kw for kw in self.PROTOCOL_ASK_SIGNALS if kw in text]
-        assert not asked, (
-            f"Should NOT ask protocol when inferable from point table fields. "
-            f"Matched ask signals: {asked}. Got: {text[:500]}"
+        # 协议必由用户提供——未提协议时必须询问（问句信号，自然语言即可）
+        ask_signals = [
+            "什么协议", "哪种协议", "哪个协议", "何种协议",
+            "通信协议是", "如何通信", "怎么通信", "用哪种方式采集",
+            "协议", "通信方式",
+            "which protocol", "what protocol",
+        ]
+        asked = any(kw in text for kw in ask_signals)
+        assert asked, (
+            f"Agent MUST ask the protocol (user-provided rule) when the message "
+            f"carries no protocol info. Got: {text[:500]}"
         )
 
-        # 解析应继续进行（点表数据被识别，而非卡在协议询问）
-        has_point_info = (
-            "windspeed" in text.lower()
-            or "1000" in text
-            or "temperature" in text.lower()
-            or "风机" in text
-            or "点" in text
+        # 未确认协议前不应进入方案确认流程
+        assert "确认方案" not in text and "是否确认执行" not in text, (
+            f"Should NOT enter plan confirmation before protocol is known. "
+            f"Got: {text[:500]}"
         )
-        assert has_point_info, (
-            f"Info-gatherer should proceed parsing the point table. Got: {text[:500]}"
-        )
-        # 协议名可作为解析结果出现在摘要中（README §4.3 注：不单独确认即可）
 
     @retry_llm(max_attempts=3)
     def test_protocol_infer_from_user_description(self, chat, agent, tmp_path):
@@ -381,10 +385,13 @@ class TestProtocolInference:
         )
 
     @retry_llm(max_attempts=3)
-    def test_reader_protocol_inferred_from_forwarding_target(
-        self, chat, agent, tmp_path
-    ):
-        """4.3.9: 用户说"转发到上级系统" → 转发协议推断（→ ASFP2），不询问"""
+    def test_reader_protocol_asked_when_not_provided(self, chat, agent, tmp_path):
+        """4.3.9: 用户说"转发到上级系统"但未提供转发协议 → 必须询问转发协议
+
+        目标语义（agent.md §3.2：转发协议与接收协议相互独立，均须用户明确提供，
+        禁止按转发目标描述推断——func_test_case 用例 13）：转发意图应被识别，
+        但转发协议缺失时必须逐项询问。
+        """
         csv_path = create_test_csv(tmp_path)
 
         with chat.send_with_file(
@@ -394,19 +401,19 @@ class TestProtocolInference:
 
         assert len(text) > 0, "Response should not be empty"
 
-        # 不应询问转发协议（从转发目标描述推断）
-        forward_ask_signals = [
-            "什么协议转发", "用哪种协议转发", "转发方式", "如何转发",
-            "哪种方式转发",
-        ]
-        asked = [kw for kw in forward_ask_signals if kw in text]
-        assert not asked, (
-            f"Should NOT ask forwarding protocol when inferable from target "
-            f"description. Matched: {asked}. Got: {text[:500]}"
-        )
-
         # 转发目标被识别（对话体现转发意图被理解）
         has_forward = any(kw in text for kw in ["转发", "上级", "中心侧", "中心"])
         assert has_forward, (
             f"Forwarding target should be recognized. Got: {text[:500]}"
-        ) 
+        )
+
+        # 转发协议未获用户提供 → 必须询问（自然语言问句即可）
+        forward_ask_signals = [
+            "什么协议", "哪种协议", "哪个协议", "转发协议", "转发方式",
+            "如何转发", "哪种方式转发", "什么方式转发",
+        ]
+        asked = any(kw in text for kw in forward_ask_signals)
+        assert asked, (
+            f"Agent MUST ask the forwarding protocol (user-provided rule) when "
+            f"the message carries no forward protocol info. Got: {text[:500]}"
+        )

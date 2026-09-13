@@ -121,13 +121,13 @@ class TestStopRestart:
         sut = start_modbus_client()
         _assert_mcp_success(sut.call_tool("stop", {}))
 
-    # ── TC3: start — 已运行时重复调用 ──────────
+    # ── TC3: start — 已运行时重复调用（幂等成功）──────────
 
     def test_tc3_start_while_running(
         self, start_modbusd, write_redis, prepare_environment,
         start_modbus_client, isolated_shm,
     ):
-        """TC3: start 在已运行状态返回 ALREADY_RUNNING。"""
+        """TC3: start 在已运行状态返回 ALREADY_RUNNING（成功路径，isError: false）。"""
         instance_id = "c4_fun63tc3"
         sut, config_path, sp, _ = _setup_standard(
             start_modbusd, write_redis, prepare_environment, start_modbus_client,
@@ -135,9 +135,16 @@ class TestStopRestart:
         )
 
         _assert_mcp_success(sut.call_tool("start", {"instance_id": instance_id, "config_path": config_path}))
-        _assert_mcp_error(
-            sut.call_tool("start", {"instance_id": instance_id, "config_path": config_path}), "ALREADY_RUNNING"
+
+        resp = sut.call_tool("start", {"instance_id": instance_id, "config_path": config_path})
+        assert resp["result"].get("isError", False) is False, (
+            f"ALREADY_RUNNING is a success-path result, got: {resp}"
         )
+        assert "ALREADY_RUNNING" in resp["result"]["content"][0]["text"]
+
+        # 连续性：TCP 连接与轮询保持，write_seq 持续递增，数据路径不中断
+        seq0 = read_shm_block(sp, 1)["write_seq"]
+        wait_write_seq_advanced(sp, 1, seq0)
 
     # ── TC4: 简单重启（stop → start，无配置变更）──────────
 
@@ -276,13 +283,13 @@ class TestStopRestart:
             seq_before = read_shm_block(sp, sid)["write_seq"]
             wait_write_seq_advanced(sp, sid, seq_before)
 
-    # ── TC9: start 失败后错误恢复 ──────────
+    # ── TC9: 不可达配置 start（T0 后台重拨）后修正配置恢复 ──────────
 
     def test_tc9_error_recovery(
         self, start_modbusd, write_redis, prepare_environment,
         start_modbus_client, isolated_shm,
     ):
-        """TC9: CONNECT_FAILED 后修正配置重试成功。"""
+        """TC9: 不可达配置 start 仍 success（T0 后台重拨），修正配置重启后数据流恢复。"""
         instance_id = "c4_fun63tc9"
         sut, config_path, sp, port = _setup_standard(
             start_modbusd, write_redis, prepare_environment, start_modbus_client,
@@ -296,10 +303,12 @@ class TestStopRestart:
             _make_c4_config(_standard_c4_instances(502, ip="192.0.2.1", t0=2))
         )
         _run_adjust_shm(unreachable_path, instance_id)
-        _assert_mcp_error(
-            sut.call_tool("start", {"instance_id": instance_id, "config_path": unreachable_path}),
-            "CONNECT_FAILED",
+
+        # 设备不可达不作为 tool 错误（c4_modbus_client.md §3.2）：start 返回 success
+        _assert_mcp_success(
+            sut.call_tool("start", {"instance_id": instance_id, "config_path": unreachable_path})
         )
+        _assert_mcp_success(sut.call_tool("stop", {}))
 
         recover_path = _write_config_file(
             _make_c4_config(_standard_c4_instances(port))
