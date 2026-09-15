@@ -156,7 +156,7 @@ var log *slog.Logger
 // ──────────────────────────────────────────────
 
 func loadConfig(configPath string) ([]clientInstance, error) {
-	data, err := os.ReadFile(configPath)
+	data, err := os.ReadFile(configPath) //nolint:gosec // 配置路径来自 -c 命令行参数（可信运维环境）
 	if err != nil {
 		return nil, fmt.Errorf("CONFIG_PATH_MISSING: cannot read config file: %v", err)
 	}
@@ -248,22 +248,22 @@ func attachShm(instanceID string) ([]byte, int, error) {
 	// Read header to get size
 	hdrData, err := unix.Mmap(fd, 0, shm.BlockSize, unix.PROT_READ, unix.MAP_SHARED)
 	if err != nil {
-		unix.Close(fd)
+		_ = unix.Close(fd)
 		return nil, 0, fmt.Errorf("SHM_OPEN_FAILED: mmap header failed: %v", err)
 	}
 	magic := binary.NativeEndian.Uint32(hdrData[0:])
 	if magic != shm.Magic {
-		unix.Munmap(hdrData)
-		unix.Close(fd)
+		_ = unix.Munmap(hdrData)
+		_ = unix.Close(fd)
 		return nil, 0, fmt.Errorf("SHM_CORRUPTED: header magic is invalid (got 0x%08X, expected 0x%08X)", magic, shm.Magic)
 	}
 	maxPoints := binary.NativeEndian.Uint32(hdrData[shm.HdrOffMaxPoints:])
-	unix.Munmap(hdrData)
+	_ = unix.Munmap(hdrData)
 
 	totalSize := int64(int(maxPoints)+1) * shm.BlockSize
 	data, err := unix.Mmap(fd, 0, int(totalSize), unix.PROT_READ, unix.MAP_SHARED)
 	if err != nil {
-		unix.Close(fd)
+		_ = unix.Close(fd)
 		return nil, 0, fmt.Errorf("SHM_OPEN_FAILED: mmap failed: %v", err)
 	}
 
@@ -580,9 +580,9 @@ func (k *kaClock) poll() string {
 func (ist *instanceState) writeFrame(conn net.Conn, b []byte) error {
 	ist.writeMu.Lock()
 	defer ist.writeMu.Unlock()
-	conn.SetWriteDeadline(time.Now().Add(time.Second))
+	_ = conn.SetWriteDeadline(time.Now().Add(time.Second))
 	_, err := conn.Write(b)
-	conn.SetWriteDeadline(time.Time{})
+	_ = conn.SetWriteDeadline(time.Time{})
 	return err
 }
 
@@ -594,7 +594,7 @@ func (ist *instanceState) markConnDead(conn net.Conn, reason string) {
 	ist.mu.Lock()
 	same := ist.conn != nil && ist.conn == conn
 	if same {
-		ist.conn.Close()
+		_ = ist.conn.Close()
 		ist.conn = nil
 		// 首个原因保留：t2_timeout 等权威判定不被后续读错误覆盖
 		if ist.deadReason == "" {
@@ -632,7 +632,7 @@ func (ist *instanceState) reconnectAfterError() {
 		// Dial 与 stop 竞争时在此补检 quit，避免把新 socket 挂到已停止的实例上
 		select {
 		case <-ist.quit:
-			newConn.Close()
+			_ = newConn.Close()
 			return
 		default:
 		}
@@ -827,7 +827,7 @@ func runReceiver(ist *instanceState) {
 			ist.ka.stopT2()
 		}
 
-		conn.SetReadDeadline(time.Now().Add(time.Second))
+		_ = conn.SetReadDeadline(time.Now().Add(time.Second))
 		n, err := conn.Read(buf[:])
 		if ne, ok := err.(net.Error); ok && ne.Timeout() {
 			switch ist.ka.poll() {
@@ -899,7 +899,7 @@ func statsLoop(ist *instanceState, shmData []byte) {
 			ist.stop()
 			ist.mu.Lock()
 			if ist.conn != nil {
-				ist.conn.Close()
+				_ = ist.conn.Close()
 			}
 			ist.mu.Unlock()
 			return
@@ -1041,11 +1041,11 @@ func startHandler(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolR
 	if lastErr != "" {
 		for _, ist := range instancesState {
 			if ist.conn != nil {
-				ist.conn.Close()
+				_ = ist.conn.Close()
 			}
 		}
-		unix.Munmap(shmData)
-		unix.Close(shmFd)
+		_ = unix.Munmap(shmData)
+		_ = unix.Close(shmFd)
 		return newError(lastErr), nil
 	}
 
@@ -1096,14 +1096,14 @@ func stopHandler(ctx context.Context, req *mcp.CallToolRequest, input struct{}) 
 		ist.stop()
 		ist.mu.Lock()
 		if ist.conn != nil {
-			ist.conn.Close()
+			_ = ist.conn.Close()
 		}
 		ist.mu.Unlock()
 		ist.wg.Wait()
 		// wg 退出后再兜底关闭一次：覆盖重连 Dial 成功与 stop 竞争的窗口
 		ist.mu.Lock()
 		if ist.conn != nil {
-			ist.conn.Close()
+			_ = ist.conn.Close()
 		}
 		ist.mu.Unlock()
 		ist.log.Info("instance_stopped")
@@ -1111,8 +1111,8 @@ func stopHandler(ctx context.Context, req *mcp.CallToolRequest, input struct{}) 
 	state.instances = nil
 
 	if state.shmData != nil {
-		unix.Munmap(state.shmData)
-		unix.Close(state.shmFd)
+		_ = unix.Munmap(state.shmData)
+		_ = unix.Close(state.shmFd)
 		state.shmData = nil
 	}
 

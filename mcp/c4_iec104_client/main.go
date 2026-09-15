@@ -138,7 +138,7 @@ var state = &iec104State{}
 // ──────────────────────────────────────────────
 
 func loadConfig(configPath string) ([]iec104Instance, error) {
-	data, err := os.ReadFile(configPath)
+	data, err := os.ReadFile(configPath) //nolint:gosec // 配置路径来自 -c 命令行参数（可信运维环境）
 	if err != nil {
 		return nil, fmt.Errorf("CONFIG_PATH_MISSING: cannot read config file: %v", err)
 	}
@@ -243,22 +243,22 @@ func attachShm(instanceID string) ([]byte, int, error) {
 
 	hdrData, err := unix.Mmap(fd, 0, shm.BlockSize, unix.PROT_READ, unix.MAP_SHARED)
 	if err != nil {
-		unix.Close(fd)
+		_ = unix.Close(fd)
 		return nil, 0, fmt.Errorf("SHM_OPEN_FAILED: mmap header failed: %v", err)
 	}
 	magic := binary.NativeEndian.Uint32(hdrData[0:])
 	if magic != shm.Magic {
-		unix.Munmap(hdrData)
-		unix.Close(fd)
+		_ = unix.Munmap(hdrData)
+		_ = unix.Close(fd)
 		return nil, 0, fmt.Errorf("SHM_CORRUPTED: header magic is invalid (got 0x%08X, expected 0x%08X)", magic, shm.Magic)
 	}
 	maxPoints := binary.NativeEndian.Uint32(hdrData[shm.HdrOffMaxPoints:])
-	unix.Munmap(hdrData)
+	_ = unix.Munmap(hdrData)
 
 	totalSize := int64(int(maxPoints)+1) * shm.BlockSize
 	data, err := unix.Mmap(fd, 0, int(totalSize), unix.PROT_READ|unix.PROT_WRITE, unix.MAP_SHARED)
 	if err != nil {
-		unix.Close(fd)
+		_ = unix.Close(fd)
 		return nil, 0, fmt.Errorf("SHM_OPEN_FAILED: mmap failed: %v", err)
 	}
 
@@ -290,30 +290,16 @@ func writeBlock(shmData []byte, shmID int, dataType uint8, timestamp uint64, val
 
 	if shmData[off+shm.BlkOffState] == 0 {
 		shmData[off+shm.BlkOffState] = 1
-		atomic.StoreUint64((*uint64)(unsafe.Pointer(&shmData[off+shm.BlkOffWriteSeq])), 0)
+		atomic.StoreUint64((*uint64)(unsafe.Pointer(&shmData[off+shm.BlkOffWriteSeq])), 0) //nolint:gosec // 零拷贝共享内存设计：块内序号字段原子操作
 	}
 
-	atomic.AddUint64((*uint64)(unsafe.Pointer(&shmData[off+shm.BlkOffWriteSeq])), 1)
+	atomic.AddUint64((*uint64)(unsafe.Pointer(&shmData[off+shm.BlkOffWriteSeq])), 1) //nolint:gosec // 零拷贝共享内存设计：块内序号字段原子操作
 
 	binary.NativeEndian.PutUint64(shmData[off+shm.BlkOffTimestamp:], timestamp)
 	shmData[off+shm.BlkOffType] = dataType
 	writeValue(shmData, off+shm.BlkOffValue, value, valueSize)
 
-	atomic.AddUint64((*uint64)(unsafe.Pointer(&shmData[off+shm.BlkOffWriteSeq])), 1)
-}
-
-// valueByteSize returns the shm value field byte size for an ASFP2 data type.
-func valueByteSize(dataType uint8) int {
-	switch dataType {
-	case protocol.TypeBoolean, protocol.TypeInt8, protocol.TypeUint8:
-		return 1
-	case protocol.TypeInt16:
-		return 2
-	case protocol.TypeInt32, protocol.TypeFloat32:
-		return 4
-	default:
-		return 0
-	}
+	atomic.AddUint64((*uint64)(unsafe.Pointer(&shmData[off+shm.BlkOffWriteSeq])), 1) //nolint:gosec // 零拷贝共享内存设计：块内序号字段原子操作
 }
 
 // ──────────────────────────────────────────────
@@ -586,7 +572,7 @@ func (ist *instanceState) closeConn() {
 	ist.mu.Lock()
 	defer ist.mu.Unlock()
 	if ist.conn != nil {
-		ist.conn.Close()
+		_ = ist.conn.Close()
 		ist.conn = nil
 	}
 }
@@ -611,7 +597,7 @@ func dialInterruptible(addr string, timeout time.Duration, quit <-chan struct{})
 	case <-quit:
 		go func() {
 			if r := <-ch; r.conn != nil {
-				r.conn.Close()
+				_ = r.conn.Close()
 			}
 		}()
 		return nil, errStopped
@@ -1162,9 +1148,9 @@ func stopHandler(ctx context.Context, req *mcp.CallToolRequest, input struct{}) 
 	for _, ist := range state.instances {
 		// Best-effort STOPDT before closing.
 		if c := ist.getConn(); c != nil {
-			c.SetWriteDeadline(time.Now().Add(500 * time.Millisecond))
-			c.Write(buildUFrame(funcStopdtAct))
-			c.SetWriteDeadline(time.Time{})
+			_ = c.SetWriteDeadline(time.Now().Add(500 * time.Millisecond))
+			_, _ = c.Write(buildUFrame(funcStopdtAct))
+			_ = c.SetWriteDeadline(time.Time{})
 		}
 		close(ist.quit)
 		// Give the controlled station a short window to reply STOPDT/STARTDT CON
@@ -1178,8 +1164,8 @@ func stopHandler(ctx context.Context, req *mcp.CallToolRequest, input struct{}) 
 	state.instances = nil
 
 	if state.shmData != nil {
-		unix.Munmap(state.shmData)
-		unix.Close(state.shmFd)
+		_ = unix.Munmap(state.shmData)
+		_ = unix.Close(state.shmFd)
 		state.shmData = nil
 	}
 

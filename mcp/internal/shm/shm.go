@@ -107,46 +107,46 @@ func Open(path string) (*SharedMemory, error) {
 
 	hdrData, err := unix.Mmap(fd, 0, BlockSize, unix.PROT_READ, unix.MAP_SHARED)
 	if err != nil {
-		unix.Close(fd)
+		_ = unix.Close(fd)
 		return nil, fmt.Errorf("SHM_OPEN_FAILED: mmap header failed: %w", err)
 	}
 	magic := binary.NativeEndian.Uint32(hdrData[0:])
 	if magic != Magic {
-		unix.Munmap(hdrData)
-		unix.Close(fd)
+		_ = unix.Munmap(hdrData)
+		_ = unix.Close(fd)
 		return nil, fmt.Errorf("SHM_CORRUPTED: header magic is invalid (got 0x%08X, expected 0x%08X)", magic, Magic)
 	}
 	if version := binary.NativeEndian.Uint16(hdrData[HdrOffVersion:]); version != Version {
-		unix.Munmap(hdrData)
-		unix.Close(fd)
+		_ = unix.Munmap(hdrData)
+		_ = unix.Close(fd)
 		return nil, fmt.Errorf("SHM_CORRUPTED: header version is unsupported (got %d, expected %d)", version, Version)
 	}
 	maxPoints := binary.NativeEndian.Uint32(hdrData[HdrOffMaxPoints:])
-	unix.Munmap(hdrData)
+	_ = unix.Munmap(hdrData)
 
 	/* reconcile header max_points with the actual file size: a crash between
 	   ftruncate and the max_points update leaves file_size > declared size —
 	   the file size is authoritative */
 	var st unix.Stat_t
 	if err := unix.Fstat(fd, &st); err != nil {
-		unix.Close(fd)
+		_ = unix.Close(fd)
 		return nil, fmt.Errorf("SHM_OPEN_FAILED: fstat failed: %w", err)
 	}
 	if fileBlocks := uint32(st.Size) / BlockSize; fileBlocks >= 1 && fileBlocks-1 != maxPoints {
 		rwHdr, err := unix.Mmap(fd, 0, BlockSize, unix.PROT_READ|unix.PROT_WRITE, unix.MAP_SHARED)
 		if err != nil {
-			unix.Close(fd)
+			_ = unix.Close(fd)
 			return nil, fmt.Errorf("SHM_OPEN_FAILED: mmap header failed: %w", err)
 		}
 		maxPoints = fileBlocks - 1
 		binary.NativeEndian.PutUint32(rwHdr[HdrOffMaxPoints:], maxPoints)
-		unix.Munmap(rwHdr)
+		_ = unix.Munmap(rwHdr)
 	}
 
 	totalSize := int64(int(maxPoints)+1) * BlockSize
 	data, err := unix.Mmap(fd, 0, int(totalSize), unix.PROT_READ|unix.PROT_WRITE, unix.MAP_SHARED)
 	if err != nil {
-		unix.Close(fd)
+		_ = unix.Close(fd)
 		return nil, fmt.Errorf("SHM_OPEN_FAILED: mmap failed: %w", err)
 	}
 
@@ -170,15 +170,15 @@ func Create(instanceID string, maxPoints int) (*SharedMemory, error) {
 
 	totalSize := int64((maxPoints + 1) * BlockSize)
 	if err := unix.Ftruncate(fd, totalSize); err != nil {
-		unix.Close(fd)
-		unix.Unlink(path)
+		_ = unix.Close(fd)
+		_ = unix.Unlink(path)
 		return nil, fmt.Errorf("SHM_SYSCALL_FAILED: ftruncate failed - %w", err)
 	}
 
 	data, err := unix.Mmap(fd, 0, int(totalSize), unix.PROT_READ|unix.PROT_WRITE, unix.MAP_SHARED)
 	if err != nil {
-		unix.Close(fd)
-		unix.Unlink(path)
+		_ = unix.Close(fd)
+		_ = unix.Unlink(path)
 		return nil, fmt.Errorf("SHM_SYSCALL_FAILED: mmap failed - %w", err)
 	}
 
@@ -312,13 +312,13 @@ func ReadHeaderFromPath(path string) (HeaderInfo, error) {
 	if err != nil {
 		return HeaderInfo{}, fmt.Errorf("SHM_SYSCALL_FAILED: open failed - %w", err)
 	}
-	defer unix.Close(fd)
+	defer func() { _ = unix.Close(fd) }()
 
 	data, err := unix.Mmap(fd, 0, BlockSize, unix.PROT_READ, unix.MAP_SHARED)
 	if err != nil {
 		return HeaderInfo{}, fmt.Errorf("SHM_SYSCALL_FAILED: mmap failed - %w", err)
 	}
-	defer unix.Munmap(data)
+	defer func() { _ = unix.Munmap(data) }()
 
 	return HeaderInfo{
 		Magic:          binary.NativeEndian.Uint32(data[HdrOffMagic:]),

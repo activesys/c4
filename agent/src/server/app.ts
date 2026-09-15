@@ -43,15 +43,6 @@ export interface AppOptions {
     frontendDir?: string;
 }
 
-// ── CORS Middleware ───────────────────────────────────────
-function createCorsMiddleware(origin: string) {
-    return (req: Request, _res: Response, next: NextFunction): void => {
-        // Express v5: no callback needed, sync middleware
-        // CORS preflight is handled later; this sets headers for all requests
-        next();
-    };
-}
-
 /** Raw CORS handler that sets headers per-request (Express v5 compatible). */
 function corsHandler(
     req: Request,

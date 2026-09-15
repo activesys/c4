@@ -119,7 +119,7 @@ function loadSystemPrompt(
 export async function createSuperWorker(
     config: SuperWorkerConfig,
 ): Promise<ReturnType<typeof createAgent>> {
-    const { model, registry, mcpManager } = config;
+    const { model, registry } = config;
     const systemPrompt = loadSystemPrompt(registry, config.site);
 
     const allTools: StructuredTool[] = [
@@ -138,7 +138,6 @@ export async function createSuperWorker(
         ...(config.displayTools ?? []),
     ];
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const agent = createAgent({
         model: model as any,
         tools: allTools,
@@ -669,7 +668,7 @@ export async function createC4Agent(
                 // 确认（按钮未武装，用户无确认手段，func_test_case 用例 11）——限一次
                 let accessPlanForceUsed = false;
                 // 最后一轮 streamEvents 的 run 流——用于在收尾时读取最终状态并持久化历史
-                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                 
                 let lastStream: any = null;
 
                 while (misses <= MAX_MISSES) {
@@ -726,7 +725,6 @@ export async function createC4Agent(
                     // 图运行中止（如 GraphRecursionError）而 reject，未观察的拒绝
                     // 会使整个 Agent 进程退出（Node 默认行为）。此处先挂 catch
                     // 标记为已处理；主路径的 await 语义不受影响（仍会抛出）。
-                    // eslint-disable-next-line @typescript-eslint/no-explicit-any
                     bgCapture.catch((err: unknown) => {
                         const msg = err instanceof Error ? err.message : String(err);
                         log?.error(conversation, `后台工具流异常: ${msg}`);

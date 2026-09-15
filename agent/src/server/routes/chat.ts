@@ -32,17 +32,11 @@ function sendSSE(res: Response, event: string | null, data: object): void {
         res.write(`event: ${event}\n`);
     }
     res.write(`data: ${JSON.stringify(data)}\n\n`);
-    // Express 5 async handler 会缓冲 write，需要显式 flush
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    if (typeof (res as any).flush === "function") {
-        (res as any).flush();
+    // Express 5 async handler 会缓冲 write，需要显式 flush（compression 中间件注入的方法）
+    const flushable = res as Response & { flush?: () => void };
+    if (typeof flushable.flush === "function") {
+        flushable.flush();
     }
-}
-
-/** Write an SSE error and close the stream. */
-function sendError(res: Response, message: string): void {
-    sendSSE(res, "error", { message });
-    res.end();
 }
 
 // ── Router Factory ────────────────────────────────────────
@@ -111,10 +105,9 @@ export function createChatRouter(agent: C4Agent): Router {
         // Keepalive comment to prevent client disconnect during stream init
         res.write(":ok\n\n");
         // Express v5 在 async handler 间隙会关闭连接，禁用 TCP Nagle + 超时
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        if ((res as any).socket) {
-            (res as any).socket.setNoDelay(true);
-            (res as any).socket.setTimeout(0);
+        if (res.socket) {
+            res.socket.setNoDelay(true);
+            res.socket.setTimeout(0);
         }
 
         // 使用 promise chain 而非 async/for-await，规避 Express v5 在 async

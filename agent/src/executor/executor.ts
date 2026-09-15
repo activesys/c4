@@ -3,7 +3,6 @@
 // 设计：agent.md §3.2, §3.2.1.6, §3.2.3
 
 import * as fs from "node:fs/promises";
-import * as path from "node:path";
 import type {
     MCPInstanceConfig,
     RegistryEntry,
@@ -11,7 +10,6 @@ import type {
     ServiceStep,
     SystemConfig,
 } from "../types/index.js";
-import { McpServiceRegistry } from "../registry/registry.js";
 import type { C4McpManager } from "../mcp/client.js";
 import { restore_prev1, atomic_write_raw } from "./transaction.js";
 import { SHM_SERVICE_TYPE } from "../mcp/client.js";
@@ -895,14 +893,14 @@ function update_shm_classification(
  * @param stop_clients Stop 阶段覆盖的数据路径服务客户端（Registry 全集）
  * @param start_clients Start 阶段按当前配置拉起的服务客户端（config 子集）
  * @param config 当前全量配置
- * @param config_path 配置文件路径（工具参数 config_path 透传）
+ * @param _config_path 配置文件路径（工具参数 config_path 透传；当前未使用）
  */
 export async function execute_stop_and_start(
     shm_manager: ShmManagerClient,
     stop_clients: McpServiceClient[],
     start_clients: McpServiceClient[],
     _config: SystemConfig,
-    config_path: string,
+    _config_path: string,
 ): Promise<StopStartResult> {
     // ── Phase 1: Stop ──
     for (const client of stop_clients) {

@@ -40,7 +40,6 @@ export class ExecuteAccessPlanTool extends StructuredTool {
         input: z.infer<typeof this.schema>,
     ): Promise<string> {
         const { steps } = input;
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const typed_steps = steps as ServiceStep[];
 
         try {

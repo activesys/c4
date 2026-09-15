@@ -45,7 +45,7 @@ type serverState struct {
 // closed — never unlinked: 运行期不销毁 shm，销毁仅发生在整机重启与卸载脚本。
 func (s *serverState) attach(sm *shm.SharedMemory, instanceID string) {
 	if s.sm != nil && s.sm != sm {
-		s.sm.Close()
+		_ = s.sm.Close()
 	}
 	s.sm = sm
 	s.currentInstanceID = instanceID
@@ -139,7 +139,7 @@ func createShmHandler(ctx context.Context, req *mcp.CallToolRequest, input Creat
 }
 
 func isDefaultConfigContent(configPath string) bool {
-	data, err := os.ReadFile(configPath)
+	data, err := os.ReadFile(configPath) //nolint:gosec // 配置路径来自 -c 命令行参数（可信运维环境）
 	if err != nil {
 		return false
 	}
@@ -164,7 +164,7 @@ func isEmptyJSON(data []byte) bool {
 }
 
 func loadConfigSection(configPath string) (map[string]any, []string, []string, error) {
-	data, err := os.ReadFile(configPath)
+	data, err := os.ReadFile(configPath) //nolint:gosec // 配置路径来自 -c 命令行参数（可信运维环境）
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("CONFIG_MISSING_SECTION: cannot read config file: %v", err)
 	}
@@ -317,26 +317,26 @@ func createFromConfig(configPath string, instanceID string, config map[string]an
 
 func writeConfigAtomic(configPath string, out []byte) error {
 	tmpPath := configPath + ".tmp"
-	tmp, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+	tmp, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644) //nolint:gosec // 配置文件原子写：临时路径由 configPath 派生（可信运维环境）
 	if err != nil {
 		return fmt.Errorf("CONFIG_WRITE_FAILED: open temp file failed: %w", err)
 	}
 	if _, err := tmp.Write(out); err != nil {
-		tmp.Close()
-		os.Remove(tmpPath)
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
 		return fmt.Errorf("CONFIG_WRITE_FAILED: write failed: %w", err)
 	}
 	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		os.Remove(tmpPath)
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
 		return fmt.Errorf("CONFIG_WRITE_FAILED: fsync failed: %w", err)
 	}
 	if err := tmp.Close(); err != nil {
-		os.Remove(tmpPath)
+		_ = os.Remove(tmpPath)
 		return fmt.Errorf("CONFIG_WRITE_FAILED: close failed: %w", err)
 	}
 	if err := os.Rename(tmpPath, configPath); err != nil {
-		os.Remove(tmpPath)
+		_ = os.Remove(tmpPath)
 		return fmt.Errorf("CONFIG_WRITE_FAILED: rename failed: %w", err)
 	}
 	return nil

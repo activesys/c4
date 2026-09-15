@@ -104,7 +104,7 @@ var state = &clientState{}
 // ──────────────────────────────────────────────
 
 func loadConfig(configPath string) ([]influxInstance, error) {
-	data, err := os.ReadFile(configPath)
+	data, err := os.ReadFile(configPath) //nolint:gosec // 配置路径来自 -c 命令行参数（可信运维环境）
 	if err != nil {
 		return nil, fmt.Errorf("CONFIG_PATH_MISSING: cannot read config file: %v", err)
 	}
@@ -252,22 +252,22 @@ func attachShm(instanceID string) ([]byte, int, error) {
 
 	hdrData, err := unix.Mmap(fd, 0, shm.BlockSize, unix.PROT_READ, unix.MAP_SHARED)
 	if err != nil {
-		unix.Close(fd)
+		_ = unix.Close(fd)
 		return nil, 0, fmt.Errorf("SHM_OPEN_FAILED: mmap header failed: %v", err)
 	}
 	magic := binary.NativeEndian.Uint32(hdrData[0:])
 	if magic != shm.Magic {
-		unix.Munmap(hdrData)
-		unix.Close(fd)
+		_ = unix.Munmap(hdrData)
+		_ = unix.Close(fd)
 		return nil, 0, fmt.Errorf("SHM_CORRUPTED: header magic is invalid (got 0x%08X, expected 0x%08X)", magic, shm.Magic)
 	}
 	maxPoints := binary.NativeEndian.Uint32(hdrData[shm.HdrOffMaxPoints:])
-	unix.Munmap(hdrData)
+	_ = unix.Munmap(hdrData)
 
 	totalSize := int64(int(maxPoints)+1) * shm.BlockSize
 	data, err := unix.Mmap(fd, 0, int(totalSize), unix.PROT_READ, unix.MAP_SHARED)
 	if err != nil {
-		unix.Close(fd)
+		_ = unix.Close(fd)
 		return nil, 0, fmt.Errorf("SHM_OPEN_FAILED: mmap failed: %v", err)
 	}
 
@@ -636,8 +636,12 @@ func (ist *instanceState) doPost(writeURL, body string) error {
 	if *ist.cfg.Gzip == 1 {
 		var buf bytes.Buffer
 		gz := gzip.NewWriter(&buf)
-		gz.Write([]byte(body))
-		gz.Close()
+		if _, err := gz.Write([]byte(body)); err != nil {
+			return fmt.Errorf("gzip write failed: %w", err)
+		}
+		if err := gz.Close(); err != nil {
+			return fmt.Errorf("gzip close failed: %w", err)
+		}
 		bodyReader = &buf
 	} else {
 		bodyReader = strings.NewReader(body)
@@ -657,8 +661,8 @@ func (ist *instanceState) doPost(writeURL, body string) error {
 	if err != nil {
 		return fmt.Errorf("retryable: %v", err)
 	}
-	defer resp.Body.Close()
-	io.Copy(io.Discard, resp.Body)
+	defer func() { _ = resp.Body.Close() }()
+	_, _ = io.Copy(io.Discard, resp.Body)
 
 	switch resp.StatusCode {
 	case http.StatusNoContent:
@@ -896,8 +900,8 @@ func stopHandler(ctx context.Context, req *mcp.CallToolRequest, input struct{}) 
 	state.instances = nil
 
 	if state.shmData != nil {
-		unix.Munmap(state.shmData)
-		unix.Close(state.shmFd)
+		_ = unix.Munmap(state.shmData)
+		_ = unix.Close(state.shmFd)
 		state.shmData = nil
 	}
 

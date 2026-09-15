@@ -44,14 +44,6 @@ type serverInstance struct {
 	Points      []serverPoint `json:"points"`
 }
 
-type serverConfig struct {
-	C4ASFP2Server []serverInstance `json:"c4_asfp2_server"`
-}
-
-// ──────────────────────────────────────────────
-//  Protocol constants (shared via c4/mcp/internal/protocol)
-// ──────────────────────────────────────────────
-
 // ──────────────────────────────────────────────
 //  Server state
 // ──────────────────────────────────────────────
@@ -104,7 +96,7 @@ func (ist *instanceState) closeConns() {
 	ist.connsMu.Lock()
 	defer ist.connsMu.Unlock()
 	for c := range ist.conns {
-		c.SetReadDeadline(time.Now())
+		_ = c.SetReadDeadline(time.Now())
 	}
 }
 
@@ -126,7 +118,7 @@ var log *slog.Logger
 // ──────────────────────────────────────────────
 
 func loadConfig(configPath string) ([]serverInstance, error) {
-	data, err := os.ReadFile(configPath)
+	data, err := os.ReadFile(configPath) //nolint:gosec // 配置路径来自 -c 命令行参数（可信运维环境）
 	if err != nil {
 		return nil, fmt.Errorf("CONFIG_PATH_MISSING: cannot read config file: %v", err)
 	}
@@ -206,22 +198,22 @@ func attachShm(instanceID string) ([]byte, int, error) {
 	// Read header to get size
 	hdrData, err := unix.Mmap(fd, 0, shm.BlockSize, unix.PROT_READ, unix.MAP_SHARED)
 	if err != nil {
-		unix.Close(fd)
+		_ = unix.Close(fd)
 		return nil, 0, fmt.Errorf("SHM_OPEN_FAILED: mmap header failed: %v", err)
 	}
 	magic := binary.NativeEndian.Uint32(hdrData[0:])
 	if magic != shm.Magic {
-		unix.Munmap(hdrData)
-		unix.Close(fd)
+		_ = unix.Munmap(hdrData)
+		_ = unix.Close(fd)
 		return nil, 0, fmt.Errorf("SHM_CORRUPTED: header magic is invalid (got 0x%08X, expected 0x%08X)", magic, shm.Magic)
 	}
 	maxPoints := binary.NativeEndian.Uint32(hdrData[shm.HdrOffMaxPoints:])
-	unix.Munmap(hdrData)
+	_ = unix.Munmap(hdrData)
 
 	totalSize := int64(int(maxPoints)+1) * shm.BlockSize
 	data, err := unix.Mmap(fd, 0, int(totalSize), unix.PROT_READ|unix.PROT_WRITE, unix.MAP_SHARED)
 	if err != nil {
-		unix.Close(fd)
+		_ = unix.Close(fd)
 		return nil, 0, fmt.Errorf("SHM_OPEN_FAILED: mmap failed: %v", err)
 	}
 
@@ -305,10 +297,10 @@ func parseASFP2Data(conn net.Conn, inst *instanceState, shmData []byte) {
 			inst.log.Error("panic_recovered", "goroutine", "connection", "err", fmt.Sprint(r))
 		}
 	}()
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	tmp := bufPool.Get().([]byte)
-	defer bufPool.Put(tmp)
+	defer bufPool.Put(tmp) //nolint:staticcheck // sync.Pool 存 []byte 为已知取舍，如需优化可改为 *[]byte 池
 
 	var remain []byte
 
@@ -329,18 +321,18 @@ func parseASFP2Data(conn net.Conn, inst *instanceState, shmData []byte) {
 			return
 		case "t1":
 			// T1 expired: idle — send reverse keepalive (1 byte, inverse_keep)
-			conn.SetWriteDeadline(time.Now().Add(time.Second))
+			_ = conn.SetWriteDeadline(time.Now().Add(time.Second))
 			if _, err := conn.Write([]byte{inst.cfg.InverseKeep}); err != nil {
 				return
 			}
-			conn.SetWriteDeadline(time.Time{})
+			_ = conn.SetWriteDeadline(time.Time{})
 			inst.log.Debug("keepalive_exchanged", "dir", "send_keep")
 			ka.resetT1()
 			ka.armT2()
 		}
 
 		// 周期读超时：空闲连接每秒醒来检查 quit，保证 stop 时 goroutine 可退出
-		conn.SetReadDeadline(time.Now().Add(time.Second))
+		_ = conn.SetReadDeadline(time.Now().Add(time.Second))
 		n, err := conn.Read(tmp)
 		if ne, ok := err.(net.Error); ok && ne.Timeout() {
 			select {
@@ -374,9 +366,9 @@ func parseASFP2Data(conn net.Conn, inst *instanceState, shmData []byte) {
 			if firstByte == 'K' {
 				if pos+4 <= len(remain) && string(remain[pos:pos+4]) == "KEEP" {
 					// 写超时：对端零窗口/僵死时 Write 可长时间阻塞，避免拖住 stop 的 wg.Wait
-					conn.SetWriteDeadline(time.Now().Add(time.Second))
-					conn.Write([]byte{inst.cfg.ForwardKack})
-					conn.SetWriteDeadline(time.Time{})
+					_ = conn.SetWriteDeadline(time.Now().Add(time.Second))
+					_, _ = conn.Write([]byte{inst.cfg.ForwardKack})
+					_ = conn.SetWriteDeadline(time.Time{})
 					inst.log.Debug("keepalive_exchanged", "dir", "recv_keep", "reply", "kack")
 					// 收到对端心跳证明链路存活：重启 T1（libasfp2 after_parse 语义）
 					ka.resetT1()
@@ -821,10 +813,10 @@ func startHandler(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolR
 
 	if lastErr != "" {
 		for _, ist := range instancesState {
-			ist.listener.Close()
+			_ = ist.listener.Close()
 		}
-		unix.Munmap(shmData)
-		unix.Close(shmFd)
+		_ = unix.Munmap(shmData)
+		_ = unix.Close(shmFd)
 		return newError(lastErr), nil
 	}
 
@@ -859,7 +851,7 @@ func startHandler(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolR
 }
 
 func runServer(ist *instanceState, shmData []byte) {
-	defer ist.listener.Close()
+	defer func() { _ = ist.listener.Close() }()
 
 	for {
 		conn, err := ist.listener.Accept()
@@ -877,7 +869,7 @@ func runServer(ist *instanceState, shmData []byte) {
 		case <-ist.quit:
 			ist.removeConn(conn)
 			ist.wg.Done()
-			conn.Close()
+			_ = conn.Close()
 			return
 		default:
 		}
@@ -920,7 +912,7 @@ func statsLoop(ist *instanceState, shmData []byte) {
 			ist.log.Log(context.Background(), logger.LevelCrit, "shm_lost",
 				"err", "shared memory header magic is invalid, data path interrupted")
 			ist.stop()
-			ist.listener.Close()
+			_ = ist.listener.Close()
 			ist.closeConns()
 			return
 		}
@@ -947,7 +939,7 @@ func stopHandler(ctx context.Context, req *mcp.CallToolRequest, input struct{}) 
 
 	for _, ist := range state.instances {
 		ist.stop()
-		ist.listener.Close()
+		_ = ist.listener.Close()
 		ist.closeConns()
 		ist.wg.Wait()
 		ist.log.Info("instance_stopped")
@@ -955,8 +947,8 @@ func stopHandler(ctx context.Context, req *mcp.CallToolRequest, input struct{}) 
 	state.instances = nil
 
 	if state.shmData != nil {
-		unix.Munmap(state.shmData)
-		unix.Close(state.shmFd)
+		_ = unix.Munmap(state.shmData)
+		_ = unix.Close(state.shmFd)
 		state.shmData = nil
 	}
 

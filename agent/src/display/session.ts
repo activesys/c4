@@ -322,7 +322,7 @@ export class DisplayService {
             let result;
             try {
                 result = await readPoints(this.manager, shmIds);
-            } catch (err) {
+            } catch {
                 // 调用级失败：本轮整体跳过，保持上次值与状态（不杜撰）
                 session.consecutiveFailures += 1;
                 if (session.consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {

@@ -149,11 +149,6 @@ export function find_service_type(
     return null;
 }
 
-/** 转义正则特殊字符（协议名拼入正则时使用） */
-function escape_regex(s: string): string {
-    return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
 /** 返回服务目录中已部署的协议名集合（按 role 过滤，可选）。用于未知协议的可读报错。 */
 export function list_supported_protocols(
     registry: McpServiceRegistry,

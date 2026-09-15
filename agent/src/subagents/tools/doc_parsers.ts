@@ -31,13 +31,13 @@ function parse_csv_raw(content: string): TabularData {
 
 function parse_xlsx_raw(buf: Buffer): TabularData {
     try {
-        // eslint-disable-next-line @typescript-eslint/no-require-imports
         const XLSX = require_("xlsx");
         const wb = XLSX.read(buf, { type: "buffer" });
         const sheet = wb.Sheets[wb.SheetNames[0]!];
         if (!sheet) return { headers: [], rows: [], rowCount: 0 };
         return parse_csv_raw(XLSX.utils.sheet_to_csv(sheet));
     } catch {
+        // eslint-disable-next-line no-control-regex -- 清洗目标就是控制字符：二进制兜底转可打印 ASCII（保留换行）
         const text = buf.toString("utf-8").replace(/[^\x20-\x7E\x0A\x0D]/g, "");
         const lines = text.split(/\r?\n/).filter((l) => l.trim().length > 0);
         if (lines.length > 0) return parse_csv_raw(lines.join("\n"));

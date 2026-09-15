@@ -86,7 +86,7 @@ func stdinIsAttachedStream() bool {
 // over a Unix stream socket, initialize per connection). The listener is
 // independent of the data-path tools: stop never affects it.
 func serveResident(serviceName, dir string, server *mcp.Server) error {
-	if err := os.MkdirAll(dir, 0o770); err != nil {
+	if err := os.MkdirAll(dir, 0o770); err != nil { //nolint:gosec // 0770 为 uid+group 访问边界（C4_RS_00015），刻意放宽
 		return fmt.Errorf("create socket dir %s: %w", dir, err)
 	}
 	sockPath := filepath.Join(dir, serviceName+".sock")
@@ -103,8 +103,8 @@ func serveResident(serviceName, dir string, server *mcp.Server) error {
 	}
 	// Socket file permission is the uid-granular auth boundary (C4_RS_00015);
 	// chmod explicitly so umask cannot strip the group bits.
-	if err := os.Chmod(sockPath, 0o660); err != nil {
-		ln.Close()
+	if err := os.Chmod(sockPath, 0o660); err != nil { //nolint:gosec // 0660 为 uid+group 访问边界（C4_RS_00015），刻意放宽
+		_ = ln.Close()
 		return fmt.Errorf("chmod %s: %w", sockPath, err)
 	}
 	log.Printf("%s: resident mode, listening on %s", serviceName, sockPath)
@@ -113,14 +113,14 @@ func serveResident(serviceName, dir string, server *mcp.Server) error {
 	defer stop()
 	go func() {
 		<-ctx.Done()
-		ln.Close()
+		_ = ln.Close()
 	}()
 
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
 			if errors.Is(err, net.ErrClosed) {
-				os.Remove(sockPath)
+				_ = os.Remove(sockPath)
 				return nil
 			}
 			log.Printf("%s: accept: %v", serviceName, err)
@@ -128,7 +128,7 @@ func serveResident(serviceName, dir string, server *mcp.Server) error {
 		}
 		c := &onceConn{Conn: conn}
 		go func() {
-			defer c.Close()
+			defer func() { _ = c.Close() }()
 			if err := server.Run(context.Background(), &mcp.IOTransport{Reader: c, Writer: c}); err != nil {
 				log.Printf("%s: session ended: %v", serviceName, err)
 			}

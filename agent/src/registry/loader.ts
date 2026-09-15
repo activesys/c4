@@ -141,7 +141,8 @@ export async function loadRegistryFiles(dirPath: string): Promise<RegistryLoadRe
       return { entries: [], warnings: [] };
     }
     throw new Error(
-      `Failed to read Registry directory "${dirPath}": ${error.message}`
+      `Failed to read Registry directory "${dirPath}": ${error.message}`,
+      { cause: err },
     );
   }
 

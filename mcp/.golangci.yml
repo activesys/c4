@@ -1,0 +1,43 @@
+# golangci-lint v2 配置 — c4/mcp/（Go MCP 服务集群）
+#
+# 聚焦正确性与安全，不启用激进风格规则。
+# 运行：在任一 Go 模块目录（mcp/c4_* 或 mcp/internal/*）下执行 `golangci-lint run`，
+# 配置文件由 golangci-lint 自动向上查找到本文件；或直接在 c4/ 根目录执行 `make lint`。
+version: "2"
+
+run:
+  timeout: 5m
+
+issues:
+  # 0 = 不限制：避免相同文本的告警被默认去重上限（3）掩盖
+  max-issues-per-linter: 0
+  max-same-issues: 0
+
+linters:
+  default: none
+  enable:
+    - staticcheck
+    - govet
+    - errcheck
+    - ineffassign
+    - unused
+    - gosec
+
+  settings:
+    gosec:
+      excludes:
+        # G115（整数溢出转换）：ASFP2/104/Modbus 线协议编解码中大量刻意截断
+        # （如 uint64 寄存器值 -> uint16），基线约 66 处均为协议语义内的有意转换；
+        # 逐处加范围检查属行为设计决策，统一豁免。如需审计请单独启用。
+        - G115
+    staticcheck:
+      checks:
+        - all
+        # 聚焦正确性：关闭 ST*（风格）与 QF*（快速改写建议）类检查
+        - -ST*
+        - -QF*
+
+  exclusions:
+    # 跳过测试文件
+    paths:
+      - _test\.go$
