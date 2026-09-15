@@ -624,10 +624,10 @@ flowchart TD
 | Writer（采集 MCP）崩溃 | `write_seq` 停在奇数（seqlock 特征），reader 检测到奇数后跳过该 block；进程异常退出由 systemd 重启，Agent 重连后按瀑布流程收敛实例 |
 | Reader（转发 MCP）崩溃 | Writer 不受影响（Seqlock 中 writer 不等待 reader）；进程异常退出由 systemd 重启，Agent 重连后按瀑布流程收敛实例 |
 | 共享内存损坏 | Header 或 Data Block 的 `magic` 校验失败 → 数据服务按 `SHM_CORRUPTED` 拒绝并报告；恢复经外部手段（整机重启或清理脚本，见 c4_deployment.md shm 损坏恢复） |
-
-注：数据面健康观测的指标来源与实现不在本表展开。
 | 内存不足 | Agent 检测 `point_count ≥ max_points` → 触发扩容或拒绝新增 point |
 | 跨进程时间同步 | 所有 MCP 进程使用 Unix 纪元毫秒作为统一的时间戳格式；数据新鲜度由 `write_seq` 单调计数器保证，与时间源无关 |
+
+注：数据面健康观测的指标来源与实现不在本表展开。
 
 ## 2.8 性能考量
 
