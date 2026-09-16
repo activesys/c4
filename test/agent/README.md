@@ -80,7 +80,7 @@
 | sseclient-py | SSE 事件流解析 |
 | c4_agent | 被测可执行文件，路径通过 `C4_AGENT_PATH` 环境变量或自动查找 |
 | c4_shm_manager | 共享内存管理，路径通过 `C4_SHM_MANAGER_PATH` 或自动查找 |
-| LLM API Key | `DEEPSEEK_API_KEY` 环境变量（L2 测试必需） |
+| LLM API Key | `ZHIPU_API_KEY` 环境变量（L2 测试必需） |
 | 各 MCP 服务二进制 | 按 agent.md §5.2 路径查找（`/usr/local/bin/c4_*` 或自动编译） |
 | sudo | `/dev/shm` 满模拟等系统级测试需要，密码通过环境变量 `SUDO_PASSWORD` 传入 |
 
@@ -311,7 +311,7 @@ kill Agent → restart → 断言 config.json ↔ shm ↔ 实例状态三者一�
 
 #### L2 测试的可跳过性
 
-若 `DEEPSEEK_API_KEY` 未设置或 LLM 不可达，L2 测试应 `pytest.skip` 而非失败。
+若 `ZHIPU_API_KEY` 未设置或 LLM 不可达，L2 测试应 `pytest.skip` 而非失败。
 通过 `pytest.mark.llm` 标记区分：
 
 ```bash
@@ -646,13 +646,13 @@ def assert_no_json_leak(text: str) -> None:
 ```bash
 # 全部测试（L1 + L2）
 cd c4/test/agent
-DEEPSEEK_API_KEY=sk-xxx C4_AGENT_PATH=/path/to/c4_agent pytest python/ -v
+ZHIPU_API_KEY=sk-xxx C4_AGENT_PATH=/path/to/c4_agent pytest python/ -v
 
 # 仅 L1（不需要 LLM API key）
 pytest python/ -v -m "not llm"
 
 # 仅 L2
-DEEPSEEK_API_KEY=sk-xxx pytest python/ -v -m llm
+ZHIPU_API_KEY=sk-xxx pytest python/ -v -m llm
 
 # 指定单文件
 pytest python/test_registry.py -v

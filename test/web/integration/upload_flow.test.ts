@@ -22,7 +22,7 @@ function txtFile(name: string): File {
   });
 }
 
-describe.skipIf(!process.env.DEEPSEEK_API_KEY)("文件上传（真实后端 + LLM）", () => {
+describe.skipIf(!process.env.ZHIPU_API_KEY)("文件上传（真实后端 + LLM）", () => {
   it("4.2.1 上传可解析 .txt → SSE 流含文本、流正常关闭", async () => {
     const events: SseEvent[] = [];
     await streamUpload(

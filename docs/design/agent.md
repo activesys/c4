@@ -61,7 +61,7 @@ Agent 系统覆盖数据接入流程中 Agent 侧的全部职能：
 | 组件 | 目标选型 | 当前实现 | 理由 |
 |------|------|------|------|
 | Agent 框架 | `deepagents` v1.11.1（LangChain/LangGraph） | `createAgent`（LangChain v1.5）| `createDeepAgent` + deepseek-chat 工具绑定不稳定，降级为扁平 `createAgent` |
-| LLM | `@langchain/deepseek` v1.1.5 | 同 | 已预置 `DEEPSEEK_API_KEY` |
+| LLM | `@langchain/openai`（OpenAI 兼容端点，模型经 agent.json base_url/name 配置） | 同 | 已预置 `ZHIPU_API_KEY`；DeepSeek 等其它 OpenAI 兼容服务经 `base_url`（如 `https://api.deepseek.com`）接入 |
 | MCP 客户端 | `@modelcontextprotocol/sdk` | 同 | MCP over Unix domain socket（`/run/c4/<service>.sock`）；Agent 是 MCP 客户端，只连接、从不拉起 MCP 进程 |
 | 服务端 | `express` v5 | 同 | 文件上传、REST API、SSE streaming |
 | 流式传输 | `streamMode="messages"`（Pregel） | `streamEvents({version:"v3"})` | v3 typed projections：`stream.messages` / `stream.output` |
@@ -1904,11 +1904,12 @@ Agent 启动时读取 `~/.local/c4/agent.json`（固定位置，`~` 为运行 C4
 
   // ========== LLM 配置 ==========
   "model": {
-    "provider": "deepseek",
-    "name": "deepseek-chat",
+    "provider": "zhipu",
+    "name": "glm-5.3-flash",
+    "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
     "temperature": 0,
     "max_tokens": 4096,
-    "api_key_env": "DEEPSEEK_API_KEY"
+    "api_key_env": "ZHIPU_API_KEY"
   },
 
   // ========== Express 服务端 ==========

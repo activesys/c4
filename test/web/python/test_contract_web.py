@@ -9,7 +9,7 @@ C4 Web 契约一致性测试 — test_contract_web.py
   - 黑盒契约断言：只断言 HTTP 响应结构、SSE 事件流，不侵入后端内部状态。
   - 确认/取消经 POST /api/chat 发送**关键词**（web.md §3.1.3），
     不使用 agent 测试方案的 interrupt 模型 ChatHelper.confirm()。
-  - LLM 驱动用例用 @pytest.mark.llm 标记，无 DEEPSEEK_API_KEY 时自动 skip。
+  - LLM 驱动用例用 @pytest.mark.llm 标记，无 ZHIPU_API_KEY 时自动 skip。
 """
 
 import json

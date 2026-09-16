@@ -7,7 +7,7 @@
 //   5.1.2 服务目录浏览 — 卡片列表渲染，无 503
 //   5.1.3 顶栏工作阶段徽标 — 存在、合法且随对话更新（允许 1s 轮询滞后）
 //
-// LLM 驱动部分以 DEEPSEEK_API_KEY 门控（README §1.4：无 key 时 skip）。
+// LLM 驱动部分以 ZHIPU_API_KEY 门控（README §1.4：无 key 时 skip）。
 
 import { expect, test, type Page } from "@playwright/test";
 import { fileURLToPath } from "node:url";
@@ -16,7 +16,7 @@ const fixturesDir = fileURLToPath(new URL("./fixtures", import.meta.url));
 const TURBINE1_CSV = `${fixturesDir}/1#风机点表.csv`;
 const TURBINE2_CSV = `${fixturesDir}/2#风机点表.csv`;
 
-const NO_LLM_KEY = "DEEPSEEK_API_KEY 未设置 — 跳过 LLM 驱动的 E2E 场景";
+const NO_LLM_KEY = "ZHIPU_API_KEY 未设置 — 跳过 LLM 驱动的 E2E 场景";
 const VALID_PHASES = ["idle", "collecting", "planning", "confirmed", "executing"];
 // 后端执行成功的流式文本（super_worker：接入方案已执行，配置已写入。 / 服务已重启: ...）
 const CONFIG_WRITTEN = /接入方案已执行|配置已写入|接入完成|服务已重启/;
@@ -85,7 +85,7 @@ async function ensureConfirmButtons(page: Page): Promise<void> {
 test("5.1.1 上传点表 + 对话接入 + 确认执行（关键词驱动确认，无 interrupt/resume）", async ({
     page,
 }) => {
-    test.skip(!process.env.DEEPSEEK_API_KEY, NO_LLM_KEY);
+    test.skip(!process.env.ZHIPU_API_KEY, NO_LLM_KEY);
     await gotoChat(page);
 
     // ── 轮 1a：上传可解析点表（web.md §3.2）──
@@ -155,7 +155,7 @@ test("5.1.3 顶栏工作阶段徽标：存在、合法且随对话更新（允�
     const initialPhase = (await badge.getAttribute("data-phase")) ?? "";
     expect(VALID_PHASES).toContain(initialPhase);
 
-    if (!process.env.DEEPSEEK_API_KEY) {
+    if (!process.env.ZHIPU_API_KEY) {
         // 无 LLM key 时仅断言徽标存在且 phase 合法（README §1.4）
         return;
     }

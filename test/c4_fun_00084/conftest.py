@@ -109,7 +109,7 @@ class AgentStack:
         # 常驻 c4_shm_manager 先行（Agent 连接前置；unlink-before-bind 自清残留 socket）
         env = os.environ.copy()
         env["C4_SOCK_DIR"] = str(self.tmp / "socks")
-        env.setdefault("DEEPSEEK_API_KEY", "test-dummy-key")
+        env.setdefault("ZHIPU_API_KEY", "test-dummy-key")
         self.shm_log = open(self.tmp / "shm_manager.log", "w")
         self.shm_proc = subprocess.Popen(
             [_find_shm_binary()], stdin=subprocess.DEVNULL,
@@ -161,8 +161,9 @@ def agent_stack():
     port = _free_port()
     agent_json = {
         "instance_id": INSTANCE,
-        "model": {"provider": "deepseek", "name": "deepseek-chat", "temperature": 0,
-                  "max_tokens": 4096, "api_key_env": "DEEPSEEK_API_KEY"},
+        "model": {"provider": "zhipu", "name": "glm-5.3-flash",
+                  "base_url": "https://open.bigmodel.cn/api/paas/v4", "temperature": 0,
+                  "max_tokens": 4096, "api_key_env": "ZHIPU_API_KEY"},
         "server": {"host": "127.0.0.1", "port": port, "cors_origin": "*"},
         "mcp_registry": {"path": str(tmp / "registry")},
         "shm_manager": {"binary": _find_shm_binary(), "config_path": str(tmp / "config.json")},

@@ -25,7 +25,7 @@ L1 用例（无 LLM 依赖，可用 `pytest -m "not llm"` 单独运行）:
   4.6.4.9  site 丢失 → 重新询问场站（entries 保留不重建）
   4.6.4.12 记忆库损坏 JSON → 不崩溃 + 从 config.json 重建 entries
 
-L2 用例（@pytest.mark.llm，需要 DEEPSEEK_API_KEY，无 key 自动 skip）:
+L2 用例（@pytest.mark.llm，需要 ZHIPU_API_KEY，无 key 自动 skip）:
   4.6.4.1  首次接入固化 id + 写入记忆库
   4.6.4.2  modify 复用同一 id（跨会话稳定）
   4.6.4.3  同一设备加点 → 合并，不新建实例

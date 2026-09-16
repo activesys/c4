@@ -127,6 +127,7 @@ export interface AgentConfig {
     model: {
         provider: string;
         name: string;
+        base_url: string;
         temperature: number;
         max_tokens: number;
         api_key_env: string;

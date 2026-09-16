@@ -61,6 +61,7 @@ const AgentConfigSchema: z.ZodType<AgentConfig> = z.object({
     model: z.object({
         provider: z.string(),
         name: z.string(),
+        base_url: z.string(),
         temperature: z.number(),
         max_tokens: z.number(),
         api_key_env: z.string(),
@@ -391,15 +392,13 @@ async function runStartupWaterfall(
 
 // ── Build Model ────────────────────────────────────────────
 /**
- * Create a LangChain chat model based on the provider in agent.json.
+ * 基于 agent.json 配置的 OpenAI 兼容端点构建模型；provider 仅作标识。
  *
- * Currently supports:
- *   - deepseek → @langchain/deepseek ChatDeepSeek
- *
- * Extend with additional providers as needed.
+ * 任何兼容 OpenAI chat/completions 协议的端点均可接入：
+ * base_url 指向端点，name 为模型 ID，api_key_env 指定密钥环境变量。
  */
 async function createModel(config: AgentConfig, logger: Logger) {
-    const { provider, name, temperature, max_tokens, api_key_env } =
+    const { name, base_url, temperature, max_tokens, api_key_env } =
         config.model;
 
     const apiKey = process.env[api_key_env];
@@ -409,22 +408,17 @@ async function createModel(config: AgentConfig, logger: Logger) {
         );
     }
 
-    switch (provider) {
-        case "deepseek": {
-            const { ChatDeepSeek } = await import("@langchain/deepseek");
-            logger.info(`创建模型: deepseek/${name} (temperature=${temperature})`);
-            return new ChatDeepSeek({
-                apiKey,
-                model: name,
-                temperature,
-                maxTokens: max_tokens,
-            });
-        }
-        default:
-            throw new Error(
-                `不支持的模型提供商: "${provider}"。当前支持: deepseek`,
-            );
-    }
+    const { ChatOpenAI } = await import("@langchain/openai");
+    logger.info(`创建模型: ${name} @ ${base_url} (temperature=${temperature})`);
+    return new ChatOpenAI({
+        apiKey,
+        model: name,
+        temperature,
+        maxTokens: max_tokens,
+        configuration: {
+            baseURL: base_url,
+        },
+    });
 }
 
 // ── main ──────────────────────────────────────────────────

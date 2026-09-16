@@ -16,7 +16,7 @@ afterAll(async () => {
   await agent.stop();
 }, 30_000);
 
-describe.skipIf(!process.env.DEEPSEEK_API_KEY)("对话流（真实后端 + LLM）", () => {
+describe.skipIf(!process.env.ZHIPU_API_KEY)("对话流（真实后端 + LLM）", () => {
   it("4.1.1 流式渲染真实对话：POST「你好」→ 文本气泡、无 error、流关闭", async () => {
     const events: SseEvent[] = [];
     const echoed = await streamChat({ message: "你好" }, (ev) => events.push(ev));

@@ -11,7 +11,7 @@
 // 测试串行执行（workers: 1）：Agent 的跨轮状态保存在内存闭包中（web.md §3.1.2），
 // 三个场景共享同一个后端实例，顺序即 README §5.1 的场景顺序。
 //
-// LLM 依赖：场景 5.1.1 / 5.1.3 的对话部分以 DEEPSEEK_API_KEY 门控（spec 内
+// LLM 依赖：场景 5.1.1 / 5.1.3 的对话部分以 ZHIPU_API_KEY 门控（spec 内
 // test.skip），无 key 时 5.1.2 仍可运行。
 
 import { defineConfig } from "@playwright/test";

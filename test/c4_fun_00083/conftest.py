@@ -84,7 +84,7 @@ class AgentStack:
     def _spawn(self) -> None:
         env = os.environ.copy()
         env["C4_SOCK_DIR"] = str(self.tmp / "socks")
-        env.setdefault("DEEPSEEK_API_KEY", "test-dummy-key")
+        env.setdefault("ZHIPU_API_KEY", "test-dummy-key")
         self.proc = subprocess.Popen(
             _agent_entry() + ["--config-dir", str(self.tmp)],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env,
@@ -115,8 +115,9 @@ def agent_stack():
     port = _free_port()
     agent_json = {
         "instance_id": INSTANCE,
-        "model": {"provider": "deepseek", "name": "deepseek-chat", "temperature": 0,
-                  "max_tokens": 4096, "api_key_env": "DEEPSEEK_API_KEY"},
+        "model": {"provider": "zhipu", "name": "glm-5.3-flash",
+                  "base_url": "https://open.bigmodel.cn/api/paas/v4", "temperature": 0,
+                  "max_tokens": 4096, "api_key_env": "ZHIPU_API_KEY"},
         "server": {"host": "127.0.0.1", "port": port, "cors_origin": "*"},
         "mcp_registry": {"path": str(tmp / "registry")},
         "shm_manager": {"binary": _find_shm_binary(), "config_path": str(tmp / "config.json")},
@@ -128,7 +129,7 @@ def agent_stack():
 
     env = os.environ.copy()
     env["C4_SOCK_DIR"] = str(tmp / "socks")
-    env.setdefault("DEEPSEEK_API_KEY", "test-dummy-key")
+    env.setdefault("ZHIPU_API_KEY", "test-dummy-key")
     shm_log = open(tmp / "shm_manager.log", "w")
     shm_proc = subprocess.Popen(
         [_find_shm_binary()], stdin=subprocess.DEVNULL,

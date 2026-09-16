@@ -66,7 +66,7 @@
 
 > **L1/L2/L3 与 agent 测试方案的 L1/L2 含义不同**：agent 方案按「是否依赖 LLM 推理」分层；
 > 本方案按「测试隔离级别」分层——L1=mock 隔离、L2=真实后端集成、L3=真实浏览器 E2E。
-> LLM 依赖只影响 L2/L3 中需要真实对话的用例，用 `describe.skipIf(!process.env.DEEPSEEK_API_KEY)`
+> LLM 依赖只影响 L2/L3 中需要真实对话的用例，用 `describe.skipIf(!process.env.ZHIPU_API_KEY)`
 > 或自定义测试标签 + `--grep` 过滤（TS 侧无 pytest.mark），无 API key 时 skip。
 
 ---
@@ -84,7 +84,7 @@
 | Playwright | L3 端到端浏览器测试 |
 | c4_agent | 真实后端（L2/L3/§6），路径通过 `C4_AGENT_PATH` 或自动查找 |
 | c4_shm_manager | L2/L3/§6 共享内存依赖 |
-| LLM API Key | `DEEPSEEK_API_KEY`（L2/L3 中 LLM 驱动用例必需） |
+| LLM API Key | `ZHIPU_API_KEY`（L2/L3 中 LLM 驱动用例必需） |
 
 ### 2.2 测试目录结构
 
@@ -230,7 +230,7 @@ shm_manager → 启动 agent → 轮询就绪 → teardown。
 > L2 需真实 `c4_agent` + `c4_shm_manager` 启动。fixture 在 Node/TS 侧**重新实现**等价逻辑（写
 > agent.json → 启动 shm_manager → 启动 agent → 轮询就绪 → teardown，对齐
 > `c4/test/agent/python/conftest.py`），**不能直接复用 Python fixture**。LLM 驱动用例用
-> `describe.skipIf(!process.env.DEEPSEEK_API_KEY)` 标记，无 `DEEPSEEK_API_KEY` 时 skip。
+> `describe.skipIf(!process.env.ZHIPU_API_KEY)` 标记，无 `ZHIPU_API_KEY` 时 skip。
 
 ### 4.1 对话流（web.md §3.1.2）
 
@@ -305,7 +305,7 @@ shm_manager → 启动 agent → 轮询就绪 → teardown。
 cd c4/test/web && npm test -- unit/
 
 # L2 集成测试（需真实后端，LLM 用例自动 skip 若无 key）
-C4_AGENT_PATH=/path/to/c4_agent DEEPSEEK_API_KEY=sk-xxx npm test -- integration/
+C4_AGENT_PATH=/path/to/c4_agent ZHIPU_API_KEY=sk-xxx npm test -- integration/
 
 # L3 端到端（Playwright，需前端构建 + 后端）
 npm run test:e2e

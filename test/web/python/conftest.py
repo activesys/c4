@@ -297,11 +297,12 @@ def write_agent_json(
     agent_config = {
         "instance_id": "c4_test",
         "model": {
-            "provider": "deepseek",
-            "name": "deepseek-chat",
+            "provider": "zhipu",
+            "name": "glm-5.3-flash",
+            "base_url": "https://open.bigmodel.cn/api/paas/v4",
             "temperature": 0,
             "max_tokens": 4096,
-            "api_key_env": "DEEPSEEK_API_KEY",
+            "api_key_env": "ZHIPU_API_KEY",
         },
         "server": {
             "host": "127.0.0.1",
@@ -690,28 +691,28 @@ def agent(
 #  Pytest Markers
 # ──────────────────────────────────────────────
 
-# llm 测试标记 — 需要 LLM API key（DEEPSEEK_API_KEY）
+# llm 测试标记 — 需要 LLM API key（ZHIPU_API_KEY）
 # 用法: @pytest.mark.llm
-# 无 DEEPSEEK_API_KEY 时自动 skip。
+# 无 ZHIPU_API_KEY 时自动 skip。
 
 
 def pytest_configure(config):
     """注册 pytest 标记。"""
     config.addinivalue_line(
         "markers",
-        "llm: 需要 LLM 推理的契约用例（DEEPSEEK_API_KEY 必需）",
+        "llm: 需要 LLM 推理的契约用例（ZHIPU_API_KEY 必需）",
     )
 
 
 def pytest_collection_modifyitems(config, items):
     """
-    llm 测试自动跳过：若 DEEPSEEK_API_KEY 未设置，标记 llm 的测试项自动 skip。
+    llm 测试自动跳过：若 ZHIPU_API_KEY 未设置，标记 llm 的测试项自动 skip。
     """
-    has_api_key = bool(os.environ.get("DEEPSEEK_API_KEY"))
+    has_api_key = bool(os.environ.get("ZHIPU_API_KEY"))
     if has_api_key:
         return
 
-    skip_llm = pytest.mark.skip(reason="DEEPSEEK_API_KEY not set — skipping LLM test")
+    skip_llm = pytest.mark.skip(reason="ZHIPU_API_KEY not set — skipping LLM test")
     for item in items:
         if "llm" in item.keywords:
             item.add_marker(skip_llm)

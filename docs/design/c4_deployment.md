@@ -231,7 +231,7 @@ cd agent/frontend && npm ci && npm run build   # tsc --noEmit && vite build → 
 │   │   └── node_modules/
 │   └── frontend/                    # Web 静态资源（vite build 产物）
 └── etc/c4/
-    ├── agent.env                    # 敏感环境变量（DEEPSEEK_API_KEY），root:c4 0640
+    ├── agent.env                    # 敏感环境变量（ZHIPU_API_KEY），root:c4 0640
     └── mcp-registry/                # MCP 注册表 JSON（只读，5 个数据路径服务）
         ├── c4_modbus_client.json
         ├── c4_iec104_client.json
@@ -388,7 +388,7 @@ Restart=always
 RestartSec=5
 StartLimitIntervalSec=0
 RuntimeDirectory=c4
-# 环境变量：DEEPSEEK_API_KEY 经 EnvironmentFile 注入
+# 环境变量：ZHIPU_API_KEY 经 EnvironmentFile 注入
 EnvironmentFile=/usr/local/etc/c4/agent.env
 NoNewPrivileges=true
 ProtectSystem=strict
@@ -484,15 +484,16 @@ sudo systemctl reset-failed c4-asfp2-client
 | `agent.json` | `~/.local/c4/agent.json` | c4 | Agent 权威配置，启动必读，缺失则 FATAL 退出 |
 | `*.service` | `/usr/lib/systemd/system/` | root:root | systemd 单元：`c4-agent.service` + 每个 MCP 服务一个单元（`c4-shm-manager` 等 6 个），定义见 §6.5 |
 | `mcp-registry/*.json` | `/usr/local/etc/c4/mcp-registry/` | root:c4 | MCP 服务注册信息（`binary_path` 指向 `/usr/local/bin/`） |
-| `agent.env` | `/usr/local/etc/c4/agent.env` | root:c4 | `DEEPSEEK_API_KEY` 等敏感环境变量，`chmod 640` |
+| `agent.env` | `/usr/local/etc/c4/agent.env` | root:c4 | `ZHIPU_API_KEY` 等敏感环境变量，`chmod 640` |
 
 `agent.json` 结构（Zod schema，见 agent/src/index.ts）：
 
 ```jsonc
 {
   "instance_id": "c4",
-  "model": { "provider": "deepseek", "name": "deepseek-chat",
-             "temperature": 0, "max_tokens": 4096, "api_key_env": "DEEPSEEK_API_KEY" },
+  "model": { "provider": "zhipu", "name": "glm-5.3-flash",
+             "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
+             "temperature": 0, "max_tokens": 4096, "api_key_env": "ZHIPU_API_KEY" },
   "server": { "host": "0.0.0.0", "port": 9988, "cors_origin": "*" },
   "mcp_registry": { "path": "/usr/local/etc/c4/mcp-registry" },
   "shm_manager": { "binary": "/usr/local/bin/c4_shm_manager",
@@ -524,7 +525,7 @@ sudo systemctl reset-failed c4-asfp2-client
 - **专用非 root 账户**：Agent 与 MCP 服务以专用非 root 账户运行（示例名 `c4`，任意名称均可，C4_RS_00015、C4_FUN_00064）。
 - **Unix socket 权限**：MCP 服务 socket 文件 `/run/c4/<service>.sock` 权限 `0660`、属主 `c4:c4`——socket 文件权限构成 uid 粒度的鉴权边界（C4_RS_00015），未授权用户无法连接。注意该边界是**主机级、uid 粒度**：全部 C4 进程（Agent 与所有 MCP 服务）共享 uid `c4`，彼此之间不做服务级隔离；如需服务级隔离，后续可引入 `SO_PEERCRED` 对端校验。
 - **最小权限**：MCP 服务仅拥有执行其数据接入任务所需权限（C4_RS_00120）。
-- **敏感信息隔离**：`DEEPSEEK_API_KEY` 存于 `agent.env`（`chmod 640`），不写入 `agent.json`。
+- **敏感信息隔离**：`ZHIPU_API_KEY` 存于 `agent.env`（`chmod 640`），不写入 `agent.json`。
 - **目录权限**：程序目录只读（0555），运行时数据仅运行账户可写（0700），见 §5.1 权限表。
 - **NoNewPrivileges / 无特权提升**：systemd 单元禁用额外权限（C4_RS_00004 不替代安全基础设施）。
 
