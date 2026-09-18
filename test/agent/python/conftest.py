@@ -262,6 +262,9 @@ class SSEEventStream:
         self._response: Any = None
         self.events: list[SSEEvent] = []
         self._collected: bool = False
+        # 空回复重试回调（由 ChatHelper.send/send_with_file 注入）：
+        # text_content() 检测到零文本时调用，返回一个已完成事件收集的新流
+        self._resend: Any = None
 
     def __enter__(self):
         # 如果 _response 已由 upload() 提前设置（绕过 __init__），直接返回
@@ -337,8 +340,24 @@ class SSEEventStream:
         为内部事件不进入对话文本。非 JSON data 原样保留。
         """
         self._collect_events()
+        text = self._text_from_events(self.events)
+        # 空回复重试（与 run_cases.py 空回复连发修复同构）：LLM 偶发零文本输出
+        # （智谱 glm 空回复抖动，func_test_case 用例 9/43 实锤）——原样重发一次
+        # 再判定；重试流自身不再重试（防连环长会话）
+        if text.strip() == "" and callable(self._resend):
+            resend = self._resend
+            self._resend = None
+            retry_stream: Any = resend()
+            if retry_stream is not None:
+                retry_stream._collect_events()
+                self.events = retry_stream.events
+                text = self._text_from_events(self.events)
+        return text
+
+    @staticmethod
+    def _text_from_events(events: list) -> str:
         parts: list[str] = []
-        for evt in self.events:
+        for evt in events:
             if evt.type not in ("assistant", "message"):
                 continue
             try:
@@ -499,7 +518,7 @@ def write_agent_json(
         "model": {
             "provider": "zhipu",
             "name": "glm-5.3-flash",
-            "base_url": "https://open.bigmodel.cn/api/paas/v4",
+            "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
             "temperature": 0,
             "max_tokens": 4096,
             "api_key_env": "ZHIPU_API_KEY",
@@ -768,6 +787,7 @@ class AgentHandle:
         stream._response = urlopen(req, timeout=120.0)
         stream._collected = False
         stream.events = []
+        stream._resend = None
         return stream
 
     def kill(self) -> None:
@@ -842,12 +862,27 @@ class ChatHelper:
         """POST /api/chat（含历史上下文），返回 SSEEventStream。"""
         history = list(self._history)
         self._history.append({"role": "user", "content": message})
-        return self._agent.chat(message, history=history)
+        stream = self._agent.chat(message, history=history)
+        # 空回复重试：同一消息 + 同一历史快照原样重发（不追加历史）
+        stream._resend = lambda: self._resend_chat(message, history)
+        return stream
+
+    def _resend_chat(self, message: str, history: list) -> SSEEventStream:
+        with self._agent.chat(message, history=history) as s:
+            s._collect_events()
+            return s
 
     def send_with_file(self, message: str, file_path: str) -> SSEEventStream:
         """POST /api/upload（含历史上下文），返回 SSEEventStream。"""
         self._history.append({"role": "user", "content": message})
-        return self._agent.upload(file_path, message)
+        stream = self._agent.upload(file_path, message)
+        stream._resend = lambda: self._resend_upload(file_path, message)
+        return stream
+
+    def _resend_upload(self, file_path: str, message: str) -> SSEEventStream:
+        with self._agent.upload(file_path, message) as s:
+            s._collect_events()
+            return s
 
     def record_response(self, text: str) -> None:
         """记录 agent 的回复文本到历史上下文。"""

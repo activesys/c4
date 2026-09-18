@@ -41,11 +41,15 @@ AGENT_JSON="$C4_DIR/agent.json"
 step() { echo "[cleanup] $*"; }
 
 # ── 1. 停止服务 ────────────────────────────────────────────
-step "停止 $SERVICE"
-systemctl stop "$SERVICE" || true
+# 新架构（独立常驻模式）：c4-agent + 每个 MCP 服务各一个 systemd 单元，
+# 必须一并停止——仅停 agent 时 MCP 服务仍持旧 shm 映射与 socket，
+# 破坏「首次启动」语义
+MCP_UNITS="c4-shm-manager c4-asfp2-server c4-asfp2-client c4-modbus-client c4-iec104-client c4-influxdb-client"
 
-# Agent 经 Stop-Start 拉起的 MCP 服务进程不随 agent 退出，
-# 残留会破坏「首次启动」语义（startup 测试 / 复测环境），一并清理
+step "停止 $SERVICE 与全部 MCP 服务单元"
+systemctl stop "$SERVICE" $MCP_UNITS 2>/dev/null || true
+
+# 兜底：单元未安装的部署形态（tar 包手工部署等 systemd 管不到的裸进程）
 step "清理残留 MCP 服务进程"
 pkill -f '/usr/local/bin/c4_' 2>/dev/null || true
 sleep 1
@@ -87,6 +91,15 @@ else
 fi
 
 # ── 5. 启动服务并自检 ──────────────────────────────────────
+# 新架构启动顺序：先 MCP 服务单元（socket 就绪）再 agent——
+# agent 启动即连接 /run/c4/*.sock 建立服务清单（不支持运行期热发现）
+step "启动全部 MCP 服务单元"
+systemctl start $MCP_UNITS
+for _ in $(seq 1 10); do
+    [ -S "/run/c4/c4_shm_manager.sock" ] && break
+    sleep 1
+done
+
 step "启动 $SERVICE"
 systemctl start "$SERVICE"
 
