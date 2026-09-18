@@ -1,6 +1,6 @@
 # C4 架构设计
 
-> **版本**：v0.4.0 | **最后更新**：2026-07-15
+> **版本**：v0.4.1 | **最后更新**：2026-09-17
 
 ---
 
@@ -397,6 +397,7 @@ flowchart TB
 
 每个 shm_id **只有一个写入者**（产生数据的采集 MCP），
 可有**多个读取者**（转发 MCP 或其他消费者）。
+多读者的典型场景是多下游共享读——同一份数据同时送往多个目标（见 §3.1.3 消费模式 ②）。
 
 ### 2.4.2 Seqlock 协议
 
@@ -853,6 +854,71 @@ writer 与 reader 数组均为空。
 补发「上次变更已完成」的通知（C4_RS_00067）。config.json 仅由 Agent 维护，
 进程外手工修改不受支持——ALREADY_RUNNING 的一致性保证以此为前提。
 
+### 3.1.3 数据路径实例模型：多实例与多下游
+
+（对应需求 C4_RS_00086 多源并行采集、C4_RS_00087 多目标并行转发）
+
+**实例模型**：config.json 中每个数据路径 MCP Server 的配置段是**实例数组**——一个元素
+对应一个数据路径实例（一条设备连接或一个转发目标），实例由 `id`（全局唯一）与 `name`
+（展示用）标识。Writer 实例的点位经 `{service_id}.{point_id}` 全局 key 暴露；Reader 实例
+经 `key` 字段引用 Writer 点位，由 `c4_shm_manager` 匹配回填 shm_id（§3.2.4/§3.2.5）。
+进程与实例的关系遵循 §3.1.1 生命周期双层模型：进程常驻，数据路径实例由 start/stop
+按配置整体加载与卸载；`instance_id` 工具参数是 C4 实例级共享内存段名（取自 agent.json），
+**不是**数据路径实例标识——数据路径实例只存在于 config.json 与服务内状态中。
+
+**多源采集（C4_RS_00086）**支持两种形态，可自由组合：
+
+- **a) 同协议多实例**：同一 MCP Server 配置段内多个实例，各对应一台同协议设备
+  （如两台 Modbus 风机 SCADA 各一个实例）；
+- **b) 异协议多服务**：不同 MCP Server 并行采集（如 c4_modbus_client 与
+  c4_iec104_client 并存）。
+
+各实例独立连接、独立重连、互不干扰；实例数上限受 C4_RS_00210 约束。
+
+**多下游转发（C4_RS_00087）**同样支持两种形态：
+
+- **a) 同服务多实例**：同一 Reader MCP Server 配置段内多个实例，分别面向不同目标
+  （如两个 c4_influxdb_client 实例写不同数据库）；
+- **b) 异服务并存**：不同 Reader MCP Server 并行消费（如 c4_asfp2_client 协议转发与
+  c4_influxdb_client 数据库入库并存）。
+
+**消费模式**：Reader 实例对 Writer 点位的消费分两种，均为合法形态：
+
+- **① 点表不相交**：各 Reader 实例引用互不重叠的 Writer 点位集合（如两个
+  c4_asfp2_client 分别转发不同风机的点位）；
+- **② 共享读**：多个 Reader 实例引用同一批 Writer 点位（同一份数据同时送往多个目标）。
+  这是 §2.4.1 单写多读模型的直接应用——shm_id 层面单写多读，各 Reader 持有独立的
+  Seqlock 读侧校验与读取节奏，零拷贝、互不干扰；Writer 与共享内存不感知 Reader 数量，
+  新增 Reader 不需要 Writer 侧任何配合。
+
+**校验规则**（与实现一致）：
+
+| 场景 | 结果 |
+|------|------|
+| 同一 Reader 实例内重复引用同一 shm 点 | 配置校验拒绝（`INVALID_POINT: duplicate shm_id`，c4_influxdb_client 等 Reader 服务的实例内查重）——实例内重复无语义 |
+| 不同 Reader 实例（同服务跨实例或跨服务）引用同一 Writer 点 | **合法**——共享读（消费模式 ②），各实例独立校验、互不影响 |
+| Reader 引用不存在的 Writer key | adjust_shm 阶段 key 无法匹配，拒绝下发 |
+| 两个 Writer 点的 `{service_id}.{point_id}` 全局 key 重复 | c4_shm_manager 拒绝（`DUPLICATE_KEY`，见 c4_shm_manager.md） |
+
+**操作粒度与新增下游实例**：start/stop 是服务级全量操作（§3.3.1），运行中的服务再次
+start 幂等返回 ALREADY_RUNNING（不重载配置）。因此**运行中新增 Reader 实例**的操作
+序列为：`stop（该服务全量实例卸载）→ Agent 更新 config.json → adjust_shm（有新增
+点引用时）→ start（全量实例按新配置加载）`。该序列的影响边界：
+
+- 该服务的全部 Reader 实例转发短暂中断（一个 start 周期，秒级）；
+- 共享内存与 Writer 不受影响——数据持续写入，重启后的 Reader 从当前快照恢复消费
+  （§2.4.2 Seqlock 保证读到的总是完整帧；无历史回放，消费语义为快照）；
+- 其他 MCP 服务（含 Writer 与异服务 Reader）不受任何影响。
+
+选择服务级全量粒度是有意取舍：数据路径 MCP 不做实例级热加载，以全量重启换取实现的
+确定性与简单性（C4_RS_00034）；中断窗口短且对读侧无数据损失。若未来某 Reader 场景
+对连续性有硬要求，应通过新增服务实例（异服务并存形态 b）承载新目标，而非扩展热加载
+语义。
+
+**故障隔离**：单个 Reader 实例故障（如目标库不可达）按其服务既有重连/重试策略自主
+恢复，不影响共享内存数据、Writer 与其他 Reader 实例；目标恢复后自动从当前快照继续
+消费（与 C4_RS_00242 优雅降级一致）。
+
 ---
 
 ## 3.2 配置文件（示例：~/.local/c4/config.json）
@@ -901,6 +967,7 @@ start 等工具被调用时，各 MCP Server 读取文件中同名顶层 key 对
 | 字段 | 类型 | 含义 |
 |------|------|------|
 | `id` | string | 采集点标识符。`{service_id}.{point_id}` 构成全局唯一 key，供 Reader 端通过 `key` 字段引用 |
+`name` | string | 点名（用户提供，必填）：点的业务名称，Agent 原样保存——描述查重与对点展示的依据；Go MCP 服务不消费此字段
 | `uid` | integer | 单元标识符（设备地址） |
 | `addr` | integer | Modbus 地址 |
 | `fun` | integer | Modbus 功能码 |
@@ -936,6 +1003,7 @@ start 等工具被调用时，各 MCP Server 读取文件中同名顶层 key 对
 | 字段 | 类型 | 含义 |
 |------|------|------|
 | `id` | string | 采集点标识符。`{service_id}.{point_id}` 构成全局唯一 key |
+`name` | string | 点名（用户提供，必填）：点的业务名称，Agent 原样保存——描述查重与对点展示的依据；Go MCP 服务不消费此字段
 | `addr` | integer | 104 地址（信息体地址 IOA） |
 | `shm_id` | integer | 全局 shm_id，默认 0（未分配），由 `c4_shm_manager` 分配后回填 |
 
@@ -965,6 +1033,7 @@ start 等工具被调用时，各 MCP Server 读取文件中同名顶层 key 对
 | 字段 | 类型 | 含义 |
 |------|------|------|
 | `key` | string | 引用的 Writer 采集点标识，格式为 `{service_id}.{point_id}`（如 `hnals_1_scada.windspeed`）。`c4_shm_manager` 根据此 key 填入与 Writer 端相同的 shm_id |
+| `name` | string | 转发点名称（必填）：未提供时按映射关系继承对应采集点的点名；Go MCP 服务不消费此字段 |
 | `addr` | integer | ASFP2 地址（协议中的 key） |
 | `shm_id` | integer | 全局 shm_id，默认 0（未分配），由 `c4_shm_manager` 通过 key 匹配 Writer 后填入 |
 
@@ -1150,7 +1219,7 @@ IEC104 采集（2 个主变 RTU）和 ASFP2 转发（到中心侧数据库和第
 `c4_iec104_client`、`c4_asfp2_server`、`c4_asfp2_client`、`c4_influxdb_client`）
 均应实现的通用生命周期接口，供 Agent 在 Stop-Start 协议和故障恢复中使用。
 
-**操作粒度**：`stop` 和 `start` 的操作对象是该 MCP 服务进程内的**全部数据路径实例**（进程本身为独立系统服务、常驻运行，不随 `stop` 退出——见 §3.1.1 生命周期双层模型）。`stop` 关闭所有数据路径并销毁实例状态，`start` 重新加载配置并启动全部实例。共享内存级别的调整由 `c4_shm_manager` 的 `adjust_shm(instance_id, config_path)` 工具负责。Agent 经由 Unix socket 上的 MCP 会话调用这些工具；Agent 退出不影响已启动的实例继续运行。
+**操作粒度**：`stop` 和 `start` 的操作对象是该 MCP 服务进程内的**全部数据路径实例**（进程本身为独立系统服务、常驻运行，不随 `stop` 退出——见 §3.1.1 生命周期双层模型）。`stop` 关闭所有数据路径并销毁实例状态，`start` 重新加载配置并启动全部实例。共享内存级别的调整由 `c4_shm_manager` 的 `adjust_shm(instance_id, config_path)` 工具负责。Agent 经由 Unix socket 上的 MCP 会话调用这些工具；Agent 退出不影响已启动的实例继续运行。运行中新增/下线单个 Reader 实例的操作序列与影响边界见 §3.1.3。
 
 **空配置段语义**：config.json 中无该服务的配置段（或为空数组）＝期望状态为零实例，
 属合法期望，`start` 幂等返回 success，不得作为错误（零实例报错会误触发回滚级联，
