@@ -167,6 +167,10 @@ export function useChatStream(): UseChatStreamReturn {
       setAssistantText("");
       setToolCards([]);
       setError(null);
+      // 新用户轮次解除按钮武装：planArmed 只在「本轮产出结构化方案」时重新置真。
+      // 否则历史方案的武装残留 + 提问文本中的「请确认」字样会让确认按钮
+      // 在信息收集阶段提前弹出（func_test_case 用例 10，2026-09-17 实测）
+      setPlanArmed(false);
       setStatus("sending");
 
       try {
@@ -189,6 +193,11 @@ export function useChatStream(): UseChatStreamReturn {
                     m.id === agentId ? { ...m, content: m.content + content } : m,
                   ),
                 );
+                // 执行闸门拒绝的提示文本（「…是否确认执行？」）以 text 事件到达
+                // （该路径无 error 事件）→ 重新武装确认按钮，供用户再次点击
+                if (content.includes("是否确认执行")) {
+                  setPlanArmed(true);
+                }
                 break;
               }
               case "tool_call": {
@@ -235,6 +244,12 @@ export function useChatStream(): UseChatStreamReturn {
                   typeof ev.data.message === "string"
                     ? ev.data.message
                     : "对话出错";
+                // 执行闸门拒绝（用户未点确认按钮）→ 重新武装按钮：拒绝文案含
+                // 「是否确认执行」句式，按钮须重现供用户再次点击确认
+                // （func_test_case 用例 7 修复 C 的按钮确定性重现）
+                if (msg.includes("未收到确认按钮消息")) {
+                  setPlanArmed(true);
+                }
                 setError(msg);
                 setStatus("error");
                 setMessages((prev) => [

@@ -116,9 +116,22 @@ export function createApp(options: AppOptions): express.Application {
 
     // 4. Static frontend hosting (optional; design §4.3 / §5.1)
     if (frontendDir && existsSync(frontendDir)) {
-        app.use(express.static(frontendDir));
+        // 缓存策略：index.html 不缓存（每次发布后浏览器必须取新清单，防止旧
+        // bundle 残留导致新功能不生效）；带哈希的 assets 长缓存（内容不变）。
+        app.use(
+            express.static(frontendDir, {
+                setHeaders(res, filePath) {
+                    if (filePath.endsWith(".html")) {
+                        res.setHeader("Cache-Control", "no-cache");
+                    } else {
+                        res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+                    }
+                },
+            }),
+        );
         app.use((req, res, next) => {
             if (req.method === "GET" && !req.path.startsWith("/api/")) {
+                res.setHeader("Cache-Control", "no-cache");
                 res.sendFile(path.join(frontendDir, "index.html"));
             } else {
                 next();
