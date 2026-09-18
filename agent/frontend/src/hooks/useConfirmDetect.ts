@@ -12,14 +12,7 @@
 //   - "请确认"
 //   - "请确认是否按方案执行"
 //
-// The hook itself is the React glue around matchConfirmPhrase:
-//   - On every assistant-text update, recompute visibility.
-//   - On confirm: send `CONFIRM_KEYWORD` as a plain message.
-//   - On cancel: send `CANCEL_KEYWORD` as a plain message.
-// Neither path uses interrupt/resume — see web.md §3.1.3 「不依赖任何
-// interrupt/resume 机制」.
 
-import { useMemo } from "react";
 
 /** Literal text sent as a plain chat message when the user clicks 「确认」.
  *
@@ -66,38 +59,4 @@ export function buttonDisplayLabel(text: string): string | null {
   if (text.startsWith(CONFIRM_KEYWORD)) return "确认";
   if (text.startsWith(CANCEL_KEYWORD)) return "取消，不执行";
   return null;
-}
-
-/** Hook signature for consumers — kept stable for tests. */
-export interface ConfirmSend {
-  (message: string, history?: Array<{ role: string; content: string }>): void;
-}
-
-export interface UseConfirmDetectResult {
-  visible: boolean;
-  onConfirm: (history?: Array<{ role: string; content: string }>) => void;
-  onCancel: (history?: Array<{ role: string; content: string }>) => void;
-}
-
-/**
- * React hook — call from the chat view to derive button visibility and
- * memoized onClick handlers that POST the keyword as a plain chat message.
- *
- * @param assistantText  Full accumulated text of the current agent bubble.
- * @param send           Caller-provided send function (POST /api/chat).
- */
-export function useConfirmDetect(
-  assistantText: string,
-  send: ConfirmSend,
-): UseConfirmDetectResult {
-  const visible = useMemo(() => matchConfirmPhrase(assistantText), [assistantText]);
-
-  const onConfirm = (history?: Array<{ role: string; content: string }>) => {
-    send(CONFIRM_KEYWORD, history);
-  };
-  const onCancel = (history?: Array<{ role: string; content: string }>) => {
-    send(CANCEL_KEYWORD, history);
-  };
-
-  return { visible, onConfirm, onCancel };
 }

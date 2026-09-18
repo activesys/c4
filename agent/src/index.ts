@@ -518,26 +518,6 @@ async function main(): Promise<void> {
         // Non-fatal: agent can still start, just with reduced service catalog
     }
 
-    // ── Step 3: Build system prompt with service catalog ──
-    const serviceCatalog = registry.getServiceCatalog();
-    const promptTemplatePath = new URL(
-        "../src/super_worker/prompts/system.txt",
-        import.meta.url,
-    ).pathname;
-
-    let systemPrompt: string;
-    try {
-        const template = await readFile(promptTemplatePath, "utf-8");
-        systemPrompt = template.replace("{{ service_catalog }}", serviceCatalog);
-        logger.debug("系统提示模板已加载并注入 service_catalog");
-    } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : String(err);
-        logger.error(`无法读取系统提示模板: ${msg}`);
-        // Fallback: use raw catalog as minimal prompt
-        // eslint-disable-next-line @typescript-eslint/no-unused-vars -- systemPrompt 构造后未注入任何 agent：接线与否属行为决策，待产品确认
-        systemPrompt = `你是 C4 Agent。\n\n${serviceCatalog}`;
-    }
-
     // ── Step 4: Setup MCP manager（Unix socket 客户端；服务清单启动时确立）──
     const sockDir = resolveSockDir();
     const mcpManager = new C4McpManager(registry, sockDir, logger);

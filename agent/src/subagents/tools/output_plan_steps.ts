@@ -514,12 +514,12 @@ function validate_runtime_input(
 // 增量继承（func_test_case 用例 16/21/22）：devices/forward_targets 命中已接入实例时，
 // 从现有配置继承缺失字段（port/ip 等），点表仅保留新增 addr——已接入实例的
 // 必填字段不再要求用户重复提供，LLM 的自然增量表述得以通过强校验。
-// ── 增量变更三查（2026-09-17 用户裁定，func_test_case 用例 10）───────
-// ① 转发配对强制：新增采集点必须同时追加一一对应的转发点——不进行转发的点
-//    不允许采集；用户未提供转发地址时由错误信息引导 LLM 询问，禁止编造
-// ② 采集点名必填：新增/修改的采集点必须携带用户提供的点名
-// ③ 描述查重澄清：新增点与既有点（或同批点）描述相同而地址不同 → 必须向用户
-//    澄清（两个不同测点，还是重复描述？），禁止静默去重
+// ── 增量变更校验（2026-09-17 用户裁定，func_test_case 用例 10）───────
+// 此处仅保留 steps 构造前的两类判定；转发配对、描述查重、转发实例归属
+// 由 validate_step_invariants 在步骤层统一判定（devices/changes 双路径）。
+// ① 采集点点名必填：无 name 且无 id、或 id 为身份字段生成名
+//    （generate_point_id 的 p_ 前缀约定）→ 说明用户没有提供点名
+// ② 转发点名继承：批内对应采集点优先，其次既有点（名称缺省时回退采集点 id）
 function validate_increment_changes(
     changes: z.infer<typeof planStepsInputSchema>["changes"],
     current_config: Record<string, unknown> | null,
@@ -527,8 +527,6 @@ function validate_increment_changes(
 ): string | null {
     if (!changes || changes.length === 0) return null;
 
-    let writer_add = 0;
-    let reader_add = 0;
     const batch_writer: Array<{
         svc: string;
         inst: string;
@@ -546,28 +544,11 @@ function validate_increment_changes(
         for (const p of c.points ?? []) {
             const rec = p as unknown as Record<string, unknown>;
             if (role === "writer") {
-                writer_add += 1;
                 batch_writer.push({ svc: c.service_type, inst: inst_id, rec });
             } else if (role === "reader") {
-                reader_add += 1;
                 batch_reader.push({ rec });
             }
         }
-    }
-
-    if (writer_add > 0 && reader_add === 0) {
-        return (
-            "新增采集点必须同时转发——不进行转发的点不允许采集。" +
-            "请在对应的转发实例上（changes 中 action=modify 的转发服务实例）追加与新增采集点" +
-            "一一对应的转发点：key 引用新采集点、addr 为用户提供的转发地址。" +
-            "用户未提供转发地址时必须先询问，禁止自行推断「无需转发」或编造地址"
-        );
-    }
-    if (writer_add > 0 && reader_add !== writer_add) {
-        return (
-            `新增采集点 ${writer_add} 个，但新增转发点只有 ${reader_add} 个——` +
-            "采集点与转发点必须一一对应（顺序一致），请补齐转发点表"
-        );
     }
 
     for (const w of batch_writer) {
@@ -575,59 +556,13 @@ function validate_increment_changes(
         const name_raw =
             typeof rec["name"] === "string" ? (rec["name"] as string).trim() : "";
         const pid = typeof rec["id"] === "string" ? rec["id"] : "";
-        // 无 name 且无 id，或 id 为身份字段生成名（generate_point_id 的 p_ 前缀约定）
-        // → 说明用户没有提供点名
         if (name_raw === "" && (pid === "" || pid.startsWith("p_"))) {
             return (
                 "新增采集点缺少点名——点名是必填项，请向用户逐点询问后重试，禁止编造"
             );
         }
-        const svc_instances =
-            (current_config?.[w.svc] as Record<string, unknown>[] | undefined) ??
-            [];
-        const existing = svc_instances.find((i) => i["id"] === w.inst);
-        const pts =
-            (existing?.["points"] as Record<string, unknown>[] | undefined) ?? [];
-        for (const q of pts) {
-            const same_id = pid !== "" && String(q["id"] ?? "") === pid;
-            const same_name =
-                name_raw !== "" &&
-                typeof q["name"] === "string" &&
-                (q["name"] as string) === name_raw;
-            const addr_same = q["addr"] !== undefined && q["addr"] === rec["addr"];
-            if ((same_id || same_name) && !addr_same) {
-                const inst_name = String(existing?.["name"] ?? w.inst);
-                return (
-                    `新增点与 ${inst_name} 已有点「${q["name"] ?? q["id"]}」` +
-                    `（地址 ${q["addr"]}）描述相同（新点地址 ${rec["addr"]}）。` +
-                    "请向用户澄清：这是两个不同的测点吗？" +
-                    "若是，请使用可区分的点名（如 风速2 / 机舱风速）后重试；" +
-                    "若否，请与用户确认修改既有点的正确方式"
-                );
-            }
-        }
     }
 
-    for (let i = 0; i < batch_writer.length; i++) {
-        for (let j = i + 1; j < batch_writer.length; j++) {
-            const a = batch_writer[i].rec;
-            const b = batch_writer[j].rec;
-            const an = typeof a["name"] === "string" ? a["name"] : "";
-            const bn = typeof b["name"] === "string" ? b["name"] : "";
-            const ai = typeof a["id"] === "string" ? a["id"] : "";
-            const bi = typeof b["id"] === "string" ? b["id"] : "";
-            const same = (an !== "" && an === bn) || (ai !== "" && ai === bi);
-            if (same && a["addr"] !== b["addr"]) {
-                return (
-                    `同批新增的两个采集点描述相同（「${an || ai}」地址 ` +
-                    `${a["addr"]} 与 ${b["addr"]}）——请向用户澄清是否为两个不同测点，` +
-                    "并提供可区分的点名"
-                );
-            }
-        }
-    }
-
-    // 转发点名继承：批内对应采集点优先，其次既有点（名称缺省时回退采集点 id）
     for (const r of batch_reader) {
         const rec = r.rec;
         if (typeof rec["name"] === "string" && (rec["name"] as string) !== "") {
@@ -670,15 +605,6 @@ function validate_increment_changes(
     return null;
 }
 
-// ── 步骤级不变式（2026-09-17 用户裁定，func_test_case 用例 10）───────
-// devices 与 changes 两条路径统一执行（LLM 走哪条都必须过闸）：
-// ① 转发配对：存在新增采集点时必须存在一一对应的新增转发点——不进行转发
-//    的点不允许采集
-// ② 描述查重：新增采集点与既有点同 id、同名、或 id 为「既有点id_编号」变体
-//    且地址不同 → 必须向用户澄清，禁止静默去重（防改名绕过：
-//    windspeed_2 / winddirection_1010 均命中变体规则）
-// ③ 转发归属：writer 实例已有引用它的 reader 实例时，新增转发点必须追加到
-//    该既有实例，不得新建转发实例
 function validate_step_invariants(
     steps: ServiceStep[],
     current_config: Record<string, unknown> | null,

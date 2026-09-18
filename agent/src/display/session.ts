@@ -118,7 +118,6 @@ export class DisplayService {
 
     private session: ActiveSession | null = null;
     private lastSession: LastSessionSummary | null = null;
-    private seqCounter = 0;
 
     constructor(options: DisplayServiceOptions) {
         this.manager = options.manager;

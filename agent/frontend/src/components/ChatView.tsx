@@ -25,9 +25,7 @@ export function ChatView(): JSX.Element {
   const { status, messages, toolCards, assistantText, send, streamEcho, endEcho, planArmed, getConversationId, setConversationId } =
     useChatStream();
   const [draft, setDraft] = useState("");
-  const [uploadMessage, setUploadMessage] = useState(
-    "请解析此文件中的设备信息",
-  );
+  const uploadMessage = "请解析此文件中的设备信息";
   const listRef = useRef<HTMLDivElement | null>(null);
 
   // 新消息/工具卡片/流式内容更新时自动滚动到底部
