@@ -239,8 +239,18 @@ function generate_steps(
             const name_raw =
                 typeof raw["name"] === "string" ? (raw["name"] as string).trim() : "";
 
+            // 点名必填（2026-09-17 用户裁定）：缺少点名必须询问用户，禁止从身份字段
+            // 静默生成无名点——点名是点的业务身份（描述查重、对点展示的依据）
+            if (name_raw === "") {
+                return {
+                    steps,
+                    warnings,
+                    fatal: `设备 "${dev.name}" 存在缺少点名的采集点——点名是必填项，请向用户逐点询问后重试，禁止编造`,
+                };
+            }
+
             let id: string;
-            if (name_raw === "" || (!IDENTIFIER_RE.test(name_raw) && name_raw.length <= MAX_IDENTIFIER_LENGTH)) {
+            if (!IDENTIFIER_RE.test(name_raw) && name_raw.length <= MAX_IDENTIFIER_LENGTH) {
                 if (identity_fields.length === 0) {
                     return {
                         steps,
@@ -281,6 +291,9 @@ function generate_steps(
             }
 
             const pt: Record<string, unknown> = { id, shm_id: 0 };
+            // 点名随点持久化（2026-09-17 裁定）：config.json 保存用户原始描述，
+            // 作为跨会话描述查重与对点展示的依据；Go 侧 json.Unmarshal 忽略该字段
+            pt["name"] = name_raw;
             for (const [k, v] of Object.entries(raw)) {
                 if (k !== "name") pt[k] = v;
             }
@@ -368,7 +381,18 @@ function generate_steps(
                     if (ft_points_raw) {
                         const src = ft_points_raw[point_index] ?? {};
                         for (const f of required_fields) {
-                            const v = src[f];
+                            let v = src[f];
+                            // 转发点名称继承（2026-09-17 用户裁定）：用户未提供转发端
+                            // 点名时，按映射关系取对应采集点的点名（采集点名此时已必填）
+                            if (
+                                f === "name" &&
+                                (v === undefined || v === null || v === "")
+                            ) {
+                                const w = pt as unknown as Record<string, unknown>;
+                                v = typeof w["name"] === "string" && w["name"] !== ""
+                                    ? w["name"]
+                                    : String(pt.id);
+                            }
                             if (v === undefined || v === null || v === "") {
                                 return {
                                     steps,
@@ -378,6 +402,12 @@ function generate_steps(
                             }
                             rp[f] = v;
                         }
+                    } else if (required_fields.includes("name")) {
+                        // 用户未提供转发点表业务字段之外的点清单时，名称按映射继承
+                        const w = pt as unknown as Record<string, unknown>;
+                        rp["name"] = typeof w["name"] === "string" && w["name"] !== ""
+                            ? w["name"]
+                            : String(pt.id);
                     }
                     reader_points.push(rp as unknown as ServicePoint);
                     point_index++;
@@ -484,6 +514,289 @@ function validate_runtime_input(
 // 增量继承（func_test_case 用例 16/21/22）：devices/forward_targets 命中已接入实例时，
 // 从现有配置继承缺失字段（port/ip 等），点表仅保留新增 addr——已接入实例的
 // 必填字段不再要求用户重复提供，LLM 的自然增量表述得以通过强校验。
+// ── 增量变更三查（2026-09-17 用户裁定，func_test_case 用例 10）───────
+// ① 转发配对强制：新增采集点必须同时追加一一对应的转发点——不进行转发的点
+//    不允许采集；用户未提供转发地址时由错误信息引导 LLM 询问，禁止编造
+// ② 采集点名必填：新增/修改的采集点必须携带用户提供的点名
+// ③ 描述查重澄清：新增点与既有点（或同批点）描述相同而地址不同 → 必须向用户
+//    澄清（两个不同测点，还是重复描述？），禁止静默去重
+function validate_increment_changes(
+    changes: z.infer<typeof planStepsInputSchema>["changes"],
+    current_config: Record<string, unknown> | null,
+    registry: McpServiceRegistry,
+): string | null {
+    if (!changes || changes.length === 0) return null;
+
+    let writer_add = 0;
+    let reader_add = 0;
+    const batch_writer: Array<{
+        svc: string;
+        inst: string;
+        rec: Record<string, unknown>;
+    }> = [];
+    const batch_reader: Array<{ rec: Record<string, unknown> }> = [];
+
+    for (const c of changes) {
+        if (c.action === "delete") continue;
+        const entry = registry.queryRegistry(c.service_type);
+        const role = entry?.role;
+        const inst_id = String(
+            (c.instance as Record<string, unknown>)["id"] ?? "",
+        );
+        for (const p of c.points ?? []) {
+            const rec = p as unknown as Record<string, unknown>;
+            if (role === "writer") {
+                writer_add += 1;
+                batch_writer.push({ svc: c.service_type, inst: inst_id, rec });
+            } else if (role === "reader") {
+                reader_add += 1;
+                batch_reader.push({ rec });
+            }
+        }
+    }
+
+    if (writer_add > 0 && reader_add === 0) {
+        return (
+            "新增采集点必须同时转发——不进行转发的点不允许采集。" +
+            "请在对应的转发实例上（changes 中 action=modify 的转发服务实例）追加与新增采集点" +
+            "一一对应的转发点：key 引用新采集点、addr 为用户提供的转发地址。" +
+            "用户未提供转发地址时必须先询问，禁止自行推断「无需转发」或编造地址"
+        );
+    }
+    if (writer_add > 0 && reader_add !== writer_add) {
+        return (
+            `新增采集点 ${writer_add} 个，但新增转发点只有 ${reader_add} 个——` +
+            "采集点与转发点必须一一对应（顺序一致），请补齐转发点表"
+        );
+    }
+
+    for (const w of batch_writer) {
+        const rec = w.rec;
+        const name_raw =
+            typeof rec["name"] === "string" ? (rec["name"] as string).trim() : "";
+        const pid = typeof rec["id"] === "string" ? rec["id"] : "";
+        // 无 name 且无 id，或 id 为身份字段生成名（generate_point_id 的 p_ 前缀约定）
+        // → 说明用户没有提供点名
+        if (name_raw === "" && (pid === "" || pid.startsWith("p_"))) {
+            return (
+                "新增采集点缺少点名——点名是必填项，请向用户逐点询问后重试，禁止编造"
+            );
+        }
+        const svc_instances =
+            (current_config?.[w.svc] as Record<string, unknown>[] | undefined) ??
+            [];
+        const existing = svc_instances.find((i) => i["id"] === w.inst);
+        const pts =
+            (existing?.["points"] as Record<string, unknown>[] | undefined) ?? [];
+        for (const q of pts) {
+            const same_id = pid !== "" && String(q["id"] ?? "") === pid;
+            const same_name =
+                name_raw !== "" &&
+                typeof q["name"] === "string" &&
+                (q["name"] as string) === name_raw;
+            const addr_same = q["addr"] !== undefined && q["addr"] === rec["addr"];
+            if ((same_id || same_name) && !addr_same) {
+                const inst_name = String(existing?.["name"] ?? w.inst);
+                return (
+                    `新增点与 ${inst_name} 已有点「${q["name"] ?? q["id"]}」` +
+                    `（地址 ${q["addr"]}）描述相同（新点地址 ${rec["addr"]}）。` +
+                    "请向用户澄清：这是两个不同的测点吗？" +
+                    "若是，请使用可区分的点名（如 风速2 / 机舱风速）后重试；" +
+                    "若否，请与用户确认修改既有点的正确方式"
+                );
+            }
+        }
+    }
+
+    for (let i = 0; i < batch_writer.length; i++) {
+        for (let j = i + 1; j < batch_writer.length; j++) {
+            const a = batch_writer[i].rec;
+            const b = batch_writer[j].rec;
+            const an = typeof a["name"] === "string" ? a["name"] : "";
+            const bn = typeof b["name"] === "string" ? b["name"] : "";
+            const ai = typeof a["id"] === "string" ? a["id"] : "";
+            const bi = typeof b["id"] === "string" ? b["id"] : "";
+            const same = (an !== "" && an === bn) || (ai !== "" && ai === bi);
+            if (same && a["addr"] !== b["addr"]) {
+                return (
+                    `同批新增的两个采集点描述相同（「${an || ai}」地址 ` +
+                    `${a["addr"]} 与 ${b["addr"]}）——请向用户澄清是否为两个不同测点，` +
+                    "并提供可区分的点名"
+                );
+            }
+        }
+    }
+
+    // 转发点名继承：批内对应采集点优先，其次既有点（名称缺省时回退采集点 id）
+    for (const r of batch_reader) {
+        const rec = r.rec;
+        if (typeof rec["name"] === "string" && (rec["name"] as string) !== "") {
+            continue;
+        }
+        const key = String(rec["key"] ?? "");
+        const dot = key.indexOf(".");
+        if (dot <= 0) continue;
+        const w_inst = key.slice(0, dot);
+        const w_pid = key.slice(dot + 1);
+        let inherited = "";
+        for (const w of batch_writer) {
+            if (w.inst !== w_inst) continue;
+            if (String(w.rec["id"] ?? "") !== w_pid) continue;
+            const wn = typeof w.rec["name"] === "string" ? w.rec["name"] : "";
+            inherited = wn !== "" ? wn : w_pid;
+            break;
+        }
+        if (inherited === "" && current_config) {
+            for (const [st, list] of Object.entries(current_config)) {
+                if (st === "c4_shm_manager" || !Array.isArray(list)) continue;
+                for (const inst of list as Record<string, unknown>[]) {
+                    if (inst["id"] !== w_inst) continue;
+                    const pts =
+                        (inst["points"] as Record<string, unknown>[] | undefined) ??
+                        [];
+                    for (const q of pts) {
+                        if (String(q["id"] ?? "") !== w_pid) continue;
+                        const qn = typeof q["name"] === "string" ? q["name"] : "";
+                        inherited = qn !== "" ? qn : w_pid;
+                        break;
+                    }
+                }
+                if (inherited !== "") break;
+            }
+        }
+        if (inherited !== "") rec["name"] = inherited;
+    }
+
+    return null;
+}
+
+// ── 步骤级不变式（2026-09-17 用户裁定，func_test_case 用例 10）───────
+// devices 与 changes 两条路径统一执行（LLM 走哪条都必须过闸）：
+// ① 转发配对：存在新增采集点时必须存在一一对应的新增转发点——不进行转发
+//    的点不允许采集
+// ② 描述查重：新增采集点与既有点同 id、同名、或 id 为「既有点id_编号」变体
+//    且地址不同 → 必须向用户澄清，禁止静默去重（防改名绕过：
+//    windspeed_2 / winddirection_1010 均命中变体规则）
+// ③ 转发归属：writer 实例已有引用它的 reader 实例时，新增转发点必须追加到
+//    该既有实例，不得新建转发实例
+function validate_step_invariants(
+    steps: ServiceStep[],
+    current_config: Record<string, unknown> | null,
+    registry: McpServiceRegistry,
+): string | null {
+    let writer_add = 0;
+    let reader_add = 0;
+    const writer_pts: Array<{
+        svc: string;
+        inst: string;
+        pt: Record<string, unknown>;
+    }> = [];
+    const reader_steps: ServiceStep[] = [];
+
+    for (const s of steps) {
+        if (s.action === "delete") continue;
+        const entry = registry.queryRegistry(s.service_type);
+        if (entry?.role === "writer") {
+            for (const pt of s.points) {
+                writer_add += 1;
+                writer_pts.push({
+                    svc: s.service_type,
+                    inst: String(s.instance["id"] ?? ""),
+                    pt: pt as unknown as Record<string, unknown>,
+                });
+            }
+        } else if (entry?.role === "reader") {
+            reader_add += s.points.length;
+            reader_steps.push(s);
+        }
+    }
+
+    if (writer_add > 0 && reader_add === 0) {
+        return (
+            "新增采集点必须同时转发——不进行转发的点不允许采集。" +
+            "请补充与新增采集点一一对应的转发点（转发地址须由用户提供，禁止编造），" +
+            "或先向用户询问转发地址后重新提交"
+        );
+    }
+    if (writer_add > 0 && reader_add !== writer_add) {
+        return (
+            `新增采集点 ${writer_add} 个，但新增转发点只有 ${reader_add} 个——` +
+            "采集点与转发点必须一一对应（顺序一致），请补齐转发点表"
+        );
+    }
+
+    for (const wp of writer_pts) {
+        const svc_instances =
+            (current_config?.[wp.svc] as Record<string, unknown>[] | undefined) ??
+            [];
+        const existing = svc_instances.find((i) => i["id"] === wp.inst);
+        if (!existing) continue;
+        const pid = String(wp.pt["id"] ?? "");
+        const pname = typeof wp.pt["name"] === "string" ? wp.pt["name"] : "";
+        const pts =
+            (existing["points"] as Record<string, unknown>[] | undefined) ?? [];
+        for (const q of pts) {
+            const qid = String(q["id"] ?? "");
+            const qname = typeof q["name"] === "string" ? q["name"] : "";
+            const addr_same =
+                q["addr"] !== undefined &&
+                Number(q["addr"]) === Number(wp.pt["addr"]);
+            const same_id = pid !== "" && qid !== "" && pid === qid;
+            const same_name = pname !== "" && qname !== "" && pname === qname;
+            const variant =
+                pid !== "" &&
+                qid !== "" &&
+                new RegExp(`^${qid.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}_(\\d+)$`).test(pid);
+            if ((same_id || same_name || variant) && !addr_same) {
+                const inst_name = String(existing["name"] ?? wp.inst);
+                return (
+                    `新增点与 ${inst_name} 已有点「${qname || qid}」` +
+                    `（地址 ${q["addr"]}）描述相同或仅编号不同（新点「${pname || pid}」，地址 ${wp.pt["addr"]}）。` +
+                    "请向用户澄清：这是两个不同的测点吗？" +
+                    "若是，请使用用户确认的可区分点名原样提交；" +
+                    "若否，请与用户确认修改既有点的正确方式。禁止自行改名绕过"
+                );
+            }
+        }
+    }
+
+    for (const wp of writer_pts) {
+        const w_inst = wp.inst;
+        if (w_inst === "" || !current_config) continue;
+        const existing_readers: string[] = [];
+        for (const [st, list] of Object.entries(current_config)) {
+            if (st === "c4_shm_manager" || !Array.isArray(list)) continue;
+            const entry = registry.queryRegistry(st);
+            if (entry?.role !== "reader") continue;
+            for (const inst of list as Record<string, unknown>[]) {
+                const pts =
+                    (inst["points"] as Record<string, unknown>[] | undefined) ?? [];
+                if (
+                    pts.some((p) =>
+                        String(p["key"] ?? "").startsWith(`${w_inst}.`),
+                    )
+                ) {
+                    const rid = String(inst["id"] ?? "");
+                    if (rid !== "") existing_readers.push(rid);
+                }
+            }
+        }
+        if (existing_readers.length === 0) continue;
+        for (const rs of reader_steps) {
+            const r_inst = String(rs.instance["id"] ?? "");
+            if (r_inst !== "" && !existing_readers.includes(r_inst)) {
+                return (
+                    `新增转发点必须追加到既有转发实例「${existing_readers.join("、")}」` +
+                    `（changes action=modify），不得新建转发实例「${r_inst}」——` +
+                    "同一采集实例的转发点属于同一条转发链路"
+                );
+            }
+        }
+    }
+
+    return null;
+}
+
 function inheritExistingFields(
     input: z.infer<typeof planStepsInputSchema>,
     registry: McpServiceRegistry,
@@ -705,6 +1018,16 @@ export function createOutputPlanStepsTool(
                         }
                     }
                 }
+                // 增量三查（2026-09-17 用户裁定，func_test_case 用例 10）：
+                // ① 转发配对强制 ② 采集点名必填 ③ 描述查重澄清 + 转发点名继承
+                const incr_error = validate_increment_changes(
+                    input.changes,
+                    current_config,
+                    registry,
+                );
+                if (incr_error) {
+                    return JSON.stringify({ success: false, error: incr_error });
+                }
                 const steps: ServiceStep[] = input.changes.map((c) => ({
                     action: c.action,
                     service_type: c.service_type,
@@ -713,6 +1036,19 @@ export function createOutputPlanStepsTool(
                         (p) => ({ ...p, shm_id: 0 }) as unknown as ServicePoint,
                     ),
                 }));
+                // 步骤级不变式：转发配对 / 描述查重 / 转发归属（双路径统一）
+                const step_invariants_error = validate_step_invariants(
+                    steps,
+                    current_config,
+                    registry,
+                );
+                if (step_invariants_error) {
+                    return JSON.stringify({
+                        success: false,
+                        error: step_invariants_error,
+                    });
+                }
+
                 return JSON.stringify({
                     success: true,
                     steps_count: steps.length,
@@ -747,11 +1083,31 @@ export function createOutputPlanStepsTool(
             }
 
             if (steps.length === 0) {
-                return JSON.stringify({
+                // 步骤级不变式：转发配对 / 描述查重 / 转发归属（双路径统一）
+            const step_invariants_error = validate_step_invariants(
+                steps,
+                current_config,
+                registry,
+            );
+            if (step_invariants_error) {
+                return JSON.stringify({ success: false, error: step_invariants_error });
+            }
+
+            return JSON.stringify({
                     success: false,
                     error: "未能生成任何操作步骤——请检查设备协议是否匹配 Registry 中的服务",
                     warnings,
                 });
+            }
+
+            // 步骤级不变式：转发配对 / 描述查重 / 转发归属（双路径统一）
+            const step_invariants_error = validate_step_invariants(
+                steps,
+                current_config,
+                registry,
+            );
+            if (step_invariants_error) {
+                return JSON.stringify({ success: false, error: step_invariants_error });
             }
 
             return JSON.stringify({

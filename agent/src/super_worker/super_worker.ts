@@ -488,6 +488,10 @@ export async function createC4Agent(
                 input.messages = [...storedHistory, newMsg];
             }
             let planSteps: ServiceStep[] | null = null;
+            // 闸门拒绝标记：拒绝事实须注入持久化历史——run.output.messages 里只有
+            // LLM 的（可能虚假的）完成表述，不注入则 LLM 下轮会谎报「已执行完成」
+            // （func_test_case 用例 10，2026-09-17 实测）
+            let plan_rejected = false;
             let planDeviceInfo: Record<string, unknown> | null = null;
             let planAccessPlan: Record<string, unknown> | null = null;
             let confirmOriginalContent: string | null = null;
@@ -931,6 +935,7 @@ export async function createC4Agent(
                                 "⚠️ 本次接入未执行，配置未写入。请点击下方「确认」按钮完成确认（文字回复不作为确认依据）。是否确认执行？",
                         };
                         planSteps = null;
+                        plan_rejected = true;
                     }
                 }
 
@@ -1130,6 +1135,22 @@ export async function createC4Agent(
                         .filter(
                             (m) => !(m.role === "user" && NUDGE_CONTENTS.has(m.content)),
                         );
+                    // 闸门拒绝事实注入（plan_rejected）：run.output.messages 不含
+                    // 拒绝事件（闸门在 run 之外），不注入则 LLM 下轮对拒绝毫不知情
+                    if (plan_rejected && conversation !== "") {
+                        clean.push(
+                            {
+                                role: "user",
+                                content:
+                                    "（系统提示：刚才那次执行尝试被拒绝——未收到确认按钮消息，配置未写入。此前任何「已执行完成」的表述均不成立。之后用户通过确认按钮确认时，直接重新执行方案并以本次执行结果回复，无需复述「已在上一轮执行完成」。）",
+                            },
+                            {
+                                role: "assistant",
+                                content:
+                                    "明白：本次方案未执行、配置未写入。在用户点击确认按钮完成确认之前，我不会声称它已执行完成；确认后将直接重新执行并以本次结果为准。",
+                            },
+                        );
+                    }
                     if (clean.length > MAX_HISTORY_MSGS) {
                         conversationHistories.set(
                             conversation,
