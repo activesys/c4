@@ -131,6 +131,7 @@ export interface AgentConfig {
         temperature: number;
         max_tokens: number;
         api_key_env: string;
+        thinking?: string;
     };
     server: {
         host: string;

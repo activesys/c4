@@ -65,6 +65,8 @@ const AgentConfigSchema: z.ZodType<AgentConfig> = z.object({
         temperature: z.number(),
         max_tokens: z.number(),
         api_key_env: z.string(),
+        // 智谱 glm 深度思考开关：disabled 大幅降低每轮延迟（实测 23s→5s 量级）
+        thinking: z.enum(["disabled", "enabled"]).optional(),
     }),
     server: z.object({
         host: z.string(),
@@ -400,6 +402,7 @@ async function runStartupWaterfall(
 async function createModel(config: AgentConfig, logger: Logger) {
     const { name, base_url, temperature, max_tokens, api_key_env } =
         config.model;
+    const thinking = config.model.thinking ?? "disabled";
 
     const apiKey = process.env[api_key_env];
     if (!apiKey) {
@@ -409,12 +412,22 @@ async function createModel(config: AgentConfig, logger: Logger) {
     }
 
     const { ChatOpenAI } = await import("@langchain/openai");
-    logger.info(`创建模型: ${name} @ ${base_url} (temperature=${temperature})`);
+    logger.info(
+        `创建模型: ${name} @ ${base_url} (temperature=${temperature}, thinking=${thinking})`,
+    );
+    // 智谱 Coding 端点的 glm 默认开启深度思考——每轮先生成 reasoning 再出正文，
+    // 实测每轮 23s~101s；disabled 后回到秒级。仅对智谱端点注入（其他兼容端点
+    // 可能拒绝未知参数）。
+    const modelKwargs: Record<string, unknown> =
+        base_url.includes("bigmodel.cn") && thinking === "disabled"
+            ? { thinking: { type: "disabled" } }
+            : {};
     return new ChatOpenAI({
         apiKey,
         model: name,
         temperature,
         maxTokens: max_tokens,
+        modelKwargs,
         configuration: {
             baseURL: base_url,
         },
