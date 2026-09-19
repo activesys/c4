@@ -518,7 +518,7 @@ def write_agent_json(
         "model": {
             "provider": "zhipu",
             "name": "glm-5.3-flash",
-            "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
+            "base_url": "https://open.bigmodel.cn/api/paas/v4",
             "temperature": 0,
             "max_tokens": 4096,
             "api_key_env": "ZHIPU_API_KEY",
