@@ -1,6 +1,6 @@
 # C4 Agent 系统架构设计
 
-> **版本**：v0.4.1 | **最后更新**：2026-08-29 | **父文档**：[c4_architecture.md](c4_architecture.md)
+> **版本**：v0.5.0 | **最后更新**：2026-09-19 | **父文档**：[c4_architecture.md](c4_architecture.md)
 >
 > **设计范围**：C4 Agent 系统的数据接入架构，覆盖从用户输入到 MCP 服务启动的完整数据接入流程。监控自愈等功能不在本次设计范围内。
 >
@@ -274,6 +274,140 @@ sequenceDiagram
 
     SW->>U: "接入完成！"
 ```
+
+> 注：上图是信息齐备的乐观路径。阶段门禁、提问即终局与共享校验契约的强制规则见 §2.4。
+
+## 2.4 回合状态机强化（阶段门禁 / 提问即终局 / 共享校验契约）
+
+> v0.5.0 新增。背景：2026-09-19 Modbus 场景实测与 9/12~16 E2E 用例 31 复盘暴露三类架构级失效——
+> 流程可跳站（收集阶段被整轮绕过）、提问后同回合自答自干（按钮 7 连弹、冲突未决即执行）、
+> 非法点表落盘（相邻 float32 寄存器重叠，merge 层无此规则）。本章将原先仅存在于提示词与
+> 单层校验中的契约升级为机器强制。设计原则：骨架不变（五阶段流水线 + 分层工具闸门），
+> 把"纸面约束"变成"带牙闸门"。
+
+### 2.4.1 阶段门禁（Phase Gates）
+
+AgentPhase 五态（idle / collecting / planning / confirmed / executing）从"日志记录"升级为
+"工具调用的前置约束"。
+
+**合法转移表**（`setPhase` 校验，非法转移拒绝并 LOG）：
+
+| 从 \ 到 | idle | collecting | planning | confirmed | executing |
+|---------|------|-----------|----------|-----------|-----------|
+| idle | — | ✓ | | | |
+| collecting | ✓（提问挂起/用户放弃——回合终结） | ✓（补充收集） | ✓（方案生成） | | |
+| planning | ✓（回合终结且无待确认方案） | ✓（打回重收集） | ✓（方案更新） | ✓（按钮确认） | |
+| confirmed | ✓（回合终结且无待确认方案） | ✓（确认前信息更新，方案作废） | ✓（拒绝后重新出方案） | — | ✓（开始执行） |
+| executing | ✓（完成/失败终结） | ✓（失败需补问参数） | ✓（失败重新出方案，见修复语义） | | ✓ |
+
+**工具前置条件**（工具包装层强制；违规返回 `success:false` + 指导性错误供 LLM 自我修正，不抛异常）：
+
+| 工具 | 前置条件 |
+|------|---------|
+| `output_device_info` | `phase ≠ executing`（idle/collecting/planning/confirmed 均可——planning→collecting、confirmed→collecting 的合法转移正是由本工具触发） |
+| `output_access_plan` | 本**会话**已有成功的 `output_device_info`（`deviceInfo` 非空，每次成功即刷新——跨回合复用，见 §2.3 流程与 §3.2.1 闭包注入）且 `questionPending = false` |
+| `output_plan_steps` | `phase ∈ {confirmed, planning}` 且 `userConfirmed = true` 且 `questionPending = false`（planning + userConfirmed 覆盖执行失败修复轮，见下方修复语义） |
+
+**闸门拒绝重试上限**：同一回合内同一工具的闸门拒绝累计 ≥ 2 次 → 强制结束回合，并向用户
+说明被拒原因与所需补救（防止 LLM 无限重试空转）。
+
+**执行失败修复语义**（保留用例 9 的跨回合修复流）：stop_start 失败回滚后 `phase` 默认置
+`planning`（非 idle；失败根因是缺参数需补问时经 executing→collecting，见转移表），
+`userConfirmed` **保持至下一个新 `output_access_plan` 落地**——用户
+答复修复问题的回合可直接通过 `output_plan_steps` 闸门重试执行。按钮 disarm ≠ phase 复位，
+≠ 撤销 `userConfirmed`。
+
+**重启语义**：phase / questionPending / userConfirmed 均为进程内存态——Agent 重启后复位
+（phase = idle、确认失效）；重启后的过期确认点击经非法转移拒绝（安全），用户需重走确认流程。
+
+`executing` 在 plan_steps 校验通过、进入 merge 前置位，回合终结时回 idle（当前实现缺失此置位，
+本次补齐——状态机此前从未进入过 executing）。
+
+### 2.4.2 提问即终局（questionPending）
+
+- 回合级标志 `questionPending`：**回合终结时**对每条 AI 消息的完整累积文本判定一次——
+  句末锚定（最后一句以 `？` 收尾）或句首前缀词（请提供 / 请补充 / 请确认 / 是否）命中即置位；
+  多问句轮次取保守语义——**任一消息命中即置位**（不做「以最后一条为准」的例外）；
+  **排除清单：方案确认句式（是否确认执行 / 确认执行）不置位 questionPending**——命中排除
+  清单走按钮 arm 判定（§2.4.4）；
+- 置位后本回合内 `output_access_plan` / `output_plan_steps` 一律拒绝，错误信息引导 LLM 结束回合
+  等待用户回复；用户下一条消息到达时清除；
+- 回合循环层辅助规则：collecting / planning 阶段中，某轮 LLM 仅产出文本且无工具调用 → 直接结束
+  回合（不再补跑），防止"问完又自己干"与空转轮次；**例外：回合文本命中排除清单句式（方案
+  确认句式）且本回合无成功的 `output_access_plan` → 不适用直接结束，仍注入一次强制
+  `output_access_plan` 补跑（限一次，保留用例 11 修复）**；
+- system.txt 同步硬规则（提示词双保险）："向用户提问后必须结束回合，禁止同回合继续调用
+  方案/执行类工具"。
+
+> 动机：Modbus 的 port/uid/fun/type 存在行业默认值（可猜字段），LLM 会"贴心补全"并通过仅做
+> 存在性检查的入参校验——ASFP2 时代字段不可猜，此缺陷从未显现。机器门禁对协议族无感知。
+
+### 2.4.3 共享校验契约（point_rules）
+
+点级不变式收敛到单一模块 `executor/point_rules.ts`，四层引用同一份实现，规则只写一次：
+
+| 规则 | 语义 |
+|------|------|
+| `register_span(type)` | 寄存器跨度（17 型全表见下） |
+| `check_point_identity` | 身份组合（uid+fun+addr）规范化 |
+| `check_duplicate_points` | 身份组合重复检测 |
+| `check_shm_overlap` | 同 uid+fun 下 [addr, addr+span) 区间重叠检测 |
+| `check_required_fields` | 逐点必填字段（point_schema.fields） |
+
+接入层：`output_device_info`（行为不变）、`output_access_plan`（弱校验升级为同规则，编造字段
+与点冲突在此拦截）、`output_plan_steps`（`validate_step_invariants` 改引用共享库）、
+`merge_config_from_steps`（merge 前对最终点表执行 overlap + duplicate 校验，违例拒绝执行——
+坏配置落不了盘）。c4_modbus_client 启动校验保留为最后防线（Go 侧不动）。
+`output_access_plan` 层的规则**仅对身份+type 字段齐全的点执行**，字段不齐交由 plan_steps 层拦截。
+
+**寄存器跨度全表**（对齐 protocol 17 型枚举；未知类型 fail-closed 拒绝并返回可读错误，不默认 1）：
+
+| 类型 | 跨度（寄存器） |
+|------|---------------|
+| BOOLEAN / BIT | 1（位编址，见下注） |
+| INT8 / UINT8 / FLOAT16 | 1 |
+| INT16 / UINT16 | 1 |
+| INT32 / UINT32 / FLOAT32 | 2 |
+| INT64 / UINT64 / FLOAT64 | 4 |
+| STRING / BLOB / BITSTRING / LargeDataBlock | 变长——**fail-closed 拒绝** |
+
+> fun ∈ {1, 2}（线圈 / 离散输入）为**位编址**，不适用寄存器跨度重叠，由身份查重覆盖；
+> 重叠/查重的**比较域 = merge 后该 (service_type, instance) 的最终点表**（批次内 + 批次与
+> 既有点，覆盖 modify/add-points 路径）。
+
+### 2.4.4 按钮状态语义化
+
+按钮武装由后端显式事件驱动（`button_arm` / `button_disarm{reason}`），前端不再从工具事件推断
+（web.md §3.1.3 同步修订）。判定**在回合终结时执行一次**：
+
+- **arm 条件**：本回合内 `output_access_plan` 成功 **且** 回合终结时 `questionPending = false`
+  （方案确认句式已排除于 questionPending，见 §2.4.2）；
+- **disarm 条件**：方案被消耗（执行完成 / 回滚）、被新的 `output_device_info` 作废（方案过期）、
+  `questionPending` 置位、闸门拒绝——但**若仍存在未消耗的有效方案则重发 `button_arm`**（拒绝
+  文案引导用户点击按钮，不得自相矛盾地撤掉按钮）；无方案的"回合结束"不构成 disarm 条件。
+
+工具副作用 ≠ 语义状态，UI 状态必须派生自后者。
+
+### 2.4.5 执行结果先行，总结后置
+
+plan_steps 校验通过后，merge → stop_start → persist **全部完成**，执行结果以 user 消息注入
+对话（复用 plan_rejected 注入 + NUDGE 机制），追加一轮要求 LLM 据实汇报的总结——**最终汇报
+只允许出现在这一轮**。执行代码块中先行的「配置已写入」成功文案删除或移至 stop_start 成功
+之后；"执行完成 ✅" 与 error 并存由该结构保证不发生，而非依赖文本过滤。
+
+### 2.4.6 回滚策略
+
+stop_start 失败**一律回滚**——起不来的配置即坏配置，滞留比失败更危险；取消 config 类 /
+非 config 类错误的分类豁免（INVALID_POINT 重叠即曾因分类为启动类错误而跳过回滚，导致坏配置
+滞留）。回滚细则：
+
+- `restore_prev1` 执行前校验 `config.json.prev.1`（.prev 链，transaction 层）存在且可解析；
+  缺失/不可解析时降级：保留当前 config.json + **保留 pending_change.json 标记**（交由 L0
+  重启收敛）+ 向用户报告「配置状态需人工核验」；
+- 回滚自身的 Stop-Start 失败 → 报告「已恢复变更前配置，但服务未完全恢复，需人工核验」+
+  保留/重建事务标记。
+
+---
 
 ---
 
@@ -1158,8 +1292,9 @@ Agent 校验本会话状态机：**未收到用户确认 → 拒绝执行**并�
 
 - 确认的唯一通道是 Web 前端确认按钮：按钮点击发送结构化消息（前缀 `[C4_BUTTON_CONFIRM]`，
   取消为 `[C4_BUTTON_CANCEL]`，见 web.md §3.1.3），后端据此置位「已确认」；执行完成后复位
-- 按钮呈现为双条件：`output_access_plan` 成功（结构化方案已产出）**且**摘要句式命中——
-  信息收集阶段的普通询问不得弹出按钮（前端 planArmed 武装机制，web.md §3.1.3）
+- 按钮由后端显式事件驱动（v0.5.0 修订）：`button_arm` 事件渲染按钮（arm 条件 = access_plan
+    成功且无挂起问题，回合终结时判定）；`button_disarm{reason}` 解除武装——前端 planArmed
+    推断机制废除（agent.md §2.4.4、web.md §3.1.3）
 - 自由文本一律不构成确认——参数回答与确认表达在文本上重叠（如「从一万**开始**」）时，
   不再产生误判；未确认时的闸门拒绝文案引导用户点击按钮
 - 方案摘要展示（监听端口、点表映射）由交互规则约定，不作为闸门条件
@@ -2067,6 +2202,11 @@ Agent 启动时读取                Agent 运行时生成/修改           Agen
 | 用户交互 | API / Web | Web (Express+React) | C4_FUN_00041 浏览器操作 |
 | 输出模式 | 自由文本 / tool+schema | tool+schema | Schema 约束类型安全 |
 | 系统提示 | 固定 / 动态生成 | 动态生成（Registry 注入） | 注册表变化自动同步 |
+| 阶段门禁 | 提示词约束 / 工具层强制 | 工具层强制 | 提示词无法阻止 LLM 跳站与编造（9/19 Modbus 实测） |
+| 提问后回合 | LLM 自觉结束 / questionPending 强制 | questionPending 强制 | 问后自答导致按钮乱弹与冲突未决执行 |
+| 点级校验契约 | 各层独立实现 / 共享规则库 | 共享规则库 point_rules | 层间强度不对称导致非法点表落盘（shm 重叠） |
+| 按钮武装信号 | 工具事件推断 / 后端语义事件 | 后端语义事件 | 工具副作用 ≠ 语义状态，误武装 |
+| 回滚触发 | 按错误分类豁免 / stop_start 失败一律回滚 | 一律回滚 | 起不来的配置即坏配置，滞留更危险 |
 
 ---
 

@@ -1,6 +1,6 @@
 # C4 Web 界面设计
 
-> **版本**：v0.1.2 | **最后更新**：2026-08-26 | **父文档**：[agent.md](agent.md)
+> **版本**：v0.2.0 | **最后更新**：2026-09-19 | **父文档**：[agent.md](agent.md)
 >
 > **设计范围**：C4 Web 界面的页面、组件与交互设计，**仅覆盖后端已就绪的功能**——
 > 对话式数据接入、文件上传、已接入 MCP 服务目录展示、Agent 工作状态展示。
@@ -143,6 +143,8 @@ SSE 响应事件（`Content-Type: text/event-stream`）：
 | `tool_result` | 默认 `data:` | `{ type:"tool_result", name, result, conversationId }` | 更新工具卡片为「完成」 |
 | `done` | `event: done` | `{ conversationId }` | 结束本次流（可能缺失，见 §4.2） |
 | `error` | `event: error` | `{ message, conversationId }` | 显示错误气泡，终止流 |
+| `button_arm` | 默认 `data:` | `{ type:"button_arm", conversationId }` | 渲染「确认 / 取消」按钮（§3.1.3） |
+| `button_disarm` | 默认 `data:` | `{ type:"button_disarm", reason, conversationId }` | 解除按钮武装并标注原因（§3.1.3） |
 
 > **注意**：
 > - `text`/`tool_call`/`tool_result` 是**默认消息**（无 `event:` 行，仅 `data:`），`done`/`error`
@@ -183,11 +185,14 @@ Agent 生成接入方案后需要用户确认。**确认的唯一有效通道是
 确认词在文本上重叠（如「从一万**开始**」）时不会误触执行。
 
 **前端确认按钮**（「确认显性化」落点）：
-1. 按钮呈现为**双条件**：① 流中出现 `output_access_plan` 成功的 `tool_result`（结构化方案已
-   产出，武装按钮）；② 累积缓冲命中方案展示句式（如「是否确认」「确认执行」）。两者同时
-   满足才渲染「确认 / 取消」按钮——信息收集阶段的普通询问（如「请确认转发地址映射」）
-   即使含确认句式也不得弹出按钮（此时还没有完整方案）；`output_device_info` 成功（信息
-   更新、方案过期）即解除武装，须重新生成方案后重新武装。
+1. 按钮呈现由**后端显式事件驱动**（v0.2.0 修订，对应 agent.md §2.4.4）：流中出现 `button_arm`
+   事件才渲染「确认 / 取消」按钮；出现 `button_disarm{reason}` 事件即解除武装并在按钮区标注
+   原因。arm/disarm 判定全部在后端完成——arm 条件 = `output_access_plan` 成功 **且**
+   `questionPending = false`（**回合终结时判定一次**；提问即挂起，agent.md §2.4.2）；disarm
+   条件 = 方案被消耗（执行完成 / 回滚）/ 被新的 `output_device_info` 作废（方案过期）/
+   `questionPending` 置位 / 闸门拒绝（存在未消耗有效方案时后端重发 `button_arm`）。信息收集
+   阶段的普通询问（如「请确认转发地址映射」）因 questionPending 置位而不会 arm——**信息不齐
+   或冲突未决时按钮不再弹出**。
 2. 「确认」→ 发起普通 POST `{ message:"[C4_BUTTON_CONFIRM] 确认", history }`；
    「取消」→ POST `{ message:"[C4_BUTTON_CANCEL] 取消，不执行", history }`。
    两者都是**新的一轮对话**，不依赖任何 interrupt/resume 机制。
@@ -199,10 +204,11 @@ Agent 生成接入方案后需要用户确认。**确认的唯一有效通道是
   后端各自定义，**修改时必须两侧同步**。
 
 > **匹配健壮性**（LLM token 非确定性）：
-> - 按钮可见性匹配对象是**完整累积文本**而非单个 token 事件——「是否」+「确认」可能被
->   拆成两个 text 事件。
-> - 按钮可见性匹配**完整句式**而非单词——「执行」「好的」「开始」等词在普通语句中极易
->   误触发，仅在检测到「是否确认」「确认执行」等明确句式时才渲染按钮。
+> - arm/disarm 判定由**后端**在完整累积文本上执行（「是否」+「确认」可能被拆成两个 text 事件），
+>   前端只消费事件结果，不做本地缓冲匹配（原前端双条件推断废除）。
+> - `button_arm` **不由句式直接触发**——arm 判定 = 回合终结时的工具结果 + questionPending；
+>   句式仅用于 §2.4.2 的 questionPending 排除清单（是否确认执行 / 确认执行）。「执行」「好的」
+>   「开始」等词在普通语句中极易误触发，不参与任何判定。
 > - 执行安全不依赖句式匹配：即使用户未点按钮，闸门也会拒绝执行并引导点击按钮。
 
 ---
@@ -315,10 +321,8 @@ interface StateResponse {
 > **轮询滞后与 phase 残留（如实告知，避免实现误判）**：
 > - `phase` 在**流进行中**被后端写入，1s 轮询必然滞后；`confirmed → executing → idle` 可能在
 >   一轮对话内快速跳变，前端**可能跳过中间态**，徽标只反映「最近一次读到的 phase」。
-> - `phase` 仅由后端在特定节点写入：merge 失败时 `setError` 但 phase 停在 `executing`；
->   用户闲聊不确认时 phase 停在 `collecting`/`planning`；确认后若 LLM 未产出执行步骤
->   （`planSteps` 为空），phase 停在 `confirmed`。后端均无「重置回 idle」逻辑，
->   徽标出现这类「滞留」属后端行为，前端不应据此误报「卡死」。
+> - v0.2.0 起（对应 agent.md §2.4.1/§2.4.5）后端补齐 `executing` 置位，且回合终结必回
+>   `idle`；1s 轮询下徽标的短暂「滞留」属轮询滞后，前端不应据此误报「卡死」。
 
 ---
 
@@ -407,7 +411,7 @@ LLM 调用 `display_points` 建立显示会话，ChatView 消息流**顶部**插
 │  → phase: planning                                             │
 └───────────────────────────────────────────────────────────────┘
 ┌─ 轮 3：确认 + 执行 ─────────────────────────────────────────────┐
-│ 前端在累积文本中匹配到「是否确认」→ 渲染「确认 / 取消」按钮        │
+│ 后端回合终结判定：方案成功且无挂起问题 → button_arm 渲染按钮      │
 │ 用户点击「确认」→ POST /api/chat「确认」                          │
 │  → phase: confirmed → executing                                 │
 │  → Agent 写配置 + Stop-Start → 流式「接入完成，服务已重启」        │
@@ -417,7 +421,7 @@ LLM 调用 `display_points` 建立显示会话，ChatView 消息流**顶部**插
 
 ### 4.2 SSE 事件处理状态机
 
-单次流的处理状态机（确认按钮的渲染在「追加到气泡」过程中根据累积文本触发，点击发起新 POST，
+单次流的处理状态机（确认按钮的渲染由后端 button_arm / button_disarm 事件驱动，点击发起新 POST，
 不改变本状态机）：
 
 ```
@@ -484,7 +488,7 @@ c4/agent/frontend/                      # React SPA（待实现）
     │   └── state.ts                    # GET /api/state
     ├── hooks/
     │   ├── useChatStream.ts            # SSE 流状态机（§4.2）
-    │   ├── useConfirmDetect.ts         # 累积文本匹配确认句式（§3.1.3）
+    │   ├── useConfirmDetect.ts         # 确认/取消消息前缀常量（CONFIRM_KEYWORD / CANCEL_KEYWORD，§3.1.3）
     │   └── useAgentState.ts            # 顶栏 phase 轮询
     └── components/
         ├── ChatView.tsx                # 对话消息流 + 输入区
