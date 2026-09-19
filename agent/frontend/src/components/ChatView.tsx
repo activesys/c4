@@ -18,6 +18,7 @@ import {
 import { ConfirmButtons } from "./ConfirmButtons";
 import { ToolCallCard } from "./ToolCallCard";
 import { FileUpload } from "./FileUpload";
+import { Markdown } from "./Markdown";
 import { PointDisplayPanel } from "./PointDisplayPanel";
 import { streamUpload, classifyFileType } from "@frontend/api/upload";
 
@@ -174,7 +175,11 @@ function Bubble({ bubble }: { bubble: ChatBubble }): JSX.Element {
       }
       className={cls}
     >
-      {bubble.display ?? bubble.content}
+      {bubble.role === "agent" ? (
+        <Markdown text={bubble.display ?? bubble.content} />
+      ) : (
+        (bubble.display ?? bubble.content)
+      )}
     </div>
   );
 }
