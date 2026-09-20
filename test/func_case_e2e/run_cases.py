@@ -327,7 +327,10 @@ def _post(path, body, timeout=300):
 
 
 def chat(message, history):
+    """返回 (完整文本, 事件列表)；事件用于过程健康度断言（README §4）。
+    事件形如 (type, name)：("tool_call","output_access_plan") / ("error","") 等。"""
     text_parts = []
+    events = []
     with _post("/api/chat", {"message": message, "history": history}) as resp:
         buf = []
         for raw in resp:
@@ -342,9 +345,17 @@ def chat(message, history):
                     d = json.loads(data)
                 except json.JSONDecodeError:
                     continue
-                if isinstance(d, dict) and d.get("type") == "text" and isinstance(d.get("content"), str):
+                if not isinstance(d, dict):
+                    continue
+                t = d.get("type")
+                if t == "text" and isinstance(d.get("content"), str):
                     text_parts.append(d["content"])
-    return "".join(text_parts)
+                elif t in ("tool_call", "tool_result"):
+                    events.append((t, str(d.get("name", ""))))
+                elif t == "error":
+                    events.append(("error", ""))
+
+    return "".join(text_parts), events
 
 
 def state():
@@ -373,10 +384,16 @@ class Conv:
 
     def send(self, message):
         message = map_ports(message)
+        PH.user(message)
         self.history.append({"role": "user", "content": message})
-        text = chat(message, self.history[:-1])
+        text, events = chat(message, self.history[:-1])
         log(f"  >> {message[:60]}...")
         log(f"  << {text[:280]}...")
+        tools = {name for (t, name) in events if t == "tool_call"}
+        PH.assistant(text, tools)
+        for (t, _name) in events:
+            if t == "error":
+                PH.event("error")
         if text:
             self.history.append({"role": "assistant", "content": text})
         return text
@@ -452,6 +469,112 @@ def send_flow(conv, case, message, max_turns=10):
             text = conv.send(message if empty_streak >= 2 else "继续")
             continue
     return text, clicked
+
+
+# ── 过程健康度断言（func_case_e2e/README.md §4；agent.md §2.4）──
+# #1 按钮预算 / #2 无假成功 / #3 无空转轮次 / #4 无同回合自问自答：现已生效
+#   （#1 由 runner 侧自计数，无需后端事件；#2/#3/#4 基于会话文本 + tool_call 事件）
+# #5 一次成功执行：依赖 config_merge/rollback 事件落线（agent.md §2.4.5），未落地前 SKIP
+# 判定粒度 = case 级（回合级的近似）；问询句式定义同 agent.md §2.4.2（含方案确认句式排除清单）
+
+CONFIRM_PHRASE_RE = re.compile(r"是否确认执行|确认执行")
+SUCCESS_MARK_RE = re.compile(r"执行完成|已执行成功|已配置完成|接入完成|接入方案已执行")
+FAKE_TAIL_RE = re.compile(r"没有真正完成|重新执行|重新提交|接入失败|需人工核验|配置未生效")
+IDLE_TEXT_RE = re.compile(r"[\s.。…~]*\Z")
+PLAN_TOOLS = {"output_access_plan", "output_plan_steps"}
+BUTTON_BUDGET = {}   # 每用例按钮预算覆盖表；缺省 2（= send_flow 驱动器 clicked<2 上限）
+
+
+class ProcessHealth:
+    def __init__(self):
+        self.reset("")
+
+    def reset(self, case, button_budget=2):
+        self.case = case
+        self.button_budget = button_budget
+        self.confirm_sends = 0
+        self.tools_seen = set()
+        self.entries = []   # {"kind":"assistant","text":str,"tools":set} / {"kind":"event","etype","name"}
+
+    def user(self, msg):
+        if msg.startswith("[C4_BUTTON_CONFIRM]"):
+            self.confirm_sends += 1
+        self.entries.append({"kind": "user", "text": msg})
+
+    def assistant(self, text, tools=None):
+        self.entries.append({"kind": "assistant", "text": text or "", "tools": set(tools or ())})
+
+    def event(self, etype, name=""):
+        self.tools_seen.add(name)
+        self.entries.append({"kind": "event", "etype": etype, "name": name})
+
+    def _question_hit(self, text):
+        if CONFIRM_PHRASE_RE.search(text):
+            return False   # 方案确认句式排除（agent.md §2.4.2）
+        for sent in re.split(r"[。；！\n]", text or ""):
+            sent = sent.strip()
+            if not sent:
+                continue
+            if sent.endswith("？") or sent.endswith("?"):
+                return True
+            if re.match(r"^(请提供|请补充|请确认|请问|是否)", sent):
+                return True
+        return False
+
+    def verdict(self):
+        """返回 (violations, notes)；violations 非空即过程 FAIL。"""
+        v, notes = [], []
+
+        # 1 按钮预算
+        if self.confirm_sends > self.button_budget:
+            v.append(f"#1 按钮确认 {self.confirm_sends} 次 > 预算 {self.button_budget}")
+
+        # 2 无假成功：成功表述之后不得出现失败信号/错误事件
+        success_idx = [i for i, e in enumerate(self.entries)
+                       if e["kind"] == "assistant" and SUCCESS_MARK_RE.search(e["text"])]
+        if success_idx:
+            for e in self.entries[success_idx[-1]:]:
+                if (e["kind"] == "assistant" and FAKE_TAIL_RE.search(e["text"])) \
+                        or (e["kind"] == "event" and e.get("etype") == "error"):
+                    v.append("#2 假成功：成功表述之后出现失败信号")
+                    break
+
+        # 3 无空转轮次：同一回合内连续 >1 轮空文本/省略号且无工具调用（用户消息重置）
+        streak = 0
+        for e in self.entries:
+            if e["kind"] == "user":
+                streak = 0
+            elif e["kind"] == "assistant" and not e["tools"] and IDLE_TEXT_RE.match(e["text"] or " "):
+                streak += 1
+                if streak > 1:
+                    v.append("#3 连续空转轮次 > 1")
+                    break
+            else:
+                streak = 0
+
+        # 4 无同回合自问自答：问询命中后、下一条用户消息之前调用方案/执行工具
+        #   （用户消息 = 回合边界，重置问询态——跨回合的正常追问不违例，agent.md §2.4.2）
+        q_hit = False
+        for e in self.entries:
+            if e["kind"] == "user":
+                q_hit = False
+                continue
+            hit = e["kind"] == "assistant" and self._question_hit(e["text"])
+            tools = (e.get("tools") or set()) if e["kind"] == "assistant" \
+                else ({e["name"]} if e.get("name") in PLAN_TOOLS else set())
+            if (q_hit or hit) and tools & PLAN_TOOLS:
+                v.append("#4 问询后同回合调用 output_access_plan/output_plan_steps")
+                break
+            q_hit = q_hit or hit
+
+        # 5 一次成功执行（SKIP：等 §2.4.5 后端 config_merge/rollback 事件）
+        if not self.tools_seen & {"execute_access_plan"}:
+            notes.append("#5 SKIP（merge/rollback 事件未上线）")
+
+        return v, notes
+
+
+PH = ProcessHealth()
 
 
 # ── 环境观测 ──────────────────────────────────────────────
@@ -1621,16 +1744,27 @@ def run_sequence(sequence):
     for c in sequence:
         t0 = time.time()
         log(f"════ 用例 {c} 开始 ════")
+        PH.reset(c, BUTTON_BUDGET.get(c, 2))
         try:
             MCP_STACK.up()
             if not AGENT.p:
                 AGENT.up()
             CASES[c]()
-            results.append((c, True, 0.0))
-            log(f"════ 用例 {c} PASS（{time.time()-t0:.0f}s）════")
+            vio, notes = PH.verdict()
+            if vio:
+                results.append((c, False, "过程断言: " + "; ".join(vio)))
+                log(f"════ 用例 {c} FAIL（过程断言）: {'; '.join(vio)} ════")
+            else:
+                results.append((c, True, 0.0))
+                tail = f"｜{'；'.join(notes)}" if notes else ""
+                log(f"════ 用例 {c} PASS（{time.time()-t0:.0f}s）{tail} ════")
         except Fail as e:
-            results.append((c, False, str(e)))
-            log(f"════ 用例 {c} FAIL: {e} ════")
+            msg = str(e)
+            vio, _ = PH.verdict()
+            if vio:
+                msg += " ｜ 过程断言: " + "; ".join(vio)
+            results.append((c, False, msg))
+            log(f"════ 用例 {c} FAIL: {msg} ════")
         except Exception as e:
             results.append((c, False, f"{type(e).__name__}: {e}"))
             log(f"════ 用例 {c} FAIL（异常）: {type(e).__name__}: {e} ════")
@@ -1658,15 +1792,23 @@ def main():
         sys.exit(2)
     t0 = time.time()
     log(f"════ 用例 {case} 开始 ════")
+    PH.reset(case, BUTTON_BUDGET.get(case, 2))
     try:
         MCP_STACK.up()
         if not AGENT.p:
             AGENT.up()
         CASES[case]()
-        log(f"════ 用例 {case} PASS（{time.time()-t0:.0f}s）════")
+        vio, notes = PH.verdict()
+        if vio:
+            log(f"════ 用例 {case} FAIL（过程断言）: {'; '.join(vio)} ════")
+            sys.exit(1)
+        tail = f"｜{'；'.join(notes)}" if notes else ""
+        log(f"════ 用例 {case} PASS（{time.time()-t0:.0f}s）{tail} ════")
         sys.exit(0)
     except Fail as e:
-        log(f"════ 用例 {case} FAIL: {e} ════")
+        vio, _ = PH.verdict()
+        extra = " ｜ 过程断言: " + "; ".join(vio) if vio else ""
+        log(f"════ 用例 {case} FAIL: {e}{extra} ════")
         sys.exit(1)
     except Exception as e:
         log(f"════ 用例 {case} FAIL（异常）: {type(e).__name__}: {str(e)[:150]} ════")

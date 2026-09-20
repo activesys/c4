@@ -87,14 +87,16 @@ Agent 与每个 MCP 服务是**相互独立的 systemd 服务**（方案 A：安
 | 2 | **无假成功** | 助手文本含「执行完成 / 已执行成功 ✅」之后，本用例内不得再出现 error 事件或「……没有真正完成 / 重新执行」类文本 |
 | 3 | **无空转轮次** | 助手单轮回复为空文本 / 纯省略号且无工具调用，连续 ≤ 1 次 |
 | 4 | **无同回合自问自答** | 助手文本命中问询句式（定义同 agent.md §2.4.2，含方案确认句式排除清单）后，同回合内不得再调用 `output_access_plan` / `output_plan_steps` |
-| 5 | **一次成功执行** | config_merge 成功后同一用例内不得再次 merge（重试仅允许发生在首次 merge 之前） |
+| 5 | **一次成功执行**（**SKIP**：待 agent.md §2.4.5 事件落线） | config_merge 成功后同一用例内不得再次 merge（重试仅允许发生在首次 merge 之前） |
 
 runner 侧最小可观测性改造：采集隔离实例的结构化会话事件（text / tool_call / tool_result /
 error / button_arm / button_disarm / **config_merge / rollback** 生命周期事件），results.log
 同时输出逐用例**过程断言结果**与违例明细；`run_cases.py` 的 FAIL 判定 = 数据断言 ∧ 过程断言。
 
-**实现顺序依赖**：`button_*` 与 `config_merge`/`rollback` 事件的采集以 agent.md §2.4.4（后端
-事件生产者）与 §2.4.5（merge/rollback 事件落线）落地为前提；未落地前，过程断言 #1 / #5 标记
-为 **SKIP**（不计入 PASS/FAIL），其余断言照常生效。
+**生效状态（run_cases.py 已实现）**：#1 现已生效——按钮计数由 runner 侧自计（发送
+`[C4_BUTTON_CONFIRM]` 即计数，无需后端事件）；#2/#3/#4 基于会话文本 + `tool_call`/`error`
+事件，现行生效；#5 依赖 `config_merge`/`rollback` 生命周期事件落线（agent.md §2.4.5），
+落地前标记 **SKIP**（不计入 PASS/FAIL）。判定粒度为 case 级（回合级的近似：用户消息视为
+回合边界，问询态在其上重置；问询句式定义含方案确认句式排除清单）。
 
 回归基准：用例 31 / 34 复测以本节为准——最终 shm 达标**且**过程断言全绿才算 PASS。
