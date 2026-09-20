@@ -20,6 +20,8 @@ export type SSEEventType =
   | "text"
   | "tool_call"
   | "tool_result"
+  | "button_arm"
+  | "button_disarm"
   | "done"
   | "error"
   | "interrupt"

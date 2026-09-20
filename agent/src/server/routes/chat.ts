@@ -132,6 +132,19 @@ export function createChatRouter(agent: C4Agent): Router {
                     });
                     break;
 
+                case "button_arm":
+                    // §2.4.4 回合终结按钮判定（web.md §3.1.3 v0.2.0）
+                    sendSSE(res, null, { type: "button_arm", conversationId });
+                    break;
+
+                case "button_disarm":
+                    sendSSE(res, null, {
+                        type: "button_disarm",
+                        reason: event.reason,
+                        conversationId,
+                    });
+                    break;
+
                 case "tool_call":
                     sendSSE(res, null, {
                         type: "tool_call",

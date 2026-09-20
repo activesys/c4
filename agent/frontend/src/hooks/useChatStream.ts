@@ -58,7 +58,7 @@ export interface UseChatStreamReturn {
   ) => Promise<void>;
   streamEcho: (content: string) => void;
   endEcho: () => void;
-  /** 确认按钮武装：output_access_plan 成功后 true，output_device_info 成功（方案过期）后 false */
+  /** 确认按钮武装（v0.2.0：后端 button_arm/button_disarm 事件驱动，web.md §3.1.3） */
   planArmed: boolean;
   /** 读取当前会话 ID（供上传流程复用同一会话） */
   getConversationId: () => string;
@@ -79,9 +79,9 @@ export function useChatStream(): UseChatStreamReturn {
   const [toolCards, setToolCards] = useState<ToolCardState[]>([]);
   const [assistantText, setAssistantText] = useState("");
   const [error, setError] = useState<string | null>(null);
-  // 方案确认按钮的武装状态（web.md §3.1.3）：仅当 output_access_plan 成功后武装，
-  // output_device_info 成功（信息更新、方案过期）即解除——信息收集阶段的普通询问
-  // 即使含「请确认」句式也不得弹出确认按钮
+  // 方案确认按钮的武装状态（web.md §3.1.3 v0.2.0）：仅由后端 button_arm /
+  // button_disarm 事件驱动——arm 判定（方案成功 + 无挂起问题）在后端回合终结时
+  // 执行，前端不做任何句式/工具事件推断（agent.md §2.4.4）
   const [planArmed, setPlanArmed] = useState(false);
 
   // We keep a ref to the *current* agent bubble id so text tokens append
@@ -167,10 +167,6 @@ export function useChatStream(): UseChatStreamReturn {
       setAssistantText("");
       setToolCards([]);
       setError(null);
-      // 新用户轮次解除按钮武装：planArmed 只在「本轮产出结构化方案」时重新置真。
-      // 否则历史方案的武装残留 + 提问文本中的「请确认」字样会让确认按钮
-      // 在信息收集阶段提前弹出（func_test_case 用例 10，2026-09-17 实测）
-      setPlanArmed(false);
       setStatus("sending");
 
       try {
@@ -193,11 +189,6 @@ export function useChatStream(): UseChatStreamReturn {
                     m.id === agentId ? { ...m, content: m.content + content } : m,
                   ),
                 );
-                // 执行闸门拒绝的提示文本（「…是否确认执行？」）以 text 事件到达
-                // （该路径无 error 事件）→ 重新武装确认按钮，供用户再次点击
-                if (content.includes("是否确认执行")) {
-                  setPlanArmed(true);
-                }
                 break;
               }
               case "tool_call": {
@@ -214,13 +205,6 @@ export function useChatStream(): UseChatStreamReturn {
                   typeof ev.data.name === "string" ? ev.data.name : "tool";
                 const result =
                   typeof ev.data.result === "string" ? ev.data.result : "";
-                // 方案按钮武装/解除（web.md §3.1.3）
-                if (name === "output_access_plan" && /"success":\s*true/.test(result)) {
-                  setPlanArmed(true);
-                }
-                if (name === "output_device_info" && /"success":\s*true/.test(result)) {
-                  setPlanArmed(false);
-                }
                 setToolCards((prev) => {
                   // Flip the matching running card to done; otherwise append.
                   const idx = prev.findIndex((c) => c.name === name && c.status === "running");
@@ -231,6 +215,23 @@ export function useChatStream(): UseChatStreamReturn {
                   next[idx] = { name, status: "done", result };
                   return next;
                 });
+                break;
+              }
+              case "button_arm": {
+                // §2.4.4 后端回合终结判定通过 → 武装按钮
+                setPlanArmed(true);
+                break;
+              }
+              case "button_disarm": {
+                const reason =
+                  typeof ev.data.reason === "string" ? ev.data.reason : "";
+                setPlanArmed(false);
+                if (reason) {
+                  setMessages((prev) => [
+                    ...prev,
+                    { id: nextId("agent"), role: "agent", content: `（${reason}）` },
+                  ]);
+                }
                 break;
               }
               case "interrupt": {
@@ -244,12 +245,6 @@ export function useChatStream(): UseChatStreamReturn {
                   typeof ev.data.message === "string"
                     ? ev.data.message
                     : "对话出错";
-                // 执行闸门拒绝（用户未点确认按钮）→ 重新武装按钮：拒绝文案含
-                // 「是否确认执行」句式，按钮须重现供用户再次点击确认
-                // （func_test_case 用例 7 修复 C 的按钮确定性重现）
-                if (msg.includes("未收到确认按钮消息")) {
-                  setPlanArmed(true);
-                }
                 setError(msg);
                 setStatus("error");
                 setMessages((prev) => [

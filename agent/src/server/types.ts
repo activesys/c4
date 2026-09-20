@@ -16,6 +16,8 @@ export type AgentStreamEvent =
   | { type: "text"; content: string }
   | { type: "tool_call"; name: string; args: Record<string, unknown> }
   | { type: "tool_result"; name: string; result: string }
+  | { type: "button_arm" }
+  | { type: "button_disarm"; reason: string }
   | { type: "interrupt"; message: string; interruptId: string }
   | { type: "done" }
   | { type: "error"; message: string };
