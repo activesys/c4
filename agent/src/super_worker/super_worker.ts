@@ -2,7 +2,8 @@
 // createAgent 配置 + streamEvents v3 + 执行器工具注入 + AgentState 接线 + abbr 记忆库固化
 
 import { createAgent } from "langchain";
-import type { StructuredTool } from "@langchain/core/tools";
+import { DynamicStructuredTool, type StructuredTool } from "@langchain/core/tools";
+import * as z from "zod";
 import {
     isAIMessage,
     isHumanMessage,
@@ -48,6 +49,13 @@ import {
 import type { C4Agent, AgentStateWriter } from "../server/types.js";
 import type { ServiceStep, SystemConfig } from "../types/index.js";
 import type { AgentLogger } from "../logging/agent_logger.js";
+import {
+    can_transition,
+    check_tool_gate,
+    GATED_TOOLS,
+    question_hit,
+    type Phase,
+} from "./turn_rules.js";
 
 // ── 类型 ──────────────────────────────────────────────────
 
@@ -69,6 +77,25 @@ export interface SuperWorkerConfig {
     agentLogger?: AgentLogger;
     /** 对点核验控制面工具（list_points / display_points / stop_display），agent.md §3.6.4 */
     displayTools?: StructuredTool[];
+    /** 回合状态机强化闸门状态（agent.md §2.4）——createC4Agent 持有，工具闸门包装闭包读取 */
+    gateState?: WorkerGateState;
+    /** 用户声明的从站号集合（§2.4.3 uid 来源校验；createC4Agent 捕获） */
+    declaredUids?: Set<number>;
+}
+
+/** 闸门状态：phase/questionPending/deviceInfoReady 实时反映；userConfirmed 经 getter 回读
+ * createC4Agent 闭包（既有闸门变量，声明先于 createSuperWorker）。 */
+export interface WorkerGateState {
+    phase: Phase;
+    /** 本回合内 LLM 文本命中问询句式（§2.4.2 提问即终局；用户消息到达时清除） */
+    questionPending: boolean;
+    /** 会话级 deviceInfo 就绪（B1：跨回合保持） */
+    deviceInfoReady: boolean;
+    readonly userConfirmed: boolean;
+    /** m3：闸门拒绝重试上限触发——本回合强制结束 */
+    forceEndTurn: boolean;
+    /** m3：本回合各工具闸门拒绝计数 */
+    refusals: Record<string, number>;
 }
 
 // ── 系统提示 ──────────────────────────────────────────────
@@ -114,6 +141,33 @@ function loadSystemPrompt(
         .replaceAll("{{ site_rules }}", () => siteRules);
 }
 
+/**
+ * 工具闸门包装（agent.md §2.4.1）：闸门拒绝 → 返回可读错误（不执行工具），
+ * 同工具拒绝累计 ≥2（m3）→ 置 forceEndTurn 强制结束回合。
+ */
+function gate_wrap(tool: StructuredTool, gate: WorkerGateState): StructuredTool {
+    const schema = (tool as unknown as { schema: z.ZodTypeAny }).schema;
+    const wrapped = new DynamicStructuredTool({
+        name: tool.name,
+        description: tool.description,
+        schema,
+        func: async (args: z.infer<z.ZodTypeAny>) => {
+            const refusal = check_tool_gate(tool.name, {
+                phase: gate.phase,
+                questionPending: gate.questionPending,
+                deviceInfoReady: gate.deviceInfoReady,
+                userConfirmed: gate.userConfirmed,
+            });
+            if (refusal === null) {
+                return await tool.invoke(args);
+            }
+            // 拒绝计数统一由 bgCapture 按工具维度处理（≥2 → forceEndTurn + abort）
+            return JSON.stringify({ success: false, error: refusal });
+        },
+    });
+    return wrapped as unknown as StructuredTool;
+}
+
 // ── SuperWorker 工厂 ──────────────────────────────────────
 
 export async function createSuperWorker(
@@ -122,12 +176,12 @@ export async function createSuperWorker(
     const { model, registry } = config;
     const systemPrompt = loadSystemPrompt(registry, config.site);
 
-    const allTools: StructuredTool[] = [
+    const rawTools: StructuredTool[] = [
         xlsxParserTool,
         csvParserTool,
         txtParserTool,
         createOutputDeviceInfoTool(registry, config),
-        createOutputAccessPlanTool(registry),
+        createOutputAccessPlanTool(registry, { declaredUids: config.declaredUids }),
         createOutputPlanStepsTool(registry, config.site, config.configPath),
         createQueryRegistryTool(registry),
         createQueryAbbrRegistryTool({
@@ -137,6 +191,11 @@ export async function createSuperWorker(
         }),
         ...(config.displayTools ?? []),
     ];
+    // §2.4.1 工具闸门包装：gateState 存在时对闸门工具执行前置校验（非法即拒绝，不执行）
+    const allTools: StructuredTool[] = config.gateState
+        ? rawTools.map((t) =>
+              GATED_TOOLS.has(t.name) ? gate_wrap(t, config.gateState as WorkerGateState) : t)
+        : rawTools;
 
     const agent = createAgent({
         model: model as any,
@@ -447,17 +506,43 @@ function resolve_forward_handshake(
 export async function createC4Agent(
     config: SuperWorkerConfig,
 ): Promise<C4Agent> {
+    // ── 回合状态机强化状态（agent.md §2.4）——先于 createSuperWorker 定义：
+    // 工具闸门包装闭包经 gateState 读取；userConfirmed/deviceInfo 以 getter 回读下方闭包变量
+    let userConfirmed = false;
+    let deviceInfo: Record<string, unknown> | null = null;
+    // §2.4.3 uid 来源校验：用户声明的从站号集合——必须先于 createSuperWorker 定义
+    //（工具工厂创建时按引用捕获；定义在之后会让工厂拿到 undefined → 永远空集）
+    const declaredUids = new Set<number>();
+    const gateState: WorkerGateState = {
+        phase: "idle",
+        questionPending: false,
+        forceEndTurn: false,
+        refusals: {},
+        get deviceInfoReady(): boolean {
+            return deviceInfo !== null;
+        },
+        get userConfirmed(): boolean {
+            return userConfirmed;
+        },
+    };
+    // 引用传递（禁止 spread）：declared_forward_protocol / forward_handshake_pending
+    // 在回合内被捕获代码更新，工具工厂必须持有同一对象才能读到最新值
+    //（spread 浅拷贝曾导致引用断开——转发协议闸门死循环，2026-09-19 实测）
+    config.gateState = gateState;
     const agent = await createSuperWorker(config);
 
-    // 跨轮持久化的设备信息与接入方案——"生成方案"轮产出，"确认"轮注入，
+    // 跨轮持久化的接入方案——"生成方案"轮产出，"确认"轮注入，
     // 避免依赖 LLM 从历史重新推导（追加设备/修改/删除场景易出错）。
-    let deviceInfo: Record<string, unknown> | null = null;
     let accessPlan: Record<string, unknown> | null = null;
     // 用户显式指定的数据接收端口——确定性捕获自用户消息（同场站名解析机制），
     // 确认轮注入，防止 LLM 重试时回退 registry 默认端口
     let userPort: string | null = null;
-    // 执行闸门状态（agent.md「执行闸门」）：是否收到过用户确认
-    let userConfirmed = false;
+    // §2.4.4 按钮语义状态：仅由后端 button_arm/button_disarm 事件驱动（前端推断已废除）
+    let buttonArmed = false;
+    // m3 扩展：业务拒绝死循环防护（按工具计数的连续拒绝，成功即清零）
+    const bizRejects = new Map<string, number>();
+    let turnAbort: AbortController | null = null;
+
     // 会话历史（含工具调用/结果证据）——按 conversationId 持久化，跨轮恢复完整上下文
     const conversationHistories = new Map<string, HistoryMsg[]>();
     // 会话级握手状态：用户消息缓冲（便捷通道扫全量历史）+ agent 最后文本（握手复述判定）
@@ -470,7 +555,18 @@ export async function createC4Agent(
         invoke: async function* (input) {
             const conversation = input.conversationId ?? "unknown";
             const log = config.agentLogger;
-            // 新会话开始：上一会话的协议声明/端口声明失效，避免跨会话泄漏（func_test_case 用例 13）
+            // §2.4.1 阶段门禁：setPhase 经合法转移表校验（非法转移拒绝并 LOG）
+            const set_phase = (next: Phase): void => {
+                if (!can_transition(gateState.phase, next)) {
+                    log?.error(conversation, `非法阶段转移: ${gateState.phase} → ${next}（已拒绝）`);
+                    return;
+                }
+                gateState.phase = next;
+                config.state?.setPhase(next);
+                log?.phase(conversation, next);
+            };
+            // 新会话开始：上一会话的协议声明/端口声明失效，避免跨会话泄漏（func_test_case 用例 13）；
+            // §2.4 闸门态同步复位（N4：均为进程内存态）
             if (conversation !== lastConversationId) {
                 lastConversationId = conversation;
                 config.declared_protocol = null;
@@ -479,6 +575,13 @@ export async function createC4Agent(
                 userPort = null;
                 userTextByConv.delete(conversation);
                 assistantTextByConv.delete(conversation);
+                gateState.questionPending = false;
+                gateState.forceEndTurn = false;
+                gateState.refusals = {};
+                declaredUids.clear();
+                gateState.phase = "idle";
+                config.state?.setPhase("idle");
+                buttonArmed = false;
             }
             // 恢复服务端历史：后续轮优先使用服务端完整历史（含工具证据），
             // 前端 text-only history 仅作服务端无记录时的兜底
@@ -496,6 +599,16 @@ export async function createC4Agent(
             let planAccessPlan: Record<string, unknown> | null = null;
             let confirmOriginalContent: string | null = null;
             let isConfirm = false;
+            // §2.4.2 提问即终局（回合级：invoke 即新回合，用户消息到达即清除）
+            let questionPending = false;
+            gateState.questionPending = false;
+            gateState.forceEndTurn = false;
+            gateState.refusals = {};
+            // §2.4.4 arm 判定：本回合内 output_access_plan 是否成功
+            let accessPlanSucceededThisTurn = false;
+            let summaryStream: any = null;
+            // §2.4.4 bgCapture 内不可 yield——解除武装原因先收集、稍后发出
+            const deferredDisarms: string[] = [];
             try {
                 if (input.messages.length > 0) {
                     const last = input.messages[input.messages.length - 1];
@@ -510,6 +623,13 @@ export async function createC4Agent(
                         );
                         if (portMatch) {
                             userPort = portMatch[1];
+                        }
+                        // §2.4.3 uid 来源校验：确定性捕获用户声明的从站号
+                        //（「从站号都是1」「从站1」「uid=2」等表述，多个均收集）
+                        for (const m of lastContent.matchAll(
+                            /(?:从站号?|单元标识符|uid)[^0-9]{0,6}([0-9]+)/gi,
+                        )) {
+                            declaredUids.add(parseInt(m[1], 10));
                         }
                         // 协议声明双通道。便捷通道：被动扫描本会话累计用户消息（显式声明模式，
                         // 声明可能出现在任意早前轮次）。转发协议单独捕获，接收侧捕获排除同名，
@@ -598,8 +718,7 @@ export async function createC4Agent(
                         confirmOriginalContent = lastContent;
                         isConfirm = true;
                         userConfirmed = true;
-                        config.state?.setPhase("confirmed");
-                        log?.phase(conversation, "confirmed");
+                        set_phase("confirmed");
                         // 先同步 accessPlan 的 site 到 config.site（首次接入时 config.site 还是 null，
                         // 供「确定性生成」兜底与 output_plan_steps 的 fallback 使用权威 site）
                         if (accessPlan && !config.site) {
@@ -683,9 +802,12 @@ export async function createC4Agent(
 
                     log?.llm_call(conversation, misses + 1, input.messages);
 
+                    // m3 扩展：业务拒绝死循环防护需要中止图内循环——AbortSignal
+                    turnAbort = new AbortController();
                     const stream = await (agent as any).streamEvents(
                         { messages: input.messages },
-                        { version: "v3", configurable: { recursion_limit: 50 } },
+                        { version: "v3", configurable: { recursion_limit: 50 },
+                          signal: turnAbort.signal },
                     );
                     lastStream = stream;
 
@@ -700,21 +822,44 @@ export async function createC4Agent(
                                 }
                                 if (call.name === "output_access_plan" && r?.success) {
                                     accessPlan = r;
+                                    accessPlanSucceededThisTurn = true;
                                     // 新方案产生 → 旧确认失效，须重新点击确认按钮（执行闸门）
                                     userConfirmed = false;
                                     userPort = null;
-                                    config.state?.setPhase("planning");
-                                    log?.phase(conversation, "planning");
+                                    set_phase("planning");
                                     config.state?.setAccessPlan(true);
                                 }
                                 if (call.name === "output_device_info" && r?.success && Array.isArray(r?.devices)) {
                                     deviceInfo = r;
-                                    config.state?.setPhase("collecting");
-                                    log?.phase(conversation, "collecting");
+                                    set_phase("collecting");
+                                    // §2.4.4 disarm：信息更新 → 方案过期（按钮已武装时解除，
+                                    // bgCapture 内不可 yield——先收集，回合内稍后发出）
+                                    if (buttonArmed) {
+                                        buttonArmed = false;
+                                        deferredDisarms.push("设备信息已更新，原方案过期");
+                                    }
                                 }
                                 const resultStr = typeof out === "string" ? out : JSON.stringify(out);
                                 toolResults.push({ name: call.name, result: resultStr });
                                 log?.tool_result(conversation, call.name, resultStr);
+                                // m3 扩展：业务性拒绝按工具计数（连续拒绝 ≥2 → forceEndTurn
+                                // + abort 中止图内循环；该类拒绝不走 check_tool_gate，闸门
+                                // 上限原本不覆盖——device_info↔access_plan 乒乓教训：乒乓会
+                                // 让「连续相同错误」判定失效，必须按工具独立计数、成功才清零）
+                                let parsed: { success?: unknown; error?: unknown } | null = null;
+                                try {
+                                    parsed = typeof out === "string" ? JSON.parse(out) : out;
+                                } catch { /* 非 JSON 结果不计 */ }
+                                if (parsed && parsed.success === false) {
+                                    const n = (bizRejects.get(call.name) ?? 0) + 1;
+                                    bizRejects.set(call.name, n);
+                                    if (n >= 2) {
+                                        gateState.forceEndTurn = true;
+                                        turnAbort?.abort();
+                                    }
+                                } else if (parsed && parsed.success === true) {
+                                    bizRejects.delete(call.name);
+                                }
                             } catch (bg_err) {
                                 // 工具执行异常不再静默：不可见的失败会让模型宣而不行后
                                 // 无法定位（func_test_case 用例 11）
@@ -734,6 +879,8 @@ export async function createC4Agent(
                         log?.error(conversation, `后台工具流异常: ${msg}`);
                     });
 
+                    let round_aborted = false;
+                    try {
                     for await (const msg of stream.messages) {
                         const textParts: string[] = [];
                         lastMsgHadToolCall = false;
@@ -744,6 +891,12 @@ export async function createC4Agent(
                         if (textParts.length > 0) {
                             producedText = true;
                             lastTextSample = textParts.join("");
+                            // §2.4.2 提问即终局：任一轮文本命中问询句式即置位（保守语义
+                            // 「任一命中即置位」；用户消息到达时清除）
+                            if (question_hit(lastTextSample)) {
+                                gateState.questionPending = true;
+                                questionPending = true;
+                            }
                             assistantTextByConv.set(conversation, lastTextSample);
                             log?.llm_text(conversation, lastTextSample);
                         }
@@ -755,10 +908,32 @@ export async function createC4Agent(
                             lastMsgHadToolCall = true;
                         }
                     }
+                    } catch (err: unknown) {
+                        if (turnAbort?.signal.aborted) {
+                            round_aborted = true;
+                        } else {
+                            throw err;
+                        }
+                    }
 
                     await bgCapture;
+                    if (turnAbort?.signal.aborted) {
+                        round_aborted = true;
+                    }
+                    for (const reason of deferredDisarms) {
+                        yield { type: "button_disarm" as const, reason };
+                    }
                     for (const tr of toolResults) {
                         yield { type: "tool_result" as const, name: tr.name, result: tr.result };
+                    }
+                    // m3 闸门拒绝重试上限：强制结束回合（拒绝详情已随工具结果返回；
+                    // round_aborted = 业务拒绝超限触发 abort 中止了图内循环）
+                    if (gateState.forceEndTurn || round_aborted) {
+                        yield {
+                            type: "text" as const,
+                            content: "⚠️ 连续多次未通过阶段校验，本轮到此结束。请根据上方提示处理后再继续。",
+                        };
+                        break;
                     }
 
                     if (hasToolCall && !producedText && !summaryNudgeUsed) {
@@ -808,6 +983,18 @@ export async function createC4Agent(
                         continue;
                     }
 
+                    // §2.4.2 提问即终局（辅助规则）：collecting / planning 中的纯文本轮
+                    // （无工具调用）直接结束回合——问题已抛给用户，等待答复，不再补跑。
+                    // N1 例外（方案确认句式且无 access_plan → 强制补跑）已在上方兜底处理
+                    if (
+                        !isConfirm &&
+                        !hasToolCall &&
+                        producedText &&
+                        (gateState.phase === "collecting" || gateState.phase === "planning")
+                    ) {
+                        break;
+                    }
+
                     if (hasToolCall || misses >= MAX_MISSES || !isConfirm) break;
 
                     misses++;
@@ -815,6 +1002,21 @@ export async function createC4Agent(
                         role: "user" as const,
                         content: "你必须立即调用 output_plan_steps 工具。不要用文字回答。",
                     }];
+                }
+
+                // §2.4.4 回合终结按钮判定（一次；方案确认句式已排除于 questionPending，
+                // 故正常方案轮 arm、含问询轮 disarm/不 arm——语义状态派生，非工具事件推断）
+                if (accessPlanSucceededThisTurn) {
+                    if (questionPending) {
+                        buttonArmed = false;
+                        yield {
+                            type: "button_disarm" as const,
+                            reason: "存在待用户回答的问题，方案确认延后",
+                        };
+                    } else {
+                        buttonArmed = true;
+                        yield { type: "button_arm" as const };
+                    }
                 }
 
                 // 确定性优先：若确认消息嵌入了 changes JSON，直接采用（覆盖 LLM 的非确定性 id 映射）
@@ -934,6 +1136,10 @@ export async function createC4Agent(
                             content:
                                 "⚠️ 本次接入未执行，配置未写入。请点击下方「确认」按钮完成确认（文字回复不作为确认依据）。是否确认执行？",
                         };
+                        // M3（agent.md §2.4.4）：存在未消耗的有效方案——拒绝后重发 button_arm，
+                        // 拒绝文案引导用户点击按钮，按钮不得缺席
+                        buttonArmed = true;
+                        yield { type: "button_arm" as const };
                         planSteps = null;
                         plan_rejected = true;
                     }
@@ -946,7 +1152,8 @@ export async function createC4Agent(
                     // 事务在非生成器闭包中执行，SSE 事件先收集后 yield。
                     type ExecEvent =
                         | { type: "text"; content: string }
-                        | { type: "error"; message: string };
+                        | { type: "error"; message: string }
+                        | { type: "button_disarm"; reason: string };
                     const events: ExecEvent[] = [];
 
                     if (is_config_locked()) {
@@ -962,6 +1169,9 @@ export async function createC4Agent(
                                     const involved = [
                                         ...new Set(steps.map((st) => st.service_type)),
                                     ];
+                                    // §2.4.1：进入执行阶段（confirmed → executing；
+                                    // 失败经 executing→planning 修复，成功 → idle）
+                                    set_phase("executing");
                                     await begin_config_transaction(
                                         config.configPath,
                                         "接入变更执行（用户确认后）",
@@ -983,7 +1193,8 @@ export async function createC4Agent(
                                         config.state?.setError(mr.error ?? "未知");
                                         return;
                                     }
-                                    events.push({ type: "text", content: "接入方案已执行，配置已写入。" });
+                                    // §2.4.5：此处的先行成功文案已删除——最终汇报只出现在
+                                    // 执行结果注入后的总结轮（本轮 events 之后），杜绝 ✅+error 并存
 
                                     // 事务步骤 4：Stop-Start / merge 序列
                                     const ssr = await run_runtime_stop_start(
@@ -1040,9 +1251,11 @@ export async function createC4Agent(
                                         });
                                     }
                                     if (need_rollback) {
-                                        // 事务步骤 5（失败分支，agent.md §3.2.2）：恢复 .prev.1 →
-                                        // 以恢复后的配置执行完整 Stop-Start（含 adjust_shm）→
-                                        // 删除事务标记 → 报告失败（变更作废，不残留半接入状态）
+                                        // 事务步骤 5（失败分支，agent.md §3.2.2 + §2.4.6 回滚细则）：
+                                        // 恢复 .prev.1 → 以恢复后的配置执行完整 Stop-Start（含 adjust_shm）
+                                        // → 按恢复结果处置事务标记 → 报告失败。
+                                        // §2.4.1 修复语义（M6）：失败回滚后 phase=planning（非 idle）、
+                                        // userConfirmed 保持——用户答复修复问题的回合可直接重试执行
                                         try {
                                             const rb = await rollback_config_change(
                                                 config.mcpManager,
@@ -1056,28 +1269,54 @@ export async function createC4Agent(
                                                 abort_reason: rb.result.abort_reason ?? null,
                                             });
                                             if (!rb.restored) {
-                                                log?.error(conversation, "回滚源 config.json.prev.1 不可用，保留当前配置");
+                                                // m1 降级：回滚源不可用 → 保留当前配置 + 保留事务标记
+                                                //（交由 L0 重启收敛）+ 报告人工核验
+                                                log?.error(conversation, "回滚源 config.json.prev.1 不可用——降级：保留当前配置与事务标记，待重启收敛");
+                                                events.push({
+                                                    type: "text",
+                                                    content: "检测到服务启动失败，本次接入未成功；回滚源不可用，配置状态需人工核验。",
+                                                });
+                                            } else if (!rb.result.success) {
+                                                // m2 回滚自身的 Stop-Start 失败：配置已恢复但服务未完全恢复
+                                                log?.error(conversation, "回滚后服务未完全恢复——保留事务标记，待重启收敛");
+                                                events.push({
+                                                    type: "text",
+                                                    content: "已恢复变更前配置，但服务未完全恢复，需人工核验。",
+                                                });
+                                            } else {
+                                                events.push({
+                                                    type: "text",
+                                                    content: "检测到服务启动失败，已回滚到变更前配置并恢复原服务，本次接入未成功。",
+                                                });
+                                                await clear_pending_marker(config.configPath);
                                             }
-                                            events.push({
-                                                type: "text",
-                                                content: rb.restored
-                                                    ? "检测到服务启动失败，已回滚到变更前配置并恢复原服务，本次接入未成功。"
-                                                    : "检测到服务启动失败，本次接入未成功；配置状态需人工核验。",
-                                            });
+                                            set_phase("planning");
                                             config.state?.setError("上次接入变更未完成，已回滚，接入不成功");
+                                            buttonArmed = false;
+                                            events.push({
+                                                type: "button_disarm" as const,
+                                                reason: "方案已回滚，本次接入未成功",
+                                            });
                                         } catch (rbErr: unknown) {
+                                            // 回滚流程异常：保留事务标记（交由 L0 收敛），phase=planning 等待修复
                                             const rbMsg = rbErr instanceof Error ? rbErr.message : String(rbErr);
                                             log?.error(conversation, `回滚失败: ${rbMsg}`);
+                                            set_phase("planning");
                                         }
+                                    } else {
+                                        // 事务步骤 5（成功分支）：删除事务标记 → 回 idle →
+                                        // 确认已随本次执行消耗（下一条新接入须重新确认）
+                                        await clear_pending_marker(config.configPath);
+                                        set_phase("idle");
+                                        config.state?.setAccessPlan(false);
+                                        userConfirmed = false;
+                                        userPort = null;
+                                        buttonArmed = false;
+                                        events.push({
+                                            type: "button_disarm" as const,
+                                            reason: "方案已执行完成",
+                                        });
                                     }
-                                    // 事务步骤 5（成功分支）：删除事务标记
-                                    await clear_pending_marker(config.configPath);
-                                    config.state?.setPhase("idle");
-                                    log?.phase(conversation, "idle");
-                                    config.state?.setAccessPlan(false);
-                                    // 确认已随本次执行消耗，复位闸门（下一条新接入须重新确认）
-                                    userConfirmed = false;
-                                    userPort = null;
                                 } catch (ex: unknown) {
                                     exec_error.err = ex;
                                     throw ex;
@@ -1100,7 +1339,10 @@ export async function createC4Agent(
                                         config.configPath,
                                         config.registry as any,
                                     );
-                                    await clear_pending_marker(config.configPath);
+                                    // m2：仅回滚完全成功才清除事务标记；否则保留（交由 L0 收敛）
+                                    if (rb.restored && rb.result.success) {
+                                        await clear_pending_marker(config.configPath);
+                                    }
                                     log?.memory(conversation, "rollback_on_exception", {
                                         restored: rb.restored,
                                         success: rb.result.success,
@@ -1113,6 +1355,8 @@ export async function createC4Agent(
                                     const rbMsg = rbErr instanceof Error ? rbErr.message : String(rbErr);
                                     log?.error(conversation, `异常回滚失败（保留事务标记，等待重启恢复）: ${rbMsg}`);
                                 }
+                                // M6 修复语义：失败后 phase=planning（userConfirmed 保持，可跨轮修复）
+                                set_phase("planning");
                                 events.push({ type: "error", message: `自动执行失败: ${exMsg}` });
                                 config.state?.setError(exMsg);
                             }
@@ -1121,13 +1365,37 @@ export async function createC4Agent(
                     for (const ev of events) {
                         yield ev;
                     }
+                    // §2.4.5 执行结果先行：merge/stop_start/rollback 全部完成后，把逐项结果
+                    // 注入对话并强制一轮据实总结——最终汇报只允许出现在这一轮（结构保证
+                    // 「执行完成 ✅」与 error 不并存，不依赖文本过滤）
+                    const resultsText = events
+                        .filter((e) => e.type !== "button_disarm")
+                        .map((e) => (e.type === "error" ? `【失败】${e.message}` : e.content))
+                        .join("\n");
+                    input.messages = [...input.messages, {
+                        role: "user" as const,
+                        content:
+                            "系统执行结果（以下为唯一事实来源，禁止声称与结果不符的状态；"
+                            + "请用中文向用户做最终汇报，不要调用任何工具）：\n" + resultsText,
+                    }];
+                    log?.llm_call(conversation, misses + 2, input.messages);
+                    const stream2 = await (agent as any).streamEvents(
+                        { messages: input.messages },
+                        { version: "v3", configurable: { recursion_limit: 12 } },
+                    );
+                    summaryStream = stream2;
+                    for await (const msg of stream2.messages) {
+                        for await (const token of msg.text) {
+                            yield { type: "text" as const, content: token };
+                        }
+                    }
                 }
                 // 闸门状态不复位于此：userConfirmed/userPort 在执行完成后才复位——
                 // 「执行失败 → 补问 → 重试」的多轮修复必须跨轮保持确认（func_test_case 用例 9）
 
                 // 持久化本轮完整历史（含工具调用/结果证据），供后续轮恢复上下文
                 try {
-                    const finalState = await lastStream?.output;
+                    const finalState = await (summaryStream ?? lastStream)?.output;
                     const msgs = (finalState?.messages ?? []) as BaseMessage[];
                     const clean = msgs
                         .map(toHistoryMsg)
