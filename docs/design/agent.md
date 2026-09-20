@@ -279,7 +279,9 @@ sequenceDiagram
 
 ## 2.4 回合状态机强化（阶段门禁 / 提问即终局 / 共享校验契约）
 
-> v0.5.0 新增。背景：2026-09-19 Modbus 场景实测与 9/12~16 E2E 用例 31 复盘暴露三类架构级失效——
+> v0.5.0 新增（**已实施**，2026-09-19：turn_rules + point_rules + 工具闸门包装 +
+> 按钮事件 + 总结轮 + 回滚细则，回归 = vitest 43 用例 + tsc + eslint + 前端构建）。
+> 背景：2026-09-19 Modbus 场景实测与 9/12~16 E2E 用例 31 复盘暴露三类架构级失效——
 > 流程可跳站（收集阶段被整轮绕过）、提问后同回合自答自干（按钮 7 连弹、冲突未决即执行）、
 > 非法点表落盘（相邻 float32 寄存器重叠，merge 层无此规则）。本章将原先仅存在于提示词与
 > 单层校验中的契约升级为机器强制。设计原则：骨架不变（五阶段流水线 + 分层工具闸门），
@@ -374,6 +376,26 @@ AgentPhase 五态（idle / collecting / planning / confirmed / executing）从"�
 > fun ∈ {1, 2}（线圈 / 离散输入）为**位编址**，不适用寄存器跨度重叠，由身份查重覆盖；
 > 重叠/查重的**比较域 = merge 后该 (service_type, instance) 的最终点表**（批次内 + 批次与
 > 既有点，覆盖 modify/add-points 路径）。
+
+#### 2.4.3.1 单元测试（point_rules）
+
+- **实现**：`agent/src/executor/point_rules.ts`；**测试**：`agent/test/executor/point_rules.test.ts`
+  （vitest；测试统一存放 `agent/test/`，与 `c4/test/` 目录约定一致）；**运行**：`cd c4/agent && npm test`
+- **规范对齐**：类型枚举/跨度以 `c4/mcp/internal/protocol/const.go`（17 型 + TypeByteSize）为准
+- **覆盖矩阵**：
+
+| 测试组 | 覆盖条款 | 关键场景 |
+|--------|---------|---------|
+| **turn_rules（§2.4.1/§2.4.2，18 用例）** | 转移表逐格 + 问询句式 + 工具前置表 | B1/B2/M3/M6 回归锚点；确认句式排除；陈述「是否」不误报；提问即终局一票否决 |
+| register_span | 跨度全表 | 17 型逐型断言；变长/未知 fail-closed |
+| point_identity | 身份规范化 | 齐全/不全（跳过判定语义，m7） |
+| check_duplicate_points | 身份查重 | 9/19 事故变体（同组同地址双点）；跨 uid/fun 不误报 |
+| check_shm_overlap | 区间重叠 | **3008+3009 相邻 float32 重叠（事故本体）**；3008+3010 边界相接不误报；int64 跨度 4 覆盖判定；乱序输入；变长 fail-closed |
+| check_required_fields | 必填字段 | 逐点列出、多缺失分号连接、空串/null 视同缺失 |
+| validate_point_table | 一站式 | 三类违例同报；批次与既有点合并比较域 |
+
+- **接入状态**：模块已就绪；四层接线（device_info / access_plan / plan_steps / merge 前置）
+  按 §2.4.3 接入点定义随 B/A 实施落地
 
 ### 2.4.4 按钮状态语义化
 
