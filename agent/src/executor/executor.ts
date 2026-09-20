@@ -12,6 +12,7 @@ import type {
 } from "../types/index.js";
 import type { C4McpManager } from "../mcp/client.js";
 import { restore_prev1, atomic_write_raw } from "./transaction.js";
+import { check_duplicate_points, check_fun_codes, check_shm_overlap } from "./point_rules.js";
 import { SHM_SERVICE_TYPE } from "../mcp/client.js";
 
 // ── Point 匹配辅助 ────────────────────────────────────────
@@ -253,6 +254,38 @@ export async function merge_config_from_steps(
                     warnings,
                     error: `未知操作类型: ${(step as { action: string }).action}`,
                 };
+        }
+    }
+
+    // ── Step 2.5（agent.md §2.4.3）：merge 前置校验（point_rules 共享契约）──
+    // 对本次变更涉及的每个实例的最终点表执行 身份查重 + 寄存器区间重叠检测，
+    // 违例拒绝落盘（磁盘 config.json 未被触碰）。比较域 = merge 后的最终点表。
+    const touched = new Set(
+        steps
+            .filter((st) => st.service_type !== "c4_shm_manager")
+            .map((st) => `${st.service_type}::${(st.instance as Record<string, unknown>)?.id ?? ""}`),
+    );
+    for (const key of touched) {
+        const sep = key.indexOf("::");
+        const svc_type = key.slice(0, sep);
+        const inst_id = key.slice(sep + 2);
+        const list = config[svc_type] as MCPInstanceConfig[] | undefined;
+        const inst = (list ?? []).find((i) => i.id === inst_id);
+        if (!inst || !Array.isArray(inst.points) || inst.points.length === 0) {
+            continue;
+        }
+        const violations = [
+            ...check_fun_codes(inst.points),
+            ...check_duplicate_points(inst.points),
+            ...check_shm_overlap(inst.points),
+        ];
+        if (violations.length > 0) {
+            return {
+                success: false,
+                config,
+                warnings,
+                error: `最终点表校验未通过（${svc_type}/${inst_id}）：${violations.join("；")}`,
+            };
         }
     }
 

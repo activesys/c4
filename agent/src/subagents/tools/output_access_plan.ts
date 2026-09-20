@@ -3,6 +3,13 @@
 
 import { tool } from "langchain";
 import { z } from "zod";
+import {
+    check_duplicate_points,
+    check_fun_codes,
+    check_shm_overlap,
+    check_uid_provenance,
+    type PointLike,
+} from "../../executor/point_rules.js";
 import type { McpServiceRegistry } from "../../registry/registry.js";
 import { find_service_type, list_supported_protocols, normalize_protocol } from "./output_plan_steps.js";
 
@@ -137,7 +144,10 @@ function validate_required_config(
     return errors;
 }
 
-export function createOutputAccessPlanTool(registry: McpServiceRegistry) {
+export function createOutputAccessPlanTool(
+    registry: McpServiceRegistry,
+    opts?: { declaredUids?: Set<number> },
+) {
     return tool(
         async (input: z.infer<typeof accessPlanArgSchema>) => {
             const vr = validate_access_plan(input as unknown as Record<string, unknown>);
@@ -155,6 +165,22 @@ export function createOutputAccessPlanTool(registry: McpServiceRegistry) {
                 ),
             );
             const errors = [...vr.errors, ...requiredErrors];
+
+            // §2.4.3 方案层点级校验（point_rules 共享契约）：从站号来源 + 功能码合法 +
+            // 身份查重 + 寄存器区间重叠。仅对「身份+type 字段齐全」的点执行查重/重叠
+            //（字段不齐交由 plan_steps 层拦截）；uid 来源/功能码合法性全量校验。
+            for (const d of input.devices as unknown as Array<Record<string, unknown>>) {
+                const pts = (Array.isArray(d.points) ? d.points : []) as PointLike[];
+                const violations = [
+                    ...check_uid_provenance(pts, opts?.declaredUids ?? new Set<number>()),
+                    ...check_fun_codes(pts),
+                    ...check_duplicate_points(pts),
+                    ...check_shm_overlap(pts),
+                ];
+                for (const v of violations) {
+                    errors.push(`设备 "${d.name}"：${v}`);
+                }
+            }
 
             if (errors.length > 0) {
                 return JSON.stringify({
