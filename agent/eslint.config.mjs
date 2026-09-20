@@ -14,7 +14,11 @@ export default tseslint.config(
     files: ["src/**/*.{ts,tsx}"],
     languageOptions: {
       parserOptions: {
-        projectService: true,
+        projectService: {
+          // 构建 tsconfig 排除测试目录（不进 dist）；lint 用 tsconfig.test.json
+          // 覆盖 src + test 全量（类型感知规则对测试代码同样生效）
+          defaultProject: "./tsconfig.test.json",
+        },
         tsconfigRootDir: import.meta.dirname,
       },
     },
