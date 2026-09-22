@@ -12,6 +12,14 @@ C4 Agent L2 功能测试 — IEC104 数据采集接入
   3. writer/reader 分类与 Registry 一致（c4_iec104_client 为 writer）
 
 严格按 README.md 规格实现（黑盒 + 真实 LLM，不侵入 Agent 内部）。
+
+> **转发要求（2026-09-23 用例修订，与裁定对齐）**：采集的数据点必须配置对应的
+> 数据转发（func_test_case 用例 10 裁定；c4_shm_manager 对 writer/reader 有
+> 「同空或同非空」约束，仅采集形态 shm_id 不可分配），故本组用例的接入流程
+> 均携带转发（ASFP2 → 127.0.0.1:19900），shm_id 断言在完整执行后有效。
+> 「仅采集应被拒绝」的语义由 test_chat_execute.py::test_collection_only_no_forwarding
+> 与 test_e2e.py::test_single_device_modbus_collection_only 覆盖（仅采集形态
+> config 保留、无 reader、执行被拦）。
 """
 
 import json
@@ -64,13 +72,14 @@ class TestIec104Access:
 
     @retry_llm(max_attempts=3)
     def test_iec104_first_access(self, chat, agent, tmp_path, registry_dir):
-        """IEC104 首次接入 → config.json 含 c4_iec104_client，实例结构正确，shm_id 已分配。"""
+        """IEC104 首次接入（采集 + ASFP2 转发）→ config.json 含 c4_iec104_client，
+        实例结构正确，shm_id 已分配。"""
         csv_path = _write_iec104_csv(tmp_path)
 
         result = full_access_flow(
             chat, agent, csv_path,
             upload_msg="接入华能阿拉善1#主变",
-            plan_msg="生成接入方案（仅采集，不需要转发）",
+            plan_msg="生成接入方案，并转发到中心侧",
             confirm=True,
             tmp_path=tmp_path,
         )
@@ -109,13 +118,14 @@ class TestIec104Access:
 
     @retry_llm(max_attempts=3)
     def test_iec104_point_addr_preserved(self, chat, agent, tmp_path):
-        """IEC104 接入 → point 的 addr（IOA）与点表一致（遥信/遥测/遥脉三类区间）。"""
+        """IEC104 接入（采集 + ASFP2 转发）→ point 的 addr（IOA）与点表一致
+        （遥信/遥测/遥脉三类区间）。"""
         csv_path = _write_iec104_csv(tmp_path)
 
         result = full_access_flow(
             chat, agent, csv_path,
             upload_msg="接入华能阿拉善1#主变",
-            plan_msg="生成接入方案（仅采集）",
+            plan_msg="生成接入方案，并转发到中心侧",
             confirm=True,
             tmp_path=tmp_path,
         )

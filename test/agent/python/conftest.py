@@ -6,7 +6,7 @@ C4 Agent 功能测试公共基础设施 — conftest.py
   - McpStackHandle: 常驻 MCP 测试栈（shm_manager + 5 个数据服务，C4_SOCK_DIR 指向临时目录）
   - AgentHandle: Agent 进程 + HTTP API 封装
   - SSEEventStream: HTTP SSE 流客户端
-  - ChatHelper: 对话辅助（send / send_with_file / confirm）
+  - ChatHelper: 对话辅助（send / send_with_file / confirm / cancel / is_button_armed）
   - Fixtures: agent_binary, shm_manager_binary, registry_dir, mcp_stack, agent, chat, abbr_registry
   - Helpers: write_agent_json, write_config_json, corrupt_config_json, write_config_prev,
     write_pending_marker, clear_transaction_files, write_abbr_registry
@@ -898,12 +898,37 @@ class ChatHelper:
         """
         self._history = []
 
-    def confirm(self, interrupt_id: str) -> SSEEventStream:
+    def confirm(self) -> SSEEventStream:
         """
-        发送确认消息以通过 interrupt 检查点。
-        实现方式：POST /api/chat 并附带 interrupt_id 上下文。
+        点击确认按钮（按钮唯一确认通道，agent.md §2.8）。
+        实现方式：POST /api/chat 发送 [C4_BUTTON_CONFIRM] 前缀结构化消息——
+        后端仅识别该前缀置位「已确认」；自由文本确认不构成确认。
         """
-        return self._agent.chat(f"[confirm interrupt_id={interrupt_id}]")
+        return self._agent.chat("[C4_BUTTON_CONFIRM] 确认")
+
+    def cancel(self) -> SSEEventStream:
+        """
+        点击取消按钮（agent.md §2.8 / web.md §3.1.3）。
+        实现方式：POST /api/chat 发送 [C4_BUTTON_CANCEL] 前缀消息——
+        流程终止，不生成 config.json，不执行 Stop-Start。
+        """
+        return self._agent.chat("[C4_BUTTON_CANCEL] 取消，不执行")
+
+    @staticmethod
+    def is_button_armed(events: list) -> bool:
+        """
+        断言 SSE 事件流中出现 button_arm 语义事件（agent.md §2.8——
+        后端显式语义事件驱动按钮，前端不再从工具事件推断）。
+        兼容两种事件形态：type == "button_arm" 或 data 内含 button_arm 标记。
+        """
+        for ev in events:
+            etype = getattr(ev, "type", "") or (ev.get("type") if isinstance(ev, dict) else "")
+            if etype == "button_arm":
+                return True
+            data = getattr(ev, "data", None) if not isinstance(ev, dict) else ev.get("data")
+            if isinstance(data, dict) and data.get("button") in ("arm", "button_arm"):
+                return True
+        return False
 
 
 # ──────────────────────────────────────────────

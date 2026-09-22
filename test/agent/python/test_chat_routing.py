@@ -4,13 +4,13 @@ C4 Agent L2 功能测试 — 对话路由 & 文档解析
 
 测试依据: c4/test/agent/README.md §4.2, §4.3
 
-§4.2 对话路由 (SuperWorker 意图识别与子代理调度):
-  4.2.1  上传文档触发 info-gatherer — 解析结果出现在对话文本中
-  4.2.2  查询类消息不触发子代理 — 无结构化设备枚举
+§4.2 编排器回合（取消检测 / 问候 / 查询，agent.md §2.3/§3.1）:
+  4.2.1  上传点表触发阶段提取 — 解析结果出现在对话文本中
+  4.2.2  查询类消息不触发接入 — 无结构化设备枚举
   4.2.3  问候类消息直接回答 — SSE 正常关闭，有 assistant 回复
   4.2.4  空消息处理 — 不崩溃，返回引导性回复
 
-§4.3 文档解析 (info-gatherer 子代理):
+§4.3 阶段提取器（提示词驱动，agent.md §3.2.0）:
   4.3.1  解析合法 xlsx 点表
   4.3.2  解析合法 csv 点表
   4.3.3  上传不支持的文件格式
@@ -53,7 +53,7 @@ from assertions import assert_no_technical_terms
 
 @pytest.mark.llm
 class TestChatRouting:
-    """§4.2 对话路由 — SuperWorker 意图识别与子代理调度"""
+    """§4.2 编排器回合 — 取消检测/问候/查询/阶段提取分叉"""
 
     @retry_llm(max_attempts=3)
     def test_info_gatherer_triggered_by_upload_xlsx(
@@ -68,7 +68,7 @@ class TestChatRouting:
         # 可观察副作用：文本非空，非"无法解析"，含设备相关信息
         assert len(text) > 0, "Response text should not be empty"
         assert "无法解析" not in text, (
-            f"info-gatherer should return parsed content, got: {text[:300]}"
+            f"阶段提取器应返回解析内容, got: {text[:300]}"
         )
         # 点表中的数据应出现在文本中
         keywords = ["windspeed", "1000", "temperature"]
@@ -79,13 +79,13 @@ class TestChatRouting:
 
     @retry_llm(max_attempts=3)
     def test_query_message_no_subagent(self, chat, agent):
-        """4.2.2: 查询 "现在有哪些设备在运行" → 不触发 info-gatherer 子代理"""
+        """4.2.2: 查询 "现在有哪些设备在运行" → 不触发接入流程"""
         with chat.send("现在有哪些设备在运行") as stream:
             text = stream.text_content()
 
         assert len(text) > 0, "Response should not be empty"
 
-        # 不应出现结构化设备枚举（info-gatherer 输出特征）
+        # 不应出现结构化设备枚举（阶段提取器输出特征）
         structured_indicators = [
             "设备名", "协议", "数据点", "寄存器", "Modbus",
         ]
@@ -125,7 +125,7 @@ class TestChatRouting:
 
 @pytest.mark.llm
 class TestInfoGatherer:
-    """§4.3 文档解析 — info-gatherer 子代理"""
+    """§4.3 点表解析 — 阶段提取器（提示词驱动，非工具）"""
 
     @retry_llm(max_attempts=3)
     def test_parse_valid_xlsx(self, chat, agent, tmp_path):
@@ -137,14 +137,14 @@ class TestInfoGatherer:
 
         assert len(text) > 0, "Response should not be empty"
         assert "华能阿拉善" in text or "风机" in text, (
-            f"Expected device name in info-gatherer result, got: {text[:500]}"
+            f"提取结果应含设备名, got: {text[:500]}"
         )
         # README §4.3.1: 收集结果含设备名、协议、数据点列表 — 点表数据应出现在文本中
         point_signal = any(
             kw in text for kw in ("windspeed", "temperature", "1000", "1002")
         )
         assert point_signal, (
-            f"Expected parsed point info in info-gatherer result, got: {text[:500]}"
+            f"提取结果应含点表信息, got: {text[:500]}"
         )
         assert_no_technical_terms(text, allow_protocols=True)
 
@@ -278,7 +278,7 @@ class TestInfoGatherer:
 
 
 # ══════════════════════════════════════════════
-#  §4.3.6-4.3.9 协议推断 (info-gatherer)
+#  §4.3.6-4.3.8 协议必供（阶段提取器，禁止推断）
 # ══════════════════════════════════════════════
 
 

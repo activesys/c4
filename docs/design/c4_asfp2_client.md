@@ -639,6 +639,35 @@ var index map[uint32]*PointMapping
 
 **返回值**：成功返回 `"success"`。
 
+#### Tool: `validate_points` —— C4_FUN_00088
+
+对一份**完整点表**执行协议语义校验（L2 层），供 Agent 的 Workflow 编排器在方案确认前
+调用。校验逻辑与 `start` 的启动校验（`INVALID_POINT`）**同源**——复用同一份 Go 校验
+代码路径。接口契约（参数/返回 schema、调用时机、同态性约束）见
+[agent.md §2.7.1](agent.md)。**无状态、只读、纯计算。**
+
+**参数**：`points`（array，必填）—— 本轮提取的完整点表，逐点字段与 §2.3 一致且全部必填
+（点级字段无默认值）。
+
+**返回值**：结构由 agent.md §2.7.1 统一定义（`{ valid, errors[], warnings[] }`）。
+
+**校验规则与错误码**（提取自 `validateConfig`，main.go）：
+
+| 错误码 | 触发条件 | 对应启动校验 |
+|--------|---------|-------------|
+| `POINT_DUP` | 同实例内 `addr`（ASFP2 key）重复——重复 key 在发送映射构建时**静默覆盖**，数据将丢失 | 启动校验现状无 dup 检测（**已知缺口**） |
+| `ADDR_OUT_OF_RANGE` | `addr` > `protocol.MaxAddr`（0xFFFFFF） | `CONFIG_PARSE_ERROR: addr exceeds max` |
+
+> **addr 语义**：ASFP2 的 addr 是 24 位 **key 标识符**（0 ~ 16777215），不是寄存器/
+> 字节区间编址——不存在区间重叠概念，唯一性（POINT_DUP）是核心约束。
+>
+> **排除项**：`SHM_ID_NOT_ASSIGNED`（shm_id 执行期回填，启动校验专属）。
+
+**实现要求**：不得另写第二套校验逻辑——`validate_points` 与启动校验调用**同一校验函数**
+（参数化子集：启动路径 `opts.requireShmID=true`，本工具 `false`）。**POINT_DUP 检测必须
+加入共享校验函数**——启动校验随之自动获得该检查，同步修复上述现状缺口（强制要求，
+非可选：若 dup 只存在于工具侧，则违反同源；若只存在于启动侧，则失去方案期前置拦截）。
+
 ---
 
 ## 6. 错误处理

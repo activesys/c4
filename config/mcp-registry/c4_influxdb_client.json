@@ -29,8 +29,12 @@
       {
         "name": "type",
         "type": "string",
-        "description": "数据类型（如 float/int/string）"
+        "description": "数据类型（枚举见 point_field_hints.type）"
       }
+    ],
+    "identity_fields": [
+      "measurement",
+      "field"
     ]
   },
   "config_schema": {
@@ -99,9 +103,40 @@
     "SHM_OPEN_FAILED": "无法访问数据存储，请检查共享内存配置",
     "SHM_ID_NOT_ASSIGNED": "数据点未分配通道，请重新生成接入方案"
   },
-  "prompt_hints": [
-    "本服务将数据写入 InfluxDB；url、token、org、bucket 为连接必要项，接入前须全部确认",
-    "每个转发点必须提供 measurement（表名）、field（字段名）、type（数据类型）三项",
-    "measurement 相当于关系数据库的表名，通常按设备或数据类别命名"
-  ]
+  "prompt_hints": {
+    "protocol_match": {
+      "aliases": [
+        "InfluxDB",
+        "influxdb",
+        "influx 时序数据库"
+      ],
+      "rejected_variants": []
+    },
+    "point_field_hints": {
+      "measurement": {
+        "description": "measurement 名（表名），相当于关系数据库的表名，通常按设备或数据类别命名",
+        "extraction": "可由场站缩写确定性推导（阶段 1 已确认数据）；用户明确给出时以用户为准；推导值在方案展示中标注供确认"
+      },
+      "field": {
+        "description": "field 名（字段名）",
+        "extraction": "常见表述：按点名作为字段名"
+      },
+      "type": {
+        "description": "数据类型",
+        "enum": {
+          "float": "浮点数",
+          "int": "有符号整数",
+          "uint": "无符号整数",
+          "bool": "布尔量"
+        },
+        "extraction": "可由源点数据类型确定性推导（类型映射：modbus 浮点→float、整数→int/uint、位→bool）；用户明确给出时以用户为准；推导值在方案展示中标注供确认"
+      }
+    },
+    "connection_hints": [
+      "url/token/org/bucket 为连接必要项，接入前须全部确认",
+      "1.x 版本未启用认证时：token/org 填任意非空值，bucket 填数据库名",
+      "precision/batch_size/flush_interval/gzip/t0/retries/timer 等字段有默认值，无需向用户询问"
+    ],
+    "display": "InfluxDB 数据入库客户端：从共享内存读取数据写入 InfluxDB 时序数据库"
+  }
 }

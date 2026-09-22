@@ -328,7 +328,9 @@ def _post(path, body, timeout=300):
 
 def chat(message, history):
     """返回 (完整文本, 事件列表)；事件用于过程健康度断言（README §4）。
-    事件形如 (type, name)：("tool_call","output_access_plan") / ("error","") 等。"""
+    事件形如 (type, name)：("tool_call","output_access_plan") / ("error","") 等。
+    新架构（agent.md §2.8）：方案武装信号为 button_arm 语义事件（不再从工具事件推断——
+    工具副作用 ≠ 语义状态）；本函数对旧工具事件与新语义事件双兼容探测。"""
     text_parts = []
     events = []
     with _post("/api/chat", {"message": message, "history": history}) as resp:
@@ -399,6 +401,8 @@ class Conv:
         return text
 
     def send_and_confirm(self, message):
+        # 确认通道：按钮唯一确认（agent.md §2.8）——[C4_BUTTON_CONFIRM] 前缀消息；
+        # 自由文本"确认"不构成确认（func_test_case 用例 5 定稿方案）
         text = self.send(message)
         plan_ready = (
             "是否确认" in text
@@ -481,7 +485,7 @@ CONFIRM_PHRASE_RE = re.compile(r"是否确认执行|确认执行")
 SUCCESS_MARK_RE = re.compile(r"执行完成|已执行成功|已配置完成|接入完成|接入方案已执行")
 FAKE_TAIL_RE = re.compile(r"没有真正完成|重新执行|重新提交|接入失败|需人工核验|配置未生效")
 IDLE_TEXT_RE = re.compile(r"[\s.。…~]*\Z")
-PLAN_TOOLS = {"output_access_plan", "output_plan_steps"}
+PLAN_TOOLS = {"output_access_plan", "output_plan_steps"}  # 兼容旧实现探测；新架构（agent.md §3.2.0.1）方案层为纯代码，武装信号 = button_arm 事件
 BUTTON_BUDGET = {}   # 每用例按钮预算覆盖表；缺省 2（= send_flow 驱动器 clicked<2 上限）
 
 

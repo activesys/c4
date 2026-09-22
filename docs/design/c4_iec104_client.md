@@ -756,6 +756,36 @@ Reader 的本机序读取约定一致。
 
 **返回值**：成功返回 `"success"`。
 
+#### Tool: `validate_points` —— C4_FUN_00087
+
+对一份**完整点表**执行协议语义校验（L2 层），供 Agent 的 Workflow 编排器在方案确认前
+调用。校验逻辑与 `start` 的启动校验（`INVALID_POINT`）**同源**——复用同一份 Go 校验
+代码路径。接口契约见 [agent.md §2.7.1](agent.md)。**无状态、只读、纯计算。**
+
+**参数**：`points`（array，必填）—— 本轮提取的完整点表，逐点字段与 §2.3 一致且全部必填
+（点级字段无默认值）。
+
+**返回值**：结构由 agent.md §2.7.1 统一定义（`{ valid, errors[], warnings[] }`）。
+
+**校验规则与错误码**（提取自 `validateConfig`，main.go）：
+
+| 错误码 | 触发条件 | 对应启动校验 |
+|--------|---------|-------------|
+| `POINT_DUP` | 同实例内 `addr`（信息对象地址 IOA）重复 | `INVALID_POINT: duplicate addr` |
+| `ADDR_OUT_OF_RANGE`（启动校验执行） | `addr` 超出 `ioa_size` 允许上限（ioa_size=1/2/3 → 0xFF / 0xFFFF / 0xFFFFFF） | `INVALID_POINT: invalid addr` |
+
+> **范围校验的分层说明**：addr 上限依赖**实例级** `ioa_size` 字段，而本工具参数只含
+> points 数组——故 `ADDR_OUT_OF_RANGE` **不由 validate_points 校验**，归启动校验兜底；
+> 提取期的避坑知识（ioa_size 与 addr 上限）由 registry `prompt_hints.point_field_hints`
+> 承载（L0）。源码无 type/地址段匹配约束，不设此类错误码。
+>
+> **排除项**：`SHM_ID_NOT_ASSIGNED`（shm_id 由 c4_shm_manager 执行期回填，属启动
+> 校验专属，validate_points 不涉及）。
+
+**实现要求**：不得另写第二套校验逻辑——`validate_points` 与启动校验调用**同一校验函数**
+（参数化子集：启动路径 `opts.requireShmID=true`，本工具 `opts.requireShmID=false`）；
+新增校验规则在共享函数中演进，两路径自动同步。
+
 ---
 
 ## 7. 错误处理

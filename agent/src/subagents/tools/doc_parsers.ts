@@ -121,3 +121,16 @@ export const txtParserTool = tool(
         schema: z.object({ filePath: z.string().describe("txt 文件绝对路径") }),
     },
 );
+
+// 编排器统一入口（agent.md §3.2.0 阶段 3/6 文件注入）：按扩展名分发解析，返回文本化表格
+export function parse_any_file(filePath: string): string {
+    if (filePath.endsWith(".xlsx") || filePath.endsWith(".xls")) {
+        const r = parse_xlsx_raw(fs.readFileSync(filePath));
+        return JSON.stringify(r);
+    }
+    if (filePath.endsWith(".csv")) {
+        const r = parse_csv_raw(fs.readFileSync(filePath, "utf-8"));
+        return JSON.stringify(r);
+    }
+    return fs.readFileSync(filePath, "utf-8");
+}

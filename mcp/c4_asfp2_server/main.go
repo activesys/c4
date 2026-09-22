@@ -1004,6 +1004,15 @@ func main() {
 		stopHandler,
 	)
 
+	mcp.AddTool(server,
+		&mcp.Tool{
+			Name:        "validate_points",
+			Description: "Validate a full point table against ASFP2 semantics (plan-time L2 check)",
+			InputSchema: json.RawMessage(`{"type":"object","properties":{"points":{"type":"array","items":{"type":"object"}}},"required":["points"]}`),
+		},
+		validatePointsHandler,
+	)
+
 	/* 常驻模式为默认（Unix socket，进程启动零实例零 attach）；stdio 经 --stdio 或
 	   管道 stdin 保留（Agent / pytest harness 测试脚手架） */
 	if err := transport.Run("c4_asfp2_server", server); err != nil {

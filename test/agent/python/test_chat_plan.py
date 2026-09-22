@@ -4,7 +4,7 @@ C4 Agent L2 功能测试 — 方案生成 & 用户确认
 
 测试依据: c4/test/agent/README.md §4.4, §4.5
 
-§4.4 方案生成 (plan-generator 子代理):
+§4.4 方案层（纯代码，agent.md §3.2.0.1）——缺口闭合自动装配 + button_arm:
   4.4.1  Modbus → ASFP2 转发方案 — 对话含"确认"关键词
   4.4.2  无转发目标时仅采集 — 仍等待确认，方案仅含采集
   4.4.3  无法推断协议 — Agent 主动询问澄清
@@ -48,11 +48,11 @@ from assertions import (
 
 @pytest.mark.llm
 class TestPlanGeneration:
-    """§4.4 方案生成 — plan-generator 子代理"""
+    """§4.4 方案层 — 缺口闭合自动装配（无 LLM plan-generator）"""
 
     @retry_llm(max_attempts=3)
     def test_generate_plan_with_forwarding(self, chat, agent, tmp_path):
-        """4.4.1: info-gatherer 完成后 "生成方案并转发到中心侧" → 对话含"确认"关键词"""
+        """4.4.1: 缺口闭合后方案层自动装配 → 对话含方案要素与确认等待（button_arm）"""
         csv_path = create_full_csv(tmp_path)
 
         # Step 1: 上传点表

@@ -716,7 +716,7 @@ class TestAbbrIdStability:
 
         前置：记忆库含 hnals_wt1；请求 modify/delete 记忆库中无记录的
         设备（2#风机，从未接入过）。
-        预期：info-gatherer 检索记忆库阶段即报错「目标不存在，可能已删除
+        预期：阶段提取器检索记忆库阶段即报错「目标不存在，可能已删除
         或从未接入」，不进入方案生成，不修改 config.json。
         """
         write_config_json(agent.config_dir, _CONFIG_WITH_WT1)

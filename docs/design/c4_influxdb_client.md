@@ -703,6 +703,30 @@ var index map[uint32]*PointMapping
 
 **返回值**：成功返回 `"success"`。
 
+#### Tool: `validate_points` —— C4_FUN_00090
+
+对一份**完整点表**执行协议语义校验（L2 层），供 Agent 的 Workflow 编排器在方案确认前
+调用。校验逻辑与 `start` 的启动校验（`INVALID_POINT`）**同源**——复用同一份 Go 校验
+代码路径。接口契约见 [agent.md §2.7.1](agent.md)。**无状态、只读、纯计算。**
+
+**参数**：`points`（array，必填）—— 本轮提取的完整点表，逐点字段与 §2.3 一致且全部必填
+（点级字段无默认值）。
+
+**返回值**：结构由 agent.md §2.7.1 统一定义（`{ valid, errors[], warnings[] }`）。
+
+**校验规则与错误码**（提取自 `validateConfig`，main.go）：
+
+| 错误码 | 触发条件 | 对应启动校验 |
+|--------|---------|-------------|
+| `POINT_DUP` | 同实例内 (`measurement`, `field`) 组合重复——启动校验以 `shm_id` 查重为等价物（shm_id 执行期分配，本工具用业务键查重）。**等价性边界**：两个不同业务键引用同一 Writer 点（key 重复 → 运行期 duplicate shm_id）属 **L1 reader-key 唯一性**职责（阶段 6 出口拦截，agent.md §2.7），本工具不查 key | `INVALID_POINT: duplicate shm_id` |
+| `MEASUREMENT_EMPTY` | `measurement` 为空（可推导字段：场站缩写推导由方案层填充，见 agent.md §2.7.1 确定性推导） | `INVALID_POINT: empty measurement` |
+| `INVALID_TYPE` | `type` ∉ {`float`, `int`, `uint`, `bool`}（可推导字段：源点类型映射由方案层填充；推导值缺失/非法在本工具拦截）。**空值容忍差异**：启动校验对 `type=""` 放行（运行期按实际值推导），共享函数落地时该差异以 opts 开关显式建模（agent.md §2.7.1） | `INVALID_POINT: invalid type` |
+| `FIELD_FORMAT` | `field` 不匹配 `^[a-zA-Z_]+$`；点含 `tags` 时各 tag key 同校验（tags 运行期支持、接入流程 v1 不采集，本检查条件生效）。**空值容忍差异**：启动校验对 `field=""` 放行（`pt.Field != ""` 才做正则校验，运行期回退点名），共享函数落地时该差异以 opts 开关显式建模（agent.md §2.7.1） | `INVALID_POINT: invalid field / tag key` |
+
+**实现要求**：不得另写第二套校验逻辑——`validate_points` 与启动校验调用**同一校验函数**
+（参数化子集：启动路径 `opts.requireShmID=true`，本工具 `opts.requireShmID=false`）；
+新增校验规则在共享函数中演进，两路径自动同步。
+
 ---
 
 ## 6. 错误处理

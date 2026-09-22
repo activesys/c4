@@ -114,10 +114,38 @@
     "SHM_ID_NOT_ASSIGNED": "数据点未分配通道，请重新生成接入方案",
     "INVALID_POINT": "数据点配置无效，请检查信息对象地址"
   },
-  "prompt_hints": [
-    "本服务为 IEC 60870-5-104 数据采集端（客户端），ip/port 为远动装置地址",
-    "port 为必填项：必须由用户显式指定，用户未提供时先询问，禁止使用协议常见端口作为默认值",
-    "common_address 为 ASDU 公共地址（默认 1），同一远动装置接入多台设备时须确认各自公共地址",
-    "t2 必须小于 t1（协议约束）"
-  ]
+  "prompt_hints": {
+    "protocol_match": {
+      "aliases": ["IEC 104", "IEC 60870-5-104", "104 规约", "IEC 60870-5-104 规约"],
+      "rejected_variants": [
+        {
+          "name": "IEC 101",
+          "reason": "串口远动规约，本服务仅支持 IEC 60870-5-104"
+        },
+        {
+          "name": "IEC 102",
+          "reason": "电能累计量规约，本服务仅支持 IEC 60870-5-104"
+        }
+      ],
+      "ambiguous_patterns": [
+        {
+          "pattern": "IEC 60870",
+          "reason": "IEC 60870 家族含 101/102/104 等部分，未指明具体规约，需向用户确认"
+        }
+      ]
+    },
+    "point_field_hints": {
+      "addr": {
+        "description": "信息对象地址（IOA）",
+        "range": "0-16777215（ioa_size=3 字节，默认）；ioa_size=1/2 时为 0-255/0-65535"
+      }
+    },
+    "connection_hints": [
+      "ip/port 为远动装置地址，port 为必填项：必须由用户显式指定，用户未提供时先询问，禁止自动选择或使用默认值",
+      "common_address 为 ASDU 公共地址（默认 1），同一远动装置接入多台设备时须确认各自公共地址",
+      "t2 必须小于 t1（协议约束）",
+      "k/w/t0/t1/t3/ioa_size/modules 等字段有默认值，无需向用户询问"
+    ],
+    "display": "IEC 60870-5-104 数据采集端（客户端）：从远动装置读取遥测/遥信等数据写入共享内存"
+  }
 }

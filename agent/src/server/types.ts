@@ -1,6 +1,6 @@
 // c4/agent/src/server/types.ts — Server-side agent interface
 // Defines the contract between Express routes and the Agent instance.
-// The actual SuperWorker implementation lives in super_worker/super_worker.ts.
+// The actual implementation is orchestrator/orchestrator.ts (Workflow 编排器).
 
 import type { AgentPhase } from "../types/index.js";
 
@@ -26,8 +26,8 @@ export type AgentStreamEvent =
 /**
  * Minimal contract for the C4 Agent instance used by Express routes.
  *
- * The actual implementation (createDeepAgent from deepagents) is assembled
- * in super_worker/super_worker.ts and injected into the server at startup.
+ * The actual implementation (createOrchestrator, 缺口驱动九阶段流水线) is assembled
+ * in orchestrator/orchestrator.ts and injected into the server at startup.
  */
 export interface C4Agent {
   /** Invoke the agent with messages, yielding a stream of events. */

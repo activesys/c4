@@ -34,6 +34,7 @@ import {
     is_success_result,
 } from "./executor/executor.js";
 import { translateError } from "./mcp/tools.js";
+import { createOrchestrator } from "./orchestrator/orchestrator.js";
 import {
     load_valid_config,
     read_pending_marker,
@@ -41,7 +42,6 @@ import {
     clear_pending_marker,
 } from "./executor/transaction.js";
 import { with_config_lock } from "./executor/single_flight.js";
-import { createC4Agent } from "./super_worker/super_worker.js";
 import { DisplayService } from "./display/session.js";
 import { createDisplayRouter } from "./display/routes.js";
 import { createDisplayTools } from "./display/tools.js";
@@ -65,8 +65,10 @@ const AgentConfigSchema: z.ZodType<AgentConfig> = z.object({
         temperature: z.number(),
         max_tokens: z.number(),
         api_key_env: z.string(),
-        // 智谱 glm 深度思考开关：disabled 大幅降低每轮延迟（实测 23s→5s 量级）
-        thinking: z.enum(["disabled", "enabled"]).optional(),
+        // 智谱 glm 思考档位：2026-09 起端点对 glm-5.3-flash 拒绝任何 thinking 参数
+        //（"该模型始终思考"，low/high/max 同样 1210）——字段保留兼容旧配置，
+        // 运行时不再注入请求（模型默认自带思考）
+        thinking: z.enum(["disabled", "enabled", "low", "high", "max"]).optional(),
     }),
     server: z.object({
         host: z.string(),
@@ -402,7 +404,7 @@ async function runStartupWaterfall(
 async function createModel(config: AgentConfig, logger: Logger) {
     const { name, base_url, temperature, max_tokens, api_key_env } =
         config.model;
-    const thinking = config.model.thinking ?? "disabled";
+    void config.model.thinking;
 
     const apiKey = process.env[api_key_env];
     if (!apiKey) {
@@ -413,15 +415,12 @@ async function createModel(config: AgentConfig, logger: Logger) {
 
     const { ChatOpenAI } = await import("@langchain/openai");
     logger.info(
-        `创建模型: ${name} @ ${base_url} (temperature=${temperature}, thinking=${thinking})`,
+        `创建模型: ${name} @ ${base_url} (temperature=${temperature})`,
     );
-    // 智谱 Coding 端点的 glm 默认开启深度思考——每轮先生成 reasoning 再出正文，
-    // 实测每轮 23s~101s；disabled 后回到秒级。仅对智谱端点注入（其他兼容端点
-    // 可能拒绝未知参数）。
-    const modelKwargs: Record<string, unknown> =
-        base_url.includes("bigmodel.cn") && thinking === "disabled"
-            ? { thinking: { type: "disabled" } }
-            : {};
+    // 智谱端点对 glm-5.3-flash 拒绝任何 thinking 参数（实测 disabled 与 low/high/max
+    // 均 400 code=1210）；不注入任何 thinking 字段——模型默认始终思考并返回
+    // reasoning_content，正常出正文。
+    const modelKwargs: Record<string, unknown> = {};
     return new ChatOpenAI({
         apiKey,
         model: name,
@@ -549,7 +548,7 @@ async function main(): Promise<void> {
     // ── Step 7: Create C4 Agent ──
     let agent: C4Agent;
     try {
-        agent = await createC4Agent({
+        agent = createOrchestrator({
             model,
             registry,
             mcpManager,

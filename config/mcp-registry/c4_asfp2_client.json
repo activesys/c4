@@ -21,7 +21,8 @@
         "type": "integer",
         "description": "转发地址（目标服务器点地址）"
       }
-    ]
+    ],
+    "identity_fields": ["addr"]
   },
   "config_schema": {
     "fields": {
@@ -95,9 +96,23 @@
     "SHM_OPEN_FAILED": "无法访问数据存储，请检查共享内存配置",
     "SHM_ID_NOT_ASSIGNED": "数据点未分配通道，请重新生成接入方案"
   },
-  "prompt_hints": [
-    "本服务为 ASFP2 数据转发端（客户端），ip/port 为数据接收端（如 II 区服务器）地址，启动时即发起连接，须确认对端已就绪",
-    "仅转发发生变化的点，数据无变化时不发送任何帧（当前不发心跳，t1/t2 预留未启用）",
-    "转发点的 addr 为对端接收地址，是必要项，由用户提供"
-  ]
+  "prompt_hints": {
+    "protocol_match": {
+      "aliases": ["ASFP2", "asfp2", "ASFP2 协议"],
+      "rejected_variants": []
+    },
+    "point_field_hints": {
+      "addr": {
+        "description": "转发地址（目标服务器点地址），由用户提供、须与对端约定",
+        "range": "0-16777215（0xFFFFFF）",
+        "extraction": "常见表述：点表5000~5009（地址范围须展开为逐点条目）"
+      }
+    },
+    "connection_hints": [
+      "ip/port 为数据接收端（如 II 区服务器）地址，均为必填项，启动时即发起连接，接入前须确认对端已就绪",
+      "t1/t2 为心跳参数（预留，默认 0 不启用心跳）",
+      "timer/key_sequence/same_data_type/same_timestamp/smart/forward_kack/inverse_keep 等字段有默认值，无需向用户询问"
+    ],
+    "display": "ASFP2 数据转发端（客户端）：从共享内存读取变化数据按 ASFP2 协议推送到对端服务器；仅转发发生变化的点，数据无变化时不发送任何帧"
+  }
 }

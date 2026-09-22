@@ -30,7 +30,12 @@ export interface ServiceCatalogEntry extends RegistryL1Summary {
     point_fields: PointField[];
     identity_fields?: string[];
     plan_fields: L1PlanFieldSummary[];
-    prompt_hints: string[];
+    prompt_hints: {
+      protocol_match?: Record<string, unknown>;
+      point_field_hints?: Record<string, unknown>;
+      connection_hints?: string[] | Record<string, unknown>;
+      display?: string | string[] | Record<string, unknown>;
+    };
 }
 
 // ── 内置错误翻译（agent.md §3.4）──
@@ -230,7 +235,7 @@ export class McpServiceRegistry {
           default: field.default,
           description: field.description,
         })),
-      prompt_hints: entry.prompt_hints ? [...entry.prompt_hints] : [],
+      prompt_hints: entry.prompt_hints ? { ...entry.prompt_hints } : {},
     }));
   }
 
@@ -246,7 +251,7 @@ export class McpServiceRegistry {
       point_schema: entry.point_schema,
       config_schema: entry.config_schema,
       binary_path: entry.binary_path,
-      prompt_hints: entry.prompt_hints ? [...entry.prompt_hints] : undefined,
+      prompt_hints: entry.prompt_hints ? { ...entry.prompt_hints } : undefined,
       error_mappings: entry.error_mappings,
     };
   }
@@ -312,10 +317,13 @@ export function formatServiceCatalog(summaries: ServiceCatalogEntry[]): string {
       }
     }
 
-    if (s.prompt_hints.length > 0) {
-      lines.push("  使用提示:");
-      for (const h of s.prompt_hints) {
-        lines.push(`  - ${h}`);
+    if (s.prompt_hints) {
+      // 四节对象：展示 display 节（面向用户的知识摘要）；其余节供阶段参数渲染
+      const disp = s.prompt_hints.display;
+      if (disp !== undefined) {
+        lines.push("  使用提示:");
+        const items = Array.isArray(disp) ? disp : typeof disp === "string" ? [disp] : [];
+        for (const h of items) lines.push(`  - ${h}`);
       }
     }
 

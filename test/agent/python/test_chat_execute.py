@@ -29,7 +29,7 @@ C4 Agent L2 功能测试 — 执行验证 & 错误恢复 & 状态持久化
          一致回滚（agent.md §3.2.2：恢复 .prev.1 + 完整 Stop-Start）
   4.8.5  start 失败 → 回滚 .prev.1（变更作废，不残留半接入状态）;
          启动收敛期 MCP 不可达 → 记录失败保持降级，不阻塞其余服务
-  4.8.6  step-decomposer 失败 — 用户消息验证
+  4.8.6  拆解器失败（generatePlanSteps）— 用户消息验证（事务未启动，无重试）
 
 §4.10 单飞规则（c4_architecture.md §3.1.2）:
   并发配置变更请求在会话层直接拒绝——「有配置变更正在执行，请稍后重试」
@@ -1153,7 +1153,7 @@ class TestErrorRecovery:
 
     @retry_llm(max_attempts=3)
     def test_step_decomposer_failure_message(self, chat, agent, tmp_path):
-        """4.8.6: step-decomposer 失败 → 用户收到非技术语言提示"""
+        """4.8.6: 拆解器校验失败 → 拆解中止事务未启动 → 用户收到非技术语言提示"""
         csv_path = create_messy_csv(tmp_path)
 
         # 上传混乱点表
@@ -1162,7 +1162,7 @@ class TestErrorRecovery:
 
         assert len(text) > 0, "Response should not be empty"
 
-        # 尝试生成方案 — step-decomposer 应因点表混乱而失败
+        # 提交方案 — 拆解器应因点表混乱校验失败（事务不启动）
         with chat.send("生成接入方案") as stream:
             text2 = stream.text_content()
 
@@ -1267,7 +1267,7 @@ class TestAgentState:
     def test_state_restore_after_plan_generation(self, chat, agent, tmp_path):
         """4.9.1: 接入流程中途重启 → 状态恢复
 
-        前置：完成 info-gatherer + plan-generator，hasAccessPlan=true。
+        前置：提取完成 + 缺口闭合方案层装配，hasAccessPlan=true。
         kill → restart 后 hasAccessPlan 仍为 true。
         """
         csv_path = create_full_csv(tmp_path)
@@ -1316,7 +1316,7 @@ class TestAgentState:
     def test_state_after_confirm_before_execution(self, chat, agent, tmp_path):
         """4.9.2: 用户确认后中断 → 状态保持
 
-        前置：确认方案后，在 step-decomposer 执行前 kill。
+        前置：确认按钮点击后，在拆解器执行前 kill。
         restart 后 phase 反映已确认状态（"confirmed"），Agent 可继续执行。
         """
         csv_path = create_full_csv(tmp_path)
@@ -1341,7 +1341,7 @@ class TestAgentState:
             with chat.send("[C4_BUTTON_CONFIRM] 确认方案") as s:
                 s.text_content()
 
-        # 快速 kill（模拟 step-decomposer 执行前崩溃）
+        # 快速 kill（模拟拆解器执行前崩溃）
         agent.kill()
         agent.restart()
 

@@ -209,59 +209,26 @@ func validateConfig(instances []modbusInstance) error {
 			return fmt.Errorf("CONFIG_PARSE_ERROR: instance '%s' has invalid port %d", inst.ID, inst.Port)
 		}
 
-		seen := make(map[modbusAddr]string)
-		groups := make(map[[2]int][]modbusPoint)
-		for _, pt := range inst.Points {
-			if pt.ShmID == 0 {
-				return fmt.Errorf("SHM_ID_NOT_ASSIGNED: point '%s' has shm_id=0, must be assigned by c4_shm_manager first", pt.ID)
-			}
-			if pt.UID < 0 || pt.UID > 255 {
-				return fmt.Errorf("INVALID_POINT: point '%s' has invalid uid=%d (must be 0~255)", pt.ID, pt.UID)
-			}
-			if pt.Addr > 0xFFFF {
-				return fmt.Errorf("INVALID_POINT: point '%s' has invalid addr=%d (must be 0~65535)", pt.ID, pt.Addr)
-			}
-			if pt.Fun != 1 && pt.Fun != 2 && pt.Fun != 3 && pt.Fun != 4 {
-				return fmt.Errorf("INVALID_POINT: point '%s' has invalid fun=%d (must be 1/2/3/4)", pt.ID, pt.Fun)
-			}
-			if !validTypeForFun(pt.Fun, pt.Type) {
-				return fmt.Errorf("INVALID_POINT: point '%s' has invalid type=%d for fun=%d", pt.ID, pt.Type, pt.Fun)
-			}
-
-			span := int(pointSpan(pt.Fun, pt.Type))
-			byteCount := span * 2
-			if pt.Fun == 1 || pt.Fun == 2 {
-				byteCount = 1
-			}
-			if pt.Swap != 0 && pt.Swap != 1 && pt.Swap != 2 && pt.Swap != 4 {
-				return fmt.Errorf("INVALID_POINT: point '%s' has invalid swap=%d (must be 0/1/2/4)", pt.ID, pt.Swap)
-			}
-			if byteCount == 1 || byteCount == 2 {
-				if pt.Swap != 0 {
-					return fmt.Errorf("INVALID_POINT: point '%s' type=%d is single-unit, swap must be 0 (got %d)", pt.ID, pt.Type, pt.Swap)
-				}
-			} else if pt.Swap > 0 && byteCount%pt.Swap != 0 {
-				return fmt.Errorf("INVALID_POINT: point '%s' swap=%d does not divide byte count %d", pt.ID, pt.Swap, byteCount)
-			}
-
-			key := modbusAddr{UID: uint8(pt.UID), Fun: pt.Fun, Addr: pt.Addr}
-			if prev, ok := seen[key]; ok {
-				return fmt.Errorf("INVALID_POINT: duplicate (uid=%d,fun=%d,addr=%d) for points '%s' and '%s'", pt.UID, pt.Fun, pt.Addr, prev, pt.ID)
-			}
-			seen[key] = pt.ID
-
-			gkey := [2]int{pt.UID, int(pt.Fun)}
-			groups[gkey] = append(groups[gkey], pt)
-		}
-
-		for gkey, pts := range groups {
-			sort.Slice(pts, func(i, j int) bool { return pts[i].Addr < pts[j].Addr })
-			for i := 1; i < len(pts); i++ {
-				prev := pts[i-1]
-				prevSpan := pointSpan(uint8(gkey[1]), prev.Type)
-				if pts[i].Addr < prev.Addr+uint32(prevSpan) {
-					return fmt.Errorf("INVALID_POINT: point '%s' addr=%d overlaps point '%s' (addr=%d span=%d) in group (uid=%d,fun=%d)", pts[i].ID, pts[i].Addr, prev.ID, prev.Addr, prevSpan, gkey[0], gkey[1])
-				}
+		// 点级校验与 validate_points 工具同源（validate_points.go validatePointsCore，
+		// agent.md §2.7.1）——启动为 fail-fast（取第一条违例），RequireShmID=true。
+		if issues := validatePointsCore(inst.Points, ValidateOpts{RequireShmID: true}); len(issues) > 0 {
+			iss := issues[0]
+			// 保持既有 INVALID_POINT/SHM_ID_NOT_ASSIGNED 错误码与英文消息口径（测试契约）
+			switch iss.Code {
+			case "SHM_ID_NOT_ASSIGNED":
+				return fmt.Errorf("SHM_ID_NOT_ASSIGNED: point '%s' has shm_id=0, must be assigned by c4_shm_manager first", iss.Points[0])
+			case "UID_OUT_OF_RANGE":
+				return fmt.Errorf("INVALID_POINT: point '%s' has invalid uid (must be 0~255)", iss.Points[0])
+			case "ADDR_OUT_OF_RANGE":
+				return fmt.Errorf("INVALID_POINT: point '%s' has invalid addr (must be 0~65535)", iss.Points[0])
+			case "FUN_TYPE_MISMATCH":
+				return fmt.Errorf("INVALID_POINT: point '%s' has invalid fun/type", iss.Points[0])
+			case "BAD_SWAP":
+				return fmt.Errorf("INVALID_POINT: point '%s' has invalid swap", iss.Points[0])
+			case "POINT_DUP":
+				return fmt.Errorf("INVALID_POINT: duplicate identity for points '%s' and '%s'", iss.Points[0], iss.Points[1])
+			case "POINT_OVERLAP":
+				return fmt.Errorf("INVALID_POINT: point overlap (group check) involving '%s'", iss.Points[len(iss.Points)-1])
 			}
 		}
 	}
@@ -862,6 +829,14 @@ func main() {
 			InputSchema: json.RawMessage(`{"type":"object","properties":{},"required":[]}`),
 		},
 		stopHandler,
+	)
+
+	mcp.AddTool(server,
+		&mcp.Tool{
+			Name:        "validate_points",
+			Description: "Validate a full point table against Modbus semantics (plan-time L2 check; same-origin with startup validation)",
+		},
+		validatePointsHandler,
 	)
 
 	/* 常驻模式为默认（Unix socket，进程启动零实例零 attach）；stdio 经 --stdio 或

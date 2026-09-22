@@ -111,8 +111,74 @@
     "INVALID_POINT": "数据点配置无效，请检查功能码/地址/数据类型",
     "CONNECT_FAILED": "设备连接失败，请检查设备 IP 和端口"
   },
-  "prompt_hints": [
-    "本服务为 Modbus TCP 数据采集端（客户端），ip 为设备地址，接入前必须确认；port 为必填项：必须由用户显式指定，用户未提供时先询问，禁止使用协议常见端口作为默认值",
-    "uid（单元标识符）、fun（功能码）、addr（寄存器地址）、type（数据类型）、swap（字节交换）为每个点的必要字段，缺一不可；swap=0 表示不交换"
-  ]
+  "prompt_hints": {
+    "protocol_match": {
+      "aliases": [
+        "Modbus",
+        "Modbus TCP",
+        "Modbus TCP/IP",
+        "Modbus TCP 协议"
+      ],
+      "rejected_variants": [
+        {
+          "name": "Modbus RTU",
+          "reason": "串口制式，本服务仅支持 Modbus TCP"
+        },
+        {
+          "name": "Modbus ASCII",
+          "reason": "串口制式，本服务仅支持 Modbus TCP"
+        }
+      ]
+    },
+    "point_field_hints": {
+      "addr": {
+        "description": "寄存器地址",
+        "range": "0-65535"
+      },
+      "uid": {
+        "description": "单元标识符（从站号）",
+        "range": "1-247（Modbus 标准；0 为广播，采集不使用）",
+        "extraction": "常见表述：从站号1、uid:1、单元标识符1；全局声明（如从站号都是1）须展开至每个点"
+      },
+      "fun": {
+        "description": "功能码",
+        "enum": {
+          "1": "读线圈",
+          "2": "读离散输入",
+          "3": "读保持寄存器",
+          "4": "读输入寄存器"
+        },
+        "range": "1-4"
+      },
+      "type": {
+        "description": "数据类型",
+        "enum": {
+          "0": "布尔量",
+          "3": "16位有符号整数",
+          "4": "16位无符号整数",
+          "5": "32位有符号整数",
+          "6": "32位无符号整数",
+          "7": "64位有符号整数",
+          "8": "64位无符号整数",
+          "10": "32位单精度浮点",
+          "11": "64位双精度浮点",
+          "15": "位"
+        }
+      },
+      "swap": {
+        "description": "字节交换；合法值 0/1/2/4，0 表示不交换；布尔/位/16位类型必须为 0",
+        "range": "0/1/2/4"
+      },
+      "cross_rules": [
+        "fun=1/2（线圈/离散输入）时，type 仅可为 0（布尔量）或 15（位），且 swap 必须为 0",
+        "fun=3/4（寄存器）时，type 可为 3/4/5/6/7/8/10/11；32位类型占 2 个寄存器，64位类型占 4 个寄存器"
+      ]
+    },
+    "connection_hints": [
+      "本服务为 Modbus TCP 数据采集端（客户端），ip 为设备地址，接入前必须确认",
+      "port 为必填项：必须由用户显式指定，用户未提供时先询问，禁止使用协议常见端口（502）作为默认值",
+      "t0/t1/retries/timer/coils_quantity_max/registers_quantity_max/hton_register 等字段有默认值，无需向用户询问"
+    ],
+    "display": "Modbus TCP 数据采集端（客户端）：从工业设备读取数据后写入共享内存"
+  }
 }

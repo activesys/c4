@@ -57,7 +57,15 @@ const RegistryEntrySchema = z.object({
   point_schema: PointSchemaSchema,
   config_schema: RegistryConfigSchemaSchema,
   binary_path: z.string(),
-  prompt_hints: z.array(z.string()).optional(),
+  // prompt_hints 四节结构化对象（agent.md §3.3）——各节可省略；存在时校验为对象
+  prompt_hints: z
+    .object({
+      protocol_match: z.record(z.string(), z.any()).optional(),
+      point_field_hints: z.record(z.string(), z.any()).optional(),
+      connection_hints: z.union([z.array(z.string()), z.record(z.string(), z.any())]).optional(),
+      display: z.union([z.string(), z.array(z.string()), z.record(z.string(), z.any())]).optional(),
+    })
+    .optional(),
   error_mappings: z.record(z.string(), z.string()),
 });
 
@@ -191,9 +199,11 @@ export async function loadRegistryFiles(dirPath: string): Promise<RegistryLoadRe
     }
 
     const entry = result.data;
-    if (entry.prompt_hints) {
-      entry.prompt_hints = sanitize_prompt_hints(fileName, entry.prompt_hints, warnings);
+    if (entry.prompt_hints && Array.isArray(entry.prompt_hints)) {
+      // 旧数组格式：走条目数/字符数软护栏
+      entry.prompt_hints = sanitize_prompt_hints(fileName, entry.prompt_hints, warnings) as never;
     }
+    // 新四节对象格式（agent.md §3.3）：原样透传，由阶段参数渲染按 side/protocol 取节
     entries.push(entry);
   }
 

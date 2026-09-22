@@ -185,14 +185,15 @@ Agent 生成接入方案后需要用户确认。**确认的唯一有效通道是
 确认词在文本上重叠（如「从一万**开始**」）时不会误触执行。
 
 **前端确认按钮**（「确认显性化」落点）：
-1. 按钮呈现由**后端显式事件驱动**（v0.2.0 修订，对应 agent.md §2.4.4）：流中出现 `button_arm`
+1. 按钮呈现由**后端显式事件驱动**（v0.2.0 修订，对应 agent.md §2.8）：流中出现 `button_arm`
    事件才渲染「确认 / 取消」按钮；出现 `button_disarm{reason}` 事件即解除武装并在按钮区标注
-   原因。arm/disarm 判定全部在后端完成——arm 条件 = `output_access_plan` 成功 **且**
-   `questionPending = false`（**回合终结时判定一次**；提问即挂起，agent.md §2.4.2）；disarm
-   条件 = 方案被消耗（执行完成 / 回滚）/ 被新的 `output_device_info` 作废（方案过期）/
-   `questionPending` 置位 / 闸门拒绝（存在未消耗有效方案时后端重发 `button_arm`）。信息收集
-   阶段的普通询问（如「请确认转发地址映射」）因 questionPending 置位而不会 arm——**信息不齐
-   或冲突未决时按钮不再弹出**。
+   原因。arm/disarm 判定全部在后端完成——arm 条件 = 本回合方案层装配成功产出 AccessPlan
+   **且** 回合终结时 `gaps` 为空（**回合终结时判定一次**；聚合提问停等即不判 arm，agent.md
+   §2.8）；disarm 条件 = 方案被消耗（**执行完成**；回滚不销毁方案，回到方案展示态并重发
+   `button_arm`）/ 被新方案覆盖（方案过期）/ 缺口置位（聚合提问停等）/ 出口判据拒绝（存在
+   未消耗有效方案时后端重发 `button_arm`）；**整体取消与转发链锁侧撤回均触发
+   `button_disarm`**。信息收集阶段的普通询问（如「请确认转发地址映射」）因缺口停等而不会
+   arm——**信息不齐或冲突未决时按钮不再弹出**。
 2. 「确认」→ 发起普通 POST `{ message:"[C4_BUTTON_CONFIRM] 确认", history }`；
    「取消」→ POST `{ message:"[C4_BUTTON_CANCEL] 取消，不执行", history }`。
    两者都是**新的一轮对话**，不依赖任何 interrupt/resume 机制。
@@ -204,11 +205,11 @@ Agent 生成接入方案后需要用户确认。**确认的唯一有效通道是
   后端各自定义，**修改时必须两侧同步**。
 
 > **匹配健壮性**（LLM token 非确定性）：
-> - arm/disarm 判定由**后端**在完整累积文本上执行（「是否」+「确认」可能被拆成两个 text 事件），
->   前端只消费事件结果，不做本地缓冲匹配（原前端双条件推断废除）。
-> - `button_arm` **不由句式直接触发**——arm 判定 = 回合终结时的工具结果 + questionPending；
->   句式仅用于 §2.4.2 的 questionPending 排除清单（是否确认执行 / 确认执行）。「执行」「好的」
->   「开始」等词在普通语句中极易误触发，不参与任何判定。
+> - arm/disarm 判定由**后端**基于**会话状态**执行（方案层产物 AccessPlan + gaps，agent.md §2.8），
+>   与 LLM 输出文本的拆分/措辞无关；前端只消费事件结果，不做本地缓冲匹配（原前端双条件推断废除）。
+> - `button_arm` **不由句式直接触发**——arm 判定 = 回合终结时的方案层产物（AccessPlan + gaps
+>   为空，agent.md §2.8）；句式仅用于 §2.6 提问即终局的确认句式排除（是否确认执行 / 确认执行）。
+>   「执行」「好的」「开始」等词在普通语句中极易误触发，不参与任何判定。
 > - 执行安全不依赖句式匹配：即使用户未点按钮，闸门也会拒绝执行并引导点击按钮。
 
 ---
@@ -299,7 +300,7 @@ interface StateResponse {
     success: true;
     state: {
         phase: "idle" | "collecting" | "planning" | "confirmed" | "executing";
-        hasAccessPlan: boolean;        // 是否已生成接入方案
+        hasAccessPlan: boolean;        // 是否存在待执行的 AccessPlan（等价 accessPlan !== null；回滚后为 true，执行成功后为 false）
         lastError: string | null;      // 最近一次错误（非技术语言，已翻译）
     };
 }
@@ -402,7 +403,7 @@ LLM 调用 `display_points` 建立显示会话，ChatView 消息流**顶部**插
 │  → 工具卡片「解析点表」→ 流式「解析完成：1#风机，Modbus TCP」      │
 │ 前端 POST /api/chat「接入华能阿拉善 1#风机，转发到中心侧」         │
 │  → Agent 收集信息 / 询问缺失字段（如缺 IP）                       │
-│  → 当 output_device_info 工具产出设备信息时 phase: collecting    │
+│  → 提取层产出设备信息/接入点表后 phase: collecting（§2.8：状态派生自语义状态）  │
 │    （可能发生在上述 upload 或 chat 任一 invoke 中）               │
 └───────────────────────────────────────────────────────────────┘
 ┌─ 轮 2：生成方案 ────────────────────────────────────────────────┐
@@ -411,7 +412,7 @@ LLM 调用 `display_points` 建立显示会话，ChatView 消息流**顶部**插
 │  → phase: planning                                             │
 └───────────────────────────────────────────────────────────────┘
 ┌─ 轮 3：确认 + 执行 ─────────────────────────────────────────────┐
-│ 后端回合终结判定：方案成功且无挂起问题 → button_arm 渲染按钮      │
+│ 后端回合终结判定：AccessPlan 产出且 gaps 为空 → button_arm        │
 │ 用户点击「确认」→ POST /api/chat「确认」                          │
 │  → phase: confirmed → executing                                 │
 │  → Agent 写配置 + Stop-Start → 流式「接入完成，服务已重启」        │
@@ -512,4 +513,4 @@ c4/agent/frontend/                      # React SPA（待实现）
 | 静态托管 | Express 托管 / Vite dev | dev 用 Vite proxy，生产待定 | 后端未挂静态服务，属部署决策 |
 | 状态库 | 引入 Redux 等 / 轻量 hooks | 轻量 hooks | 页面简单，重型状态库不必要 |
 | 解析格式提示 | 全量展示 / 标注不支持 | 标注不支持（pdf/docx/图片） | 后端缺解析器，避免误导用户 |
-| 确认句式匹配 | 单词匹配 / 累积句式匹配 | 累积句式匹配 | token 可能跨事件拆分，「执行/好的」等单词易误触发 |
+| 确认判定 | ~~单词/累积句式匹配~~ → **后端状态事件**（button_arm/disarm，agent.md §2.8） | 后端状态事件 | token 可能跨事件拆分；句式匹配废除（「执行/好的」等单词易误触发） |

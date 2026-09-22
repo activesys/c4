@@ -9,7 +9,7 @@ C4 Agent L2 功能测试共享辅助模块 — test_helpers.py
   - create_binary_file(): 创建非解析格式的二进制文件
   - create_corrupted_xlsx(): 创建损坏的 xlsx 文件
   - retry_llm(): LLM 容忍重试装饰器（最多 3 次）
-  - find_interrupt_id(): 从 SSE 流中提取 interrupt 事件 ID
+  - find_interrupt_id(): 检测按钮武装语义事件（button_arm；兼容旧 interrupt 探测）
   - full_access_flow(): 执行完整的接入流程（上传→解析→方案→确认→执行）
 """
 
@@ -473,21 +473,28 @@ def _plan_qa_answer(text: str, allow_forward: bool = True) -> Optional[str]:
 
 def find_interrupt_id(stream: Any) -> Optional[str]:
     """
-    从 SSE 流中提取 interrupt 事件的 ID。
+    兼容别名：新架构（agent.md §2.8）无 interrupt 检查点——确认通道为
+    按钮语义事件（button_arm/button_disarm）+ [C4_BUTTON_CONFIRM] 前缀消息。
+    本函数现探测 button_arm 语义事件，命中返回 "armed"（供既有调用方判断
+    「方案已武装、可点击确认按钮」）；未武装返回 None。
+    保留对旧 interrupt 事件的过渡探测（实现未迁移时的兼容）。
 
     参数:
         stream: SSEEventStream（已消费完毕）
 
     返回:
-        interrupt_id 字符串，若无则返回 None。
+        "armed"（button_arm 命中）、旧 interrupt_id、或 None。
     """
     for event in stream.events:
-        if event.type == "interrupt":
+        etype = getattr(event, "type", "") or (event.get("type") if isinstance(event, dict) else "")
+        if etype == "button_arm":
+            return "armed"
+        if etype == "interrupt":
             try:
-                data = json.loads(event.data)
+                data = json.loads(event.data) if isinstance(event.data, str) else event.data
                 if isinstance(data, dict):
                     return data.get("id") or data.get("interrupt_id")
-            except (json.JSONDecodeError, TypeError):
+            except (json.JSONDecodeError, TypeError, AttributeError):
                 pass
     return None
 

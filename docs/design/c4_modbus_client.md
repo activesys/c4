@@ -739,6 +739,55 @@ func writeBlock(shmPtr unsafe.Pointer, shmID uint32, dataType uint8,
 
 **返回值**：成功返回 `"success"`。
 
+#### Tool: `validate_points` —— C4_FUN_00086
+
+对一份**完整点表**执行协议语义校验（L2 层），供 Agent 的 Workflow 编排器在方案确认前
+调用。校验逻辑与 `start` 的启动校验（`INVALID_POINT`）**同源**——复用同一份 Go 校验
+代码路径，仅入口与返回结构不同。接口契约（参数/返回 schema、调用时机、同态性约束）
+见 [agent.md §2.7.1](agent.md)。
+
+**无状态、只读、纯计算**：不修改配置文件、不触碰共享内存、不产生网络请求。
+
+**参数**：`points`（array，必填）—— 本轮提取的完整点表，逐点字段与 §2.3 一致且全部必填
+（`name`/`uid`/`fun`/`addr`/`type`/`swap`；点级字段无默认值，输入与启动校验输入天然同态）。
+
+**返回值**（结构由 agent.md §2.7.1 统一定义，错误码枚举本协议自治）：
+
+```json
+{
+  "valid": false,
+  "errors": [
+    { "code": "POINT_OVERLAP",
+      "message": "点 windspeed2 与 windspeed1 地址区间重叠（3001-3002 vs 3001）",
+      "points": ["windspeed2", "windspeed1"],
+      "field": "addr" }
+  ],
+  "warnings": []
+}
+```
+
+**校验规则与错误码**：
+
+| 错误码 | 触发条件 | 对应启动校验（validateConfig） |
+|--------|---------|------|
+| `UID_OUT_OF_RANGE` | `uid` ∉ [0, 255] | `INVALID_POINT: invalid uid` |
+| `ADDR_OUT_OF_RANGE` | `addr` > 0xFFFF（65535） | `INVALID_POINT: invalid addr` |
+| `FUN_TYPE_MISMATCH` | `fun` ∉ {1,2,3,4}；或 fun∈{1,2} 但 `type` ∉ {Boolean(0), Bit(15)}；或 fun∈{3,4} 但 `type` ∉ {Int16(3),Uint16(4),Int32(5),Uint32(6),Int64(7),Uint64(8),Float32(10),Float64(11)}（`validTypeForFun`） | `INVALID_POINT: invalid fun / invalid type` |
+| `BAD_SWAP` | `swap` ∉ {0,1,2,4}；**或单数据单元点 `swap` ≠ 0**（点跨度 ≤1 寄存器——含 fun∈{1,2} 位点与 16 位寄存器点，字节跨度 ≤2 时 swap 必须为 0）；或 `swap` > 0 且不整除字节跨度（span×2） | `INVALID_POINT: invalid swap / single-unit swap must be 0 / swap does not divide byte count` |
+| `POINT_DUP` | identity_fields = (`uid`,`fun`,`addr`) 三元组完全相同的重复点 | `INVALID_POINT: duplicate` |
+| `POINT_OVERLAP` | 同 `uid`+`fun` 组内按 addr 排序后相邻点区间重叠，跨度 = `pointSpan`（16 位=1、32 位=2、64 位=4；fun∈{1,2} 位编址 span=1，重叠退化为 addr 相等、由 `POINT_DUP` 覆盖） | `INVALID_POINT: overlaps` |
+
+> 与 `validateConfig` 的完整规则一一对应；无遗漏项（读组数量约束运行期在轮询层处理，
+> 不属于配置校验/本工具）。
+
+**SHM_ID 排除**：启动校验含 `SHM_ID_NOT_ASSIGNED`（shm_id=0 拒绝）——shm_id 由
+c4_shm_manager 在执行期回填，方案期点表恒为 0，故**本工具不校验 shm_id**。
+
+**实现要求**：不得另写第二套校验逻辑——`validate_points` 与启动校验调用**同一校验函数**
+（如 `validatePoints(points, opts)`），以参数化子集处理 shm_id 校验差异（若共享化后发现其他行为差异，以追加 opts 开关显式建模，agent.md §2.7.1）：启动路径
+`opts.requireShmID=true`，本工具 `opts.requireShmID=false`；新增校验规则在共享函数中
+演进，两路径自动同步。
+
 ---
 
 ## 7. 错误处理

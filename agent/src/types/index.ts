@@ -110,7 +110,12 @@ export interface RegistryEntry {
         }>;
     };
     binary_path: string;
-    prompt_hints?: string[];      // 服务使用提示（可选，随 L1 注入系统提示）
+    prompt_hints?: {                    // 服务使用知识四节（agent.md §3.3，阶段参数渲染源）
+      protocol_match?: Record<string, unknown>;
+      point_field_hints?: Record<string, unknown>;
+      connection_hints?: string[] | Record<string, unknown>;
+      display?: string | string[] | Record<string, unknown>;
+    };
     error_mappings: Record<string, string>;
 }
 

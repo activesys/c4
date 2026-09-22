@@ -202,7 +202,7 @@ function fill_default_fields(
 //     · handle_modify 显式排除 port 覆盖
 //   （原 assign_port/端口清点逻辑为恒 no-op 死代码，已删除）
 
-function generate_steps(
+export function generate_steps(
     input: z.infer<typeof planStepsInputSchema>,
     registry: McpServiceRegistry,
     fallback_site_abbr: string,

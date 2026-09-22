@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && mkdir -p dist/super_worker/prompts && cp -r src/super_worker/prompts/*.txt dist/super_worker/prompts/",
     "start": "node dist/index.js",
     "dev": "tsx watch src/index.ts",
     "lint": "eslint src",
