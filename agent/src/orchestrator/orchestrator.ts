@@ -40,6 +40,11 @@ import {
     clear_pending_marker,
 } from "../executor/transaction.js";
 import {
+    arbitrate_site_tags,
+    deterministic_site_tag,
+    llm_site_tag,
+} from "./site_check.js";
+import {
     with_config_lock,
     ConfigBusyError,
     CONFIG_BUSY_MESSAGE,
@@ -657,19 +662,17 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 progress = true;
             }
         }
-        // 归属判定（已绑定场站）：点表/消息中的场站线索与当前场站比对
+        // 归属判定（已绑定场站，agent.md「场地判定仲裁规则」）：location_prompt LLM
+        // 语义判定在此先行发起（与本回合其余提取阶段并行），确定性地名比对在阶段
+        // 提取出口执行，两者仲裁取更保守方（见本函数尾「归属判定合并」）。
         state.turnSiteCheck = null;
-        if (state.site && state.recv.deviceName) {
-            const cand = state.recv.deviceName;
-            if (!cand.includes(state.site.name)) {
-                const loc = state.site.name.slice(2);
-                if (loc.length >= 2 && cand.includes(loc)) {
-                    state.turnSiteCheck = "ambiguous";
-                } else if (cand.includes(state.site.name.slice(0, 2))) {
-                    state.turnSiteCheck = "other";
-                }
-            }
-        }
+        const siteTagLlm = state.site
+            ? llm_json(
+                  "location_prompt.txt",
+                  { known_site: `${state.site.name}（缩写 ${state.site.abbr}）` },
+                  semantic,
+              ).catch(() => null)
+            : null;
 
         // 阶段2 接入协议（L0 确定性：显式声明 token 对齐支持列表 → 别名预匹配 → 提示词）
         if (!state.recv.protocol && semantic.length > 0) {
@@ -971,6 +974,17 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             }
             const measure = semantic.match(/表名[:：=\s]*([^\s，。,]+)/);
             if (measure) state.fwd.conn["measurement"] = measure[1];
+        }
+
+        // 归属判定合并（阶段1 出口判据，agent.md「场地判定仲裁规则」）：确定性
+        // 地名比对以消息原文为输入（设备名提取会剥掉场站前缀，不能作为比对源，
+        // func_test_case 用例 3 回归根因），与 location_prompt 语义判定取更保守方。
+        if (state.site && siteTagLlm) {
+            const [detTag, llmTag] = await Promise.all([
+                Promise.resolve(deterministic_site_tag(semantic, state.site.name)),
+                siteTagLlm.then(llm_site_tag),
+            ]);
+            state.turnSiteCheck = arbitrate_site_tags(detTag, llmTag);
         }
 
         // 协议锁（§2.4.1）：下游产出非空数据即上锁
