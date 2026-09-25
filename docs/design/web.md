@@ -1,14 +1,14 @@
 # C4 Web 界面设计
 
-> **版本**：v0.2.0 | **最后更新**：2026-09-19 | **父文档**：[agent.md](agent.md)
+> **版本**：v0.3.0 | **最后更新**：2026-09-25 | **父文档**：[agent.md](agent.md)
 >
 > **设计范围**：C4 Web 界面的页面、组件与交互设计，**仅覆盖后端已就绪的功能**——
 > 对话式数据接入、文件上传、已接入 MCP 服务目录展示、Agent 工作状态展示。
 > 用户身份认证、告警通知、操作审计日志等后端未就绪的功能不在本次设计范围；
 > MCP 服务的运行期热注册（免重启动态发现）不在本次设计范围（注册为部署期操作：root 安装单元，注册后重启 Agent 识别，见 §3.3）。
 >
-> **当前实现状态**：后端 HTTP API 已实现（`src/server/`，见 §1.3），前端 `frontend/` 目录为空，
-> 本设计为前端实现的依据。
+> **当前实现状态**：后端 HTTP API 已实现（`src/server/`，见 §1.3），前端已实现
+> （`agent/frontend/`，React SPA）；视觉样式以 DeepSeek 浅色主题为基准（§4.4）。
 
 ---
 
@@ -463,7 +463,7 @@ LLM 调用 `display_points` 建立显示会话，ChatView 消息流**顶部**插
 | 构建 | Vite | 快速 dev server + proxy |
 | SSE 客户端 | `fetch` + `ReadableStream`（或 `@microsoft/fetch-event-source`） | POST 请求不能用 `EventSource`（仅支持 GET），需手写 SSE 解析 |
 | 状态 | 轻量 React hooks（`useState`/`useReducer`） | 页面简单，无需引入重型状态库 |
-| 样式 | 优先简洁 CSS / 现有设计体系 | 工业现场界面以清晰可读为先，避免花哨 |
+| 样式 | 简洁纯 CSS + 设计令牌（`styles.css` `:root`） | 工业现场界面以清晰可读为先，避免花哨；视觉基准对齐 DeepSeek 浅色主题（§4.4），全部色彩经 CSS 自定义属性收敛 |
 
 > **静态托管**：当前 Express 未挂载静态文件服务。开发期用 Vite dev server + `proxy` 转发
 > `/api/*` 到后端；生产期构建产物可交由 Express 托管（`express.static`，需后端补充）或 nginx
@@ -472,6 +472,29 @@ LLM 调用 `display_points` 建立显示会话，ChatView 消息流**顶部**插
 > **CORS 注意**：后端当前默认 `cors_origin = "*"`，且同时设置 `Access-Control-Allow-Credentials: true`。
 > 按规范 `*` 与 credentials 组合会被浏览器拒绝；当前 SPA 不带凭据（无 cookie）故 `fetch` 可通，
 > 但属潜在隐患。部署时应**收紧 `cors_origin` 到实际域名**或**去掉 credentials 头**。
+
+### 4.4 视觉风格（DeepSeek 浅色基准，v0.3.0）
+
+> 令牌取值实测自 chat.deepseek.com 生产样式表（2026-09-25）。仅浅色主题；DOM 结构与
+> 类名不受视觉换肤影响（单元/e2e 测试的 `data-testid` 契约不变）。
+
+| 令牌组 | 取值 | 说明 |
+|--------|------|------|
+| 主色 | `--primary: #3964fe`（hover `#5686fe`） | DeepSeek brand-500/450，浅色主题 hover 变亮 |
+| 背景 | 主区 `#ffffff`；侧栏 `#f9fafb`；hover `#f1f3f5`；active `#ebeef2` | neutral-bluish 浅色映射 |
+| 文本 | `#0f1115` / 弱化 `#61666b` / 图标 `#81858c` | label-primary/secondary/tertiary |
+| 边框 | `rgba(0,0,0,.1)`，弱分隔 `.04`，强调 `.12` | border-l2/l1/l3 |
+| 通用 hover 填充 | `rgba(38,49,72,.06)` | DeepSeek 全局一致 |
+| 状态色 | 蓝 `#3964fe`、成功 `#22c55e`、执行 `#f59e0b`、空闲 `#81858c` | 配 rgba 底（10%~15%）做徽标 tint |
+| 错误 | `#f25a5a` 家族：底 `#fdf0f0`、正文 `#cf4242`、描边 25% 透明 | state-error 系列 |
+| 用户气泡 | `#f9fafb` 底深色字，圆角 22px（右下 6px 尾角），16px/24px | DeepSeek 浅色用户气泡 |
+| AI 回复 | **无气泡**纯文本，占满栏宽，16px/28px（Markdown 正文） | DeepSeek 助手消息形态 |
+| 输入框 | 24px 胶囊圆角，hover/focus 双档悬浮阴影（DeepSeek 实测值） | 发送按钮为蓝色胶囊 |
+| 消息列 | 居中 `max-width: 840px`（<1024px 视口 712px） | DeepSeek 阅读列宽 |
+| 圆角阶梯 | 6 / 10 / 12 / 16px，气泡 22px，输入框 24px | sm/md/lg/xl/bubble/input |
+| 过渡 | 交互 `0.2s ease`，全局 | DeepSeek 全局时长 |
+| 焦点环 | `#4d6bfe`（`:focus-visible` 2px） | DeepSeek 焦点色 |
+| 字体 | Inter + 系统栈（不加载 webfont，离线环境零依赖） | 中文回退 PingFang/雅黑 |
 
 ---
 
@@ -516,3 +539,4 @@ c4/agent/frontend/                      # React SPA（待实现）
 | 状态库 | 引入 Redux 等 / 轻量 hooks | 轻量 hooks | 页面简单，重型状态库不必要 |
 | 解析格式提示 | 全量展示 / 标注不支持 | 标注不支持（pdf/docx/图片） | 后端缺解析器，避免误导用户 |
 | 确认判定 | ~~单词/累积句式匹配~~ → **后端状态事件**（button_arm/disarm，agent.md §2.8） | 后端状态事件 | token 可能跨事件拆分；句式匹配废除（「执行/好的」等单词易误触发） |
+| 视觉基准 | 自绘工业风 / 对齐 DeepSeek 浅色主题 | DeepSeek 浅色令牌（§4.4） | 主流 AI 界面心智，清爽易读；纯 CSS 令牌替换，DOM/测试零改动（2026-09-25） |

@@ -1,40 +1,75 @@
 /* c4/agent/frontend/src/styles.css
- * Industrial-control-room inspired stylesheet for the C4 Web UI.
+ * DeepSeek-inspired stylesheet for the C4 Web UI (light theme).
+ * Token values measured from chat.deepseek.com production CSS (2026-09-25);
+ * see docs/design/web.md §4.3 for the token table.
  * Plain CSS, no preprocessor, scoped via BEM-ish class names.
  */
 
 :root {
-  --bg: #f5f7fa;
-  --bg-elev: #ffffff;
-  --bg-sidebar: #1f2937;
-  --bg-sidebar-active: #374151;
-  --text: #111827;
-  --text-muted: #6b7280;
-  --text-on-dark: #f9fafb;
-  --border: #e5e7eb;
-  --primary: #2563eb;
-  --primary-hover: #1d4ed8;
+  /* ── 表面（DeepSeek neutral-bluish 浅色映射）── */
+  --bg: #ffffff;               /* 主区背景（bg-base） */
+  --bg-elev: #ffffff;          /* 卡片/浮层（bg-layer-1） */
+  --bg-sidebar: #f9fafb;       /* 侧栏底（sidebar fill / neutral-50） */
+  --bg-sidebar-hover: #f1f3f5; /* 侧栏项 hover（neutral-75） */
+  --bg-sidebar-active: #ebeef2;/* 侧栏项 active（neutral-100） */
+  --bg-hover: rgba(38, 49, 72, 0.06); /* 通用 hover 填充 */
+  --bg-subtle: #f9fafb;        /* 弱底：代码块/用户气泡（neutral-50） */
+  --bg-subtle-2: #ebeef2;      /* 行内码底（neutral-100） */
 
-  --color-idle: #6b7280;
-  --color-collecting: #2563eb;
-  --color-planning: #2563eb;
-  --color-confirmed: #10b981;
+  /* ── 文本 ── */
+  --text: #0f1115;             /* label-primary（neutral-1000） */
+  --text-muted: #61666b;       /* label-secondary（neutral-700） */
+  --text-tertiary: #81858c;    /* label-tertiary/图标（neutral-600） */
+
+  /* ── 强调（DeepSeek brand）── */
+  --primary: #3964fe;          /* deepseek-500（浅色主题 primary） */
+  --primary-hover: #5686fe;    /* deepseek-450（浅色主题 hover 变亮） */
+  --primary-tint: rgba(57, 100, 254, 0.1);
+  --focus-ring: #4d6bfe;       /* DeepSeek 焦点环色 */
+
+  /* ── 状态 ── */
+  --color-idle: #81858c;
+  --color-collecting: #3964fe;
+  --color-planning: #3964fe;
+  --color-confirmed: #22c55e;
   --color-executing: #f59e0b;
+  --primary-tint-badge: rgba(57, 100, 254, 0.1);
+  --success-tint: rgba(34, 197, 94, 0.12);
+  --warning-tint: rgba(245, 158, 11, 0.15);
+  --neutral-tint: rgba(129, 133, 140, 0.12);
 
-  --error-bg: #fee2e2;
-  --error-text: #991b1b;
-  --error-border: #fecaca;
+  /* ── 错误（DeepSeek state-error #f25a5a 家族）── */
+  --error: #f25a5a;
+  --error-bg: #fdf0f0;
+  --error-text: #cf4242;
+  --error-border: rgba(242, 90, 90, 0.25);
 
-  --warning-bg: #fef3c7;
-  --warning-text: #92400e;
+  /* ── 警告 ── */
+  --warning-bg: #fdf6ec;
+  --warning-text: #b45309;
 
-  --bubble-user-bg: #2563eb;
-  --bubble-user-text: #ffffff;
-  --bubble-agent-bg: #f3f4f6;
-  --bubble-agent-text: #111827;
-  --bubble-error-bg: #fee2e2;
-  --bubble-error-text: #991b1b;
+  /* ── 气泡 ── */
+  --bubble-user-bg: #f9fafb;   /* DeepSeek 用户气泡底（neutral-50） */
+  --bubble-user-text: var(--text);
+  --bubble-error-bg: #fdf0f0;
+  --bubble-error-text: #cf4242;
 
+  /* ── 边框 ── */
+  --border: rgba(0, 0, 0, 0.1);        /* border-l2 */
+  --border-weak: rgba(0, 0, 0, 0.04);  /* border-l1 */
+  --border-strong: rgba(0, 0, 0, 0.12);/* border-l3 */
+
+  /* ── 阴影（DeepSeek 输入框实测值）── */
+  --shadow-card-hover: 0 4px 12px rgba(0, 0, 0, 0.04);
+  --shadow-input-hover:
+    0 4px 12px rgba(0, 0, 0, 0.02),
+    0 2px 2px rgba(72, 104, 178, 0.01),
+    0 30px 60px rgba(72, 104, 178, 0.03);
+  --shadow-input-focus:
+    0 4px 10px rgba(0, 0, 0, 0.02),
+    0 2px 4px rgba(0, 0, 0, 0.04);
+
+  /* ── 布局 ── */
   --space-1: 4px;
   --space-2: 8px;
   --space-3: 12px;
@@ -42,12 +77,22 @@
   --space-5: 24px;
   --space-6: 32px;
 
-  --radius-sm: 4px;
-  --radius-md: 8px;
+  --radius-sm: 6px;
+  --radius-md: 10px;
   --radius-lg: 12px;
+  --radius-xl: 16px;           /* 卡片 */
+  --radius-bubble: 22px;       /* DeepSeek 用户气泡 */
+  --radius-input: 24px;        /* DeepSeek 输入框胶囊 */
+  --chat-column-max: 840px;    /* DeepSeek 消息列宽（<1024px 视口 712px） */
+  --nav-width: 220px;
 
-  --font-stack: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
-    "Hiragino Sans GB", "Microsoft YaHei", Roboto, sans-serif;
+  /* ── 字体 ── */
+  --font-stack: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI",
+    "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", Roboto, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono",
+    monospace;
+
+  --transition: 0.2s ease;
 }
 
 * {
@@ -62,12 +107,40 @@ body,
   padding: 0;
 }
 
+html {
+  scrollbar-width: thin;
+  scrollbar-color: #cfd3d6 transparent;
+}
+
 body {
   font-family: var(--font-stack);
   font-size: 14px;
   line-height: 1.5;
   color: var(--text);
   background: var(--bg);
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #cfd3d6;
+  border-radius: 999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #adb2b8;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
 }
 
 button {
@@ -98,13 +171,12 @@ input {
   justify-content: space-between;
   padding: var(--space-3) var(--space-5);
   background: var(--bg-elev);
-  border-bottom: 1px solid var(--border);
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+  border-bottom: 1px solid var(--border-weak);
   flex: 0 0 auto;
 }
 
 .app__title {
-  font-size: 16px;
+  font-size: 15px;
   font-weight: 600;
 }
 
@@ -122,7 +194,7 @@ input {
   background: var(--error-bg);
   color: var(--error-text);
   border: 1px solid var(--error-border);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   font-size: 13px;
 }
 
@@ -131,6 +203,11 @@ input {
   line-height: 1;
   padding: 0 var(--space-1);
   color: var(--error-text);
+  border-radius: var(--radius-sm);
+}
+
+.app__error button:hover {
+  background: rgba(242, 90, 90, 0.1);
 }
 
 .app__body {
@@ -140,31 +217,32 @@ input {
 }
 
 .app__nav {
-  width: 180px;
-  flex: 0 0 180px;
+  width: var(--nav-width);
+  flex: 0 0 var(--nav-width);
   background: var(--bg-sidebar);
-  color: var(--text-on-dark);
-  padding: var(--space-4) 0;
+  border-right: 1px solid var(--border-weak);
+  padding: var(--space-3) var(--space-2);
   display: flex;
   flex-direction: column;
+  gap: 2px;
 }
 
 .app__nav-item {
-  padding: var(--space-3) var(--space-5);
+  padding: 10px 14px;
   text-align: left;
   font-size: 14px;
-  color: var(--text-on-dark);
-  border-left: 3px solid transparent;
-  transition: background 0.15s ease, border-color 0.15s ease;
+  color: var(--text);
+  border-radius: var(--radius-md);
+  transition: background var(--transition), box-shadow var(--transition);
 }
 
 .app__nav-item:hover {
-  background: rgba(255, 255, 255, 0.06);
+  background: var(--bg-sidebar-hover);
 }
 
 .app__nav-item.is-active {
   background: var(--bg-sidebar-active);
-  border-left-color: var(--primary);
+  box-shadow: inset 3px 0 0 #e4edfd;
   font-weight: 600;
 }
 
@@ -187,22 +265,22 @@ input {
 }
 
 .phase-badge--gray {
-  background: rgba(107, 114, 128, 0.15);
+  background: var(--neutral-tint);
   color: var(--color-idle);
 }
 
 .phase-badge--blue {
-  background: rgba(37, 99, 235, 0.12);
+  background: var(--primary-tint-badge);
   color: var(--color-collecting);
 }
 
 .phase-badge--green {
-  background: rgba(16, 185, 129, 0.15);
+  background: var(--success-tint);
   color: var(--color-confirmed);
 }
 
 .phase-badge--orange {
-  background: rgba(245, 158, 11, 0.18);
+  background: var(--warning-tint);
   color: var(--color-executing);
 }
 
@@ -212,83 +290,112 @@ input {
   display: flex;
   flex-direction: column;
   height: 100%;
-  gap: var(--space-3);
+  gap: var(--space-4);
   min-height: 0;
+  width: 100%;
+  max-width: var(--chat-column-max);
+  margin: 0 auto;
 }
 
 .chat-view__messages {
   flex: 1 1 auto;
   overflow: auto;
-  padding: var(--space-3);
-  background: var(--bg-elev);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
+  padding: var(--space-2) 0 var(--space-4);
   display: flex;
   flex-direction: column;
-  gap: var(--space-3);
+  gap: var(--space-4);
 }
 
 .chat-view__tool {
   align-self: flex-start;
-  max-width: 80%;
+  max-width: 100%;
 }
 
 .chat-bubble {
-  max-width: 75%;
-  padding: var(--space-2) var(--space-3);
-  border-radius: var(--radius-md);
   word-wrap: break-word;
   white-space: pre-wrap;
 }
 
+/* 用户气泡：DeepSeek neutral-50 圆角 22px，右下收窄形成「尾角」 */
 .chat-bubble--user {
   align-self: flex-end;
+  max-width: min(75%, calc(100% - 88px));
+  padding: 10px 16px;
   background: var(--bubble-user-bg);
   color: var(--bubble-user-text);
-  border-bottom-right-radius: 2px;
+  border-radius: var(--radius-bubble);
+  border-bottom-right-radius: 6px;
+  font-size: 16px;
+  line-height: 1.5;
 }
 
+/* AI 回复：DeepSeek 风格无气泡纯文本，占满栏宽 */
 .chat-bubble--agent {
-  align-self: flex-start;
-  background: var(--bubble-agent-bg);
-  color: var(--bubble-agent-text);
-  border-bottom-left-radius: 2px;
+  align-self: stretch;
+  max-width: 100%;
+  padding: 2px 0;
+  background: transparent;
+  color: var(--text);
+  font-size: 16px;
+  line-height: 1.75;
 }
 
 .chat-bubble--error {
   align-self: stretch;
   max-width: 100%;
+  padding: var(--space-3) var(--space-4);
   background: var(--bubble-error-bg);
   color: var(--bubble-error-text);
   border: 1px solid var(--error-border);
+  border-radius: var(--radius-lg);
+  font-size: 14px;
 }
+
+/* ── 输入区：DeepSeek 24px 胶囊 + 悬浮阴影 ── */
 
 .chat-view__input {
   display: flex;
   gap: var(--space-2);
   align-items: center;
-  padding: var(--space-3);
+  padding: var(--space-2) var(--space-2) var(--space-2) var(--space-4);
   background: var(--bg-elev);
   border: 1px solid var(--border);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-input);
   flex: 0 0 auto;
+  transition: box-shadow var(--transition);
+}
+
+.chat-view__input:hover {
+  box-shadow: var(--shadow-input-hover);
+}
+
+.chat-view__input:focus-within {
+  box-shadow: var(--shadow-input-focus);
 }
 
 .chat-view__input input[type="text"] {
   flex: 1 1 auto;
   border: none;
   outline: none;
-  padding: var(--space-2);
+  padding: var(--space-2) 0;
   background: transparent;
+  font-size: 16px;
+  line-height: 24px;
+  color: var(--text);
+}
+
+.chat-view__input input[type="text"]::placeholder {
+  color: var(--text-tertiary);
 }
 
 .chat-view__input button[aria-label="发送"] {
-  padding: var(--space-2) var(--space-4);
+  flex: 0 0 auto;
+  padding: var(--space-2) 20px;
   background: var(--primary);
   color: #fff;
-  border-radius: var(--radius-sm);
+  border-radius: 999px;
   font-weight: 500;
-  transition: background 0.15s ease;
+  transition: background var(--transition);
 }
 
 .chat-view__input button[aria-label="发送"]:hover:not(:disabled) {
@@ -296,7 +403,7 @@ input {
 }
 
 .chat-view__input button[aria-label="发送"]:disabled {
-  opacity: 0.5;
+  opacity: 0.45;
   cursor: not-allowed;
 }
 
@@ -305,43 +412,44 @@ input {
 .confirm-buttons {
   display: flex;
   gap: var(--space-3);
-  padding: var(--space-3);
+  padding: var(--space-4);
   background: var(--bg-elev);
   border: 1px solid var(--border);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-lg);
 }
 
 .confirm-buttons__confirm,
 .confirm-buttons__cancel {
   padding: var(--space-2) var(--space-5);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   font-weight: 500;
-  transition: background 0.15s ease;
+  transition: background var(--transition), border-color var(--transition);
 }
 
 .confirm-buttons__confirm {
-  background: var(--color-confirmed);
+  background: var(--primary);
   color: #fff;
 }
 
 .confirm-buttons__confirm:hover {
-  background: #059669;
+  background: var(--primary-hover);
 }
 
 .confirm-buttons__cancel {
-  background: var(--bg);
+  background: transparent;
   border: 1px solid var(--border);
+  color: var(--text);
 }
 
 .confirm-buttons__cancel:hover {
-  background: var(--bubble-agent-bg);
+  background: var(--bg-hover);
 }
 
 /* ─── Tool card ───────────────────────────────────────────────── */
 
 .tool-card {
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
+  border: 1px solid var(--border-weak);
+  border-radius: var(--radius-lg);
   background: var(--bg-elev);
   overflow: hidden;
 }
@@ -353,10 +461,11 @@ input {
   padding: var(--space-2) var(--space-3);
   width: 100%;
   text-align: left;
+  transition: background var(--transition);
 }
 
 .tool-card__header:hover {
-  background: var(--bubble-agent-bg);
+  background: var(--bg-hover);
 }
 
 .tool-card__name {
@@ -371,18 +480,18 @@ input {
 }
 
 .tool-card__status--running {
-  background: rgba(37, 99, 235, 0.12);
+  background: var(--primary-tint-badge);
   color: var(--primary);
 }
 
 .tool-card__status--done {
-  background: rgba(16, 185, 129, 0.15);
+  background: var(--success-tint);
   color: var(--color-confirmed);
 }
 
 .tool-card__details {
   padding: var(--space-3);
-  border-top: 1px solid var(--border);
+  border-top: 1px solid var(--border-weak);
   font-size: 13px;
   color: var(--text-muted);
   white-space: pre-wrap;
@@ -399,14 +508,17 @@ input {
 .file-upload__button {
   cursor: pointer;
   padding: var(--space-2) var(--space-3);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--bg);
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-tertiary);
   white-space: nowrap;
+  transition: background var(--transition), color var(--transition);
 }
 
 .file-upload__button:hover {
-  background: var(--bubble-agent-bg);
+  background: var(--bg-hover);
+  color: var(--text);
 }
 
 .file-upload__warning {
@@ -427,12 +539,17 @@ input {
 
 .service-card {
   background: var(--bg-elev);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
+  border: 1px solid var(--border-weak);
+  border-radius: var(--radius-xl);
   padding: var(--space-4);
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
+  transition: box-shadow var(--transition);
+}
+
+.service-card:hover {
+  box-shadow: var(--shadow-card-hover);
 }
 
 .service-card__header {
@@ -452,7 +569,7 @@ input {
   margin: 0;
   font-size: 12px;
   color: var(--text-muted);
-  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-family: var(--font-mono);
 }
 
 .service-card__section h4 {
@@ -474,10 +591,10 @@ input {
 }
 
 .service-card__section code {
-  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
-  background: var(--bg);
-  padding: 1px 4px;
+  background: var(--bg-subtle-2);
+  padding: 1px 5px;
   border-radius: var(--radius-sm);
 }
 
@@ -489,17 +606,17 @@ input {
 }
 
 .role-badge--writer {
-  background: rgba(37, 99, 235, 0.12);
+  background: var(--primary-tint-badge);
   color: var(--color-collecting);
 }
 
 .role-badge--reader {
-  background: rgba(16, 185, 129, 0.15);
+  background: var(--success-tint);
   color: var(--color-confirmed);
 }
 
 .role-badge--unknown {
-  background: rgba(107, 114, 128, 0.15);
+  background: var(--neutral-tint);
   color: var(--color-idle);
 }
 
@@ -512,12 +629,12 @@ input {
 }
 
 .tag--required {
-  background: rgba(245, 158, 11, 0.18);
+  background: var(--warning-tint);
   color: var(--color-executing);
 }
 
 .tag--optional {
-  background: rgba(107, 114, 128, 0.15);
+  background: var(--neutral-tint);
   color: var(--text-muted);
 }
 
@@ -532,12 +649,12 @@ input {
   background: linear-gradient(
     90deg,
     var(--bg-elev) 0%,
-    var(--bubble-agent-bg) 50%,
+    var(--bg-subtle-2) 50%,
     var(--bg-elev) 100%
   );
   background-size: 200% 100%;
-  border-radius: var(--radius-md);
-  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  border: 1px solid var(--border-weak);
   animation: skeleton-pulse 1.4s ease-in-out infinite;
 }
 
@@ -554,7 +671,7 @@ input {
   padding: var(--space-6);
   background: var(--bg-elev);
   border: 1px solid var(--error-border);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-xl);
   color: var(--error-text);
 }
 
@@ -562,7 +679,8 @@ input {
   padding: var(--space-2) var(--space-4);
   background: var(--primary);
   color: #fff;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
+  transition: background var(--transition);
 }
 
 .services-error button:hover {
@@ -577,8 +695,8 @@ input {
   gap: var(--space-3);
   padding: var(--space-4);
   background: var(--bg-elev);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
+  border: 1px solid var(--border-weak);
+  border-radius: var(--radius-xl);
 }
 
 .pdp__head {
@@ -595,10 +713,13 @@ input {
   color: var(--text-muted);
   cursor: pointer;
   font-size: 13px;
+  border-radius: var(--radius-sm);
+  transition: color var(--transition), background var(--transition);
 }
 
 .pdp__stop:hover {
-  color: var(--color-executing);
+  color: var(--error);
+  background: var(--error-bg);
 }
 
 .pdp__point {
@@ -606,8 +727,9 @@ input {
   flex-direction: column;
   gap: var(--space-1);
   padding: var(--space-3);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-weak);
+  border-radius: var(--radius-md);
+  background: var(--bg-sidebar);
 }
 
 .pdp__point-head {
@@ -629,7 +751,7 @@ input {
 .pdp__key-sub {
   font-weight: 400;
   font-size: 11px;
-  color: var(--text-muted);
+  color: var(--text-tertiary);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -644,26 +766,32 @@ input {
 }
 
 .pdp__badge--ok {
-  background: rgba(16, 185, 129, 0.15);
+  background: var(--success-tint);
   color: var(--color-confirmed);
 }
 
 .pdp__badge--nodata {
-  background: rgba(107, 114, 128, 0.15);
+  background: var(--neutral-tint);
   color: var(--text-muted);
 }
 
 .pdp__badge--stale {
-  background: rgba(245, 158, 11, 0.18);
+  background: var(--warning-tint);
   color: var(--color-executing);
 }
 
 .pdp__point-stop {
   border: none;
   background: transparent;
-  color: var(--text-muted);
+  color: var(--text-tertiary);
   cursor: pointer;
   font-size: 12px;
+  border-radius: var(--radius-sm);
+  transition: color var(--transition);
+}
+
+.pdp__point-stop:hover {
+  color: var(--error);
 }
 
 .pdp__value {
@@ -689,13 +817,13 @@ input {
 }
 
 .pdp__records td:last-child {
-  color: var(--text-primary, inherit);
+  color: var(--text);
 }
 
 .pdp__resubscribe {
   border: none;
   background: transparent;
-  color: var(--color-collecting);
+  color: var(--primary);
   cursor: pointer;
   font-size: 13px;
   text-decoration: underline;
@@ -705,51 +833,54 @@ input {
   font-size: 13px;
   color: var(--text-muted);
 }
-/* ── Agent 气泡 Markdown 渲染样式 ── */
+
+/* ── Agent 回复 Markdown 渲染样式（DeepSeek：正文 16px/28px）── */
 .chat-bubble--agent .md > :first-child { margin-top: 0; }
 .chat-bubble--agent .md > :last-child { margin-bottom: 0; }
-.chat-bubble--agent .md p { margin: 0.35em 0; line-height: 1.55; }
+.chat-bubble--agent .md p { margin: 0.5em 0; line-height: 1.75; }
 .chat-bubble--agent .md h1,
 .chat-bubble--agent .md h2,
-.chat-bubble--agent .md h3 { margin: 0.6em 0 0.3em; line-height: 1.3; }
-.chat-bubble--agent .md h1 { font-size: 1.15em; }
-.chat-bubble--agent .md h2 { font-size: 1.08em; }
+.chat-bubble--agent .md h3 { margin: 1.2em 0 0.6em; line-height: 1.4; }
+.chat-bubble--agent .md h1 { font-size: 1.25em; }
+.chat-bubble--agent .md h2 { font-size: 1.12em; }
 .chat-bubble--agent .md h3 { font-size: 1em; }
 .chat-bubble--agent .md ul,
-.chat-bubble--agent .md ol { margin: 0.35em 0; padding-left: 1.4em; }
-.chat-bubble--agent .md li { margin: 0.15em 0; }
+.chat-bubble--agent .md ol { margin: 0.5em 0; padding-left: 1.4em; }
+.chat-bubble--agent .md li { margin: 0.2em 0; }
 .chat-bubble--agent .md table {
   border-collapse: collapse;
   margin: 0.5em 0;
-  font-size: 0.92em;
+  font-size: 0.9375em;
   display: block;
   overflow-x: auto;
 }
 .chat-bubble--agent .md th,
 .chat-bubble--agent .md td {
-  border: 1px solid rgba(0, 0, 0, 0.18);
+  border: 1px solid var(--border);
   padding: 0.3em 0.6em;
   text-align: left;
 }
-.chat-bubble--agent .md th { background: rgba(0, 0, 0, 0.06); }
+.chat-bubble--agent .md th { background: var(--bg-subtle); }
 .chat-bubble--agent .md code {
-  background: rgba(0, 0, 0, 0.07);
-  padding: 0.1em 0.35em;
-  border-radius: 3px;
-  font-size: 0.9em;
+  background: var(--bg-subtle-2);
+  padding: 0.1em 0.4em;
+  border-radius: 6px;
+  font-size: 0.875em;
+  font-family: var(--font-mono);
 }
 .chat-bubble--agent .md pre {
-  background: rgba(0, 0, 0, 0.07);
-  padding: 0.6em 0.8em;
-  border-radius: 6px;
+  background: var(--bg-subtle);
+  border: 1px solid var(--border-weak);
+  padding: 0.75em 1em;
+  border-radius: var(--radius-md);
   overflow-x: auto;
 }
 .chat-bubble--agent .md pre code { background: none; padding: 0; }
 .chat-bubble--agent .md blockquote {
-  margin: 0.4em 0;
+  margin: 0.5em 0;
   padding-left: 0.8em;
-  border-left: 3px solid rgba(0, 0, 0, 0.15);
-  color: rgba(0, 0, 0, 0.65);
+  border-left: 3px solid var(--border);
+  color: var(--text-muted);
 }
-.chat-bubble--agent .md hr { border: none; border-top: 1px solid rgba(0, 0, 0, 0.12); margin: 0.6em 0; }
-.chat-bubble--agent .md a { color: #1a5fb4; }
+.chat-bubble--agent .md hr { border: none; border-top: 1px solid var(--border-weak); margin: 0.8em 0; }
+.chat-bubble--agent .md a { color: var(--primary); }
