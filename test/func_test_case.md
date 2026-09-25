@@ -1129,7 +1129,7 @@ Agent 询问缺失信息后，用户补充回答：
 ### 测试输入
 
 ```
-现在需要接入1号风机的数据并直接入库。第三方厂家通过asfp2协议给我们转来1#风机数据，10个点，从1000到1009，分别是1000:风速、1001:功率、1002:风向、1003:桨叶角度、1004:发电机转速、1005:齿轮箱油温、1006:塔筒温度、1007:空气温度、1008:空气湿度、1009:大气压强，使用端口9001。数据写入我们的InfluxDB时序库：写入地址http://172.16.109.12:8086，token是hnals-influx-2026，org是activesys，bucket是hnals。10个点全部写进wind_turbine这个measurement，字段名跟点名对应（windspeed、power、wind_dir、pitch_angle、gen_speed、gearbox_oil_temp、tower_temp、air_temp、humidity、pressure），类型统一float。
+现在需要接入1号风机的数据并直接入库。第三方厂家通过asfp2协议给我们转来1#风机数据，10个点，从1000到1009，分别是1000:风速、1001:功率、1002:风向、1003:桨叶角度、1004:发电机转速、1005:齿轮箱油温、1006:塔筒温度、1007:空气温度、1008:空气湿度、1009:大气压强，使用端口9001。数据写入我们的InfluxDB时序库：写入地址http://127.0.0.1:8086，token是hnals-influx-2026，org是activesys，bucket是hnals。10个点全部写进wind_turbine这个measurement，字段名跟点名对应（windspeed、power、wind_dir、pitch_angle、gen_speed、gearbox_oil_temp、tower_temp、air_temp、humidity、pressure），类型统一float。
 ```
 
 > 关键点：① config.json **双侧成对**：c4_asfp2_server 接收实例（9001、10 点 addr:点名 原样采纳）
@@ -1151,7 +1151,7 @@ Agent 询问缺失信息后，用户补充回答：
 ### 测试输入
 
 ```
-现在需要接入1号风机的数据并直接入库。第三方厂家通过asfp2协议给我们转来1#风机数据，10个点，从1000到1009，分别是1000:风速、1001:功率、1002:风向、1003:桨叶角度、1004:发电机转速、1005:齿轮箱油温、1006:塔筒温度、1007:空气温度、1008:空气湿度、1009:大气压强，使用端口9001。数据写入InfluxDB：写入地址http://172.16.109.12:8086，token是hnals-influx-2026，org是activesys。10个点全部写进wind_turbine，字段名跟点名对应，类型统一float。
+现在需要接入1号风机的数据并直接入库。第三方厂家通过asfp2协议给我们转来1#风机数据，10个点，从1000到1009，分别是1000:风速、1001:功率、1002:风向、1003:桨叶角度、1004:发电机转速、1005:齿轮箱油温、1006:塔筒温度、1007:空气温度、1008:空气湿度、1009:大气压强，使用端口9001。数据写入InfluxDB：写入地址http://127.0.0.1:8086，token是hnals-influx-2026，org是activesys。10个点全部写进wind_turbine，字段名跟点名对应，类型统一float。
 ```
 
 Agent 询问缺失信息后，用户补充回答：
@@ -1165,14 +1165,14 @@ bucket是hnals。
 
 ## 用例 40：InfluxDB 写入目标不可达——接入成功、后台重试、恢复后续写 ✅
 
-- **测试特性**：与用例 38 信息完全一致，但测试注入 InfluxDB 服务不可达（172.16.109.12:8086
+- **测试特性**：与用例 38 信息完全一致，但测试注入 InfluxDB 服务不可达（127.0.0.1:8086
   当机/网络隔离）——验证「start 成功返回、连接/写入失败属数据面运行时事件、不作为接入错误」的
   T0 语义（与 modbus/iec104「连接失败不导致 start 报错」同源），及恢复后的续写行为
 - **修复的版本**：C4H1（2026-09-16~18 实测通过）
 
 ### 测试输入
 
-前置状态：InfluxDB 服务（172.16.109.12:8086）被人为停止或网络不可达；环境须**回滚至用例 38
+前置状态：InfluxDB 服务（127.0.0.1:8086）被人为停止或网络不可达；环境须**回滚至用例 38
 之前（或全新环境）**，再重放与用例 38 完全相同的输入（略）——否则接收端口 9001 被用例 38
 实例占用，start 将报 PORT_BIND_FAILED，关键点 ① 不成立。
 
@@ -1251,7 +1251,7 @@ bucket是hnals。
 前置状态：用例 38 已完成（1#风机 9001 在线、hnals 入库实例运行中）。
 
 ```
-这10个点都写一份到另一个bucket：url同，还是http://172.16.109.12:8086，token是hnals-influx-2026，org是activesys，bucket换成wind_history，measurement和字段名跟wind_turbine那边一样，类型统一float。
+这10个点都写一份到另一个bucket：url同，还是http://127.0.0.1:8086，token是hnals-influx-2026，org是activesys，bucket换成wind_history，measurement和字段名跟wind_turbine那边一样，类型统一float。
 ```
 
 > 关键点：① Agent 创建**第二个 c4_influxdb_client 实例**（独立实例、bucket=wind_history），
