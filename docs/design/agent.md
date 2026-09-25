@@ -119,6 +119,9 @@ Agent 系统覆盖数据接入流程中 Agent 侧的全部职能：
 - **编号 = 数据依赖 + 逻辑分组**（接入链 2→3→4 / 转发链 5→6→7 镜像对称），不是执行
   时序——提取器按消息缺口驱动并行推进，同一条消息可同时喂饱多条链；
 - **5/6/7 为条件阶段**：无转发意图时整条转发链标记 not_applicable，不产生缺口；
+  转发意图判定 = 关键词快路（`FORWARD_ON_RE`/`FORWARD_OFF_RE`）+ LLM 语义兜底
+  （`forward_intent_prompt.txt`，仅关键词未命中时咨询；模糊判 true 保守，
+  「II服务器地址是…」等去向表述不得静默降级为纯采集，func_test_case 用例 4）；
 - **8 与 9 之间是全流程唯一硬交互边界**（确认按钮），不可合并——9 是新增/修改/删除
   三路径公共出口，拆解必须紧贴执行以保证翻译最新裁决方案；
 - **状态精简**：`accessPlan` 为唯一方案态；deviceInfo/deviceInfoReady 中间态、
@@ -132,7 +135,7 @@ Agent 系统覆盖数据接入流程中 Agent 侧的全部职能：
 | 2 | 接入协议 | 提取 | 每条消息 | `protocol_prompt.txt`（side=receive） | canonical_name + match |
 | 3 | 接入点表 | 提取 | 阶段2 matched | `point_prompt.txt`（side=receive） | devices[{name, abbr, points[]}] |
 | 4 | 接入信息 | 提取 | 阶段2 matched | `connection_prompt.txt`（side=receive） | 按设备归档的 connection |
-| 5 | 转发协议 | 提取 | **条件**：存在转发意图 | `protocol_prompt.txt`（side=forward） | canonical_name + match |
+| 5 | 转发协议 | 提取 | **条件**：存在转发意图（关键词快路 + `forward_intent_prompt.txt` 兜底） | `protocol_prompt.txt`（side=forward） | canonical_name + match |
 | 6 | 转发点表 | 提取 | 阶段5 matched | `point_prompt.txt`（side=forward） | forward 点表（addr 展开） |
 | 7 | 转发信息 | 提取 | 阶段5 matched | `connection_prompt.txt`（side=forward） | 目标名 + connection |
 | 8 | 方案层 | 装配+校验 | 1-7 全部闭合 | **无（纯代码）** | AccessPlan + button_arm |
@@ -1952,6 +1955,7 @@ c4/agent/                              # Agent 系统
 │   ├── super_worker/
 │   │   ├── prompts/                   # 阶段提示词（§3.2 参数注入约定）
 │   │   │   ├── location_prompt.txt    # 阶段1 场站
+│   │   │   ├── forward_intent_prompt.txt # 阶段5-7 激活条件：转发意图判定（关键词未命中时兜底）
 │   │   │   ├── protocol_prompt.txt    # 阶段2/5 协议（side 参数化）
 │   │   │   ├── point_prompt.txt       # 阶段3/6 点表
 │   │   │   ├── connection_prompt.txt  # 阶段4/7 连接

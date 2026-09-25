@@ -610,6 +610,14 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
         let progress = false;
         const semantic = clean_user_text(user_text);
 
+        // 转发意图 LLM 兜底判定（阶段5-7 激活条件）：仅当关键词快路未命中时发起，
+        // 与后续提取阶段并行以摊薄延迟。func_test_case 用例 4：去向表述（「II服务器
+        // 地址是…」）不含 FORWARD_ON_RE 关键词，确定性闸门不得静默降级为纯采集方案。
+        const fwdIntentLlm =
+            FORWARD_ON_RE.test(semantic) || FORWARD_OFF_RE.test(semantic)
+                ? null
+                : llm_json("forward_intent_prompt.txt", {}, semantic).catch(() => null);
+
         // 文件点表确定性列映射——设备级信息直接落位（协议列属用户显式声明）
         let filePoints: Array<Record<string, unknown>> | null = null;
         if (file_data !== null) {
@@ -722,6 +730,19 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 }
             }
         }
+        // 转发意图判定（阶段5-7 激活条件）：关键词快路 + LLM 语义兜底。须先于采集侧
+        // 裸 IP 兜底捕获——意图为真时消息中的地址属转发目标，不得误入采集侧连接
+        // （func_test_case 用例 4）。
+        let fwdIntentHit = FORWARD_ON_RE.test(semantic);
+        if (!fwdIntentHit && !FORWARD_OFF_RE.test(semantic) && fwdIntentLlm) {
+            const v = await fwdIntentLlm;
+            fwdIntentHit = v !== null && (v["intent"] === true || v["intent"] === "true");
+        }
+        if (!state.forwardIntent && fwdIntentHit && !FORWARD_OFF_RE.test(semantic)) {
+            state.forwardIntent = true;
+            progress = true;
+        }
+
         // 连接信息中的 ip/port 兜底捕获（确定性；提示词未覆盖的简写形式）
         if (state.recv.conn["ip"] === undefined) {
             const ipM = semantic.match(/(?:IP|ip|地址)[^\d]{0,4}(\d{1,3}(?:\.\d{1,3}){3})/);
@@ -729,7 +750,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             if (ipM) {
                 state.recv.conn["ip"] = ipM[1];
                 progress = true;
-            } else if (bareIp && !/转发|目标/.test(semantic)) {
+            } else if (bareIp && !/转发|目标/.test(semantic) && !state.forwardIntent) {
                 state.recv.conn["ip"] = bareIp[1];
                 progress = true;
             }
@@ -739,6 +760,48 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             if (portM) {
                 state.recv.conn["port"] = Number(portM[1]);
                 progress = true;
+            }
+        }
+        // 阶段4 接入连接 LLM 兜底（connection_prompt side=receive）：确定性正则未捕获、
+        // 消息疑似含端口/地址表述时交提示词提取（长尾表述如「端口使用9001」）；
+        // 仅填充缺失字段，不覆盖确定性捕获。
+        if (
+            (state.recv.conn["ip"] === undefined || state.recv.conn["port"] === undefined) &&
+            /端口|port|ip/i.test(semantic)
+        ) {
+            const r = await llm_json(
+                "connection_prompt.txt",
+                {
+                    side: "receive",
+                    protocol: state.recv.protocol ?? "",
+                    config_fields: JSON.stringify(
+                        Object.entries(
+                            entry_of_side(state.recv, "writer")?.entry?.config_schema
+                                ?.fields ?? {},
+                        ).map(([name, f]) => ({
+                            name,
+                            required:
+                                (f as { default?: unknown }).default === undefined,
+                            description:
+                                (f as { description?: string }).description ?? "",
+                        })),
+                    ),
+                    connection_hints: JSON.stringify(
+                        (entry_of_side(state.recv, "writer")?.entry?.prompt_hints as
+                            | Record<string, unknown>
+                            | undefined)?.["connection_hints"] ?? [],
+                    ),
+                },
+                semantic,
+            );
+            if (r && typeof r["connection"] === "object" && r["connection"] !== null) {
+                const conn = r["connection"] as Record<string, unknown>;
+                for (const key of ["ip", "port"]) {
+                    if (state.recv.conn[key] === undefined && conn[key] !== undefined) {
+                        state.recv.conn[key] = conn[key];
+                        progress = true;
+                    }
+                }
             }
         }
         if (state.recv.deviceName === null) {
@@ -763,12 +826,8 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             }
         }
 
-        // 转发意图（§2.2 阶段5 条件）
-        if (!state.forwardIntent && FORWARD_ON_RE.test(semantic) && !FORWARD_OFF_RE.test(semantic)) {
-            state.forwardIntent = true;
-            progress = true;
-        }
         // 显式否认转发 → 回退（即使用户此前提过）
+        // （转发意图的正向判定已在采集侧连接捕获前完成——意图为真时消息中的地址属转发目标）
         if (state.forwardIntent && FORWARD_OFF_RE.test(semantic) && !FORWARD_ON_RE.test(semantic)) {
             state.forwardIntent = false;
             state.fwd = fresh_side();
@@ -906,8 +965,10 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             }
         }
 
-        // 阶段7 转发连接（ip:port 形式 + 提示词提取）
-        if (state.forwardIntent && state.fwd.protocol) {
+        // 阶段7 转发连接：ip:port 确定性捕获只依赖转发意图（协议未明也要保住去向信息，
+        // 用例 4 轮次4「转发地址127.0.0.1:9900」曾因协议未明被整段跳过而丢失）；
+        // connection_prompt 提取需注入协议，仍在协议已明时进行
+        if (state.forwardIntent) {
             if (state.fwd.conn["ip"] === undefined || state.fwd.conn["port"] === undefined) {
                 const m = semantic.match(
                     /(?:转发到|目标|服务器)[^\d]{0,6}(\d{1,3}(?:\.\d{1,3}){3})[:：](\d{2,5})/,
@@ -916,7 +977,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                     state.fwd.conn["ip"] = m[1];
                     state.fwd.conn["port"] = Number(m[2]);
                     progress = true;
-                } else {
+                } else if (state.fwd.protocol) {
                     const r = await llm_json(
                         "connection_prompt.txt",
                         {
