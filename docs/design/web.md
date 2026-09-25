@@ -226,12 +226,13 @@ Agent 生成接入方案后需要用户确认。**确认的唯一有效通道是
 |----|----|
 | 允许扩展名 | `.xlsx .csv .xls .pdf .docx .doc .png .jpg .jpeg .gif .bmp .txt` |
 | 大小上限 | 50 MB |
-| 响应 | SSE 流（`text`/`tool_call`/`tool_result`/`done`/`error` 事件；`done` 事件带 `conversationId`，响应头 `X-Conversation-Id` 回传会话 ID） |
+| 响应 | SSE 流（`text`/`done`/`error` 事件；解析为确定性步骤，**不产出 `tool_call`/`tool_result`**——2026-09-23 起随九阶段流水线生效；`done` 事件带 `conversationId`，响应头 `X-Conversation-Id` 回传会话 ID） |
 
 #### 3.2.2 前端处理
 
-- 选择文件后立即上传，后端将文件落盘到 `/tmp` 并把路径传给 Agent，Agent 调用解析工具
-  （`xlsx_parser` / `csv_parser` / `txt_parser`）提取内容，随后流式返回解析结果。
+- 选择文件后立即上传，后端将文件落盘到 `/tmp` 并把路径传给 Agent，由 Agent **确定性解析**文件内容
+  （解析文本经 `<file_data>` 注入九阶段提取流水线，不再产出解析工具的 `tool_call`/`tool_result`
+  卡片事件），随后流式返回解析结果。
 - **实际可解析格式提示**：仅 `.xlsx`/`.csv`/`.txt` 有对应解析工具；`.pdf`/`.docx`/图片会被
   后端接受（multer 放行）但**无解析器**，Agent 无法提取内容。前端在文件选择器中对此类格式
   标注「暂不支持解析」，避免用户误传后得到空结果。
@@ -449,9 +450,10 @@ LLM 调用 `display_points` 建立显示会话，ChatView 消息流**顶部**插
     └─────────┘
 ```
 
-> **流关闭兜底**：后端某些分支（如「已记录场站…」「请提供场站名称…」的早退路径）在返回文本后
-> **不发送 `done` 事件**直接结束流。前端不能只认 `done`/`error`——必须以
-> **ReadableStream 关闭**（`fetch` 响应体读尽）作为流终止的兜底信号。
+> **流关闭兜底**：当前后端所有回合——含缺口聚合提问（如「还需要补充以下信息：场站名称与
+> 缩写…」，2026-09-23 起取代旧的「请提供场站名称…」早退路径）——均以 `done` 事件收尾；
+> 前端仍须以 **ReadableStream 关闭**（`fetch` 响应体读尽）作为流终止的兜底信号（防御旧版
+> 后端或异常断流），不能只认 `done`/`error`。
 
 ### 4.3 前端技术选型
 

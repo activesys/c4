@@ -20,8 +20,10 @@
   结构化行/表格）——按列名/表头语义映射到上述字段。
 
 # 提取规则
-1. 点名（name）：用户对点的命名，中文/英文均可原样提取；
-   用户未命名的点 name 填空串 ""（由系统按地址自动生成点名）。
+1. 点名（name）与英文标识（id，仅 receive 侧需要）：用户对点的命名，中文/英文均可原样提取到 name；
+   同时为每点给出 id——name 已是合规英文标识（字母开头，仅字母/数字/下划线）时 id=name 原样，
+   否则把 name 翻译为小写 snake_case 英文标识（如「风速」→ windspeed、「桨叶角度」→ blade_angle）；
+   用户未命名的点 name 与 id 均填空串 ""（由上游统一向用户追问，系统不自动生成点名）。
 2. 全局声明展开：作用于全部点的批量声明（如"全是功能码3""全部32位浮点、字节交换2"
    "从站号都是1"）必须展开写入每个点的对应字段。
 3. 单点声明覆盖全局声明：某点单独给出的字段值优先于全局声明。
@@ -57,6 +59,7 @@
   "points": [
     {
       "name": "点名，未命名填空串",
+      "id": "英文标识（仅 receive 侧）：合规英文点名原样，中文名翻译为 snake_case；未命名填空串",
       "…": "按本阶段参数注入的字段清单逐点填写，输入未给出的字段省略键"
     }
   ],
@@ -78,11 +81,11 @@
 
 ---
 用户：<user_input>接入1号风机变桨控制器，点表3个点：3000:桨叶角度、3002:变桨速度、3004:变桨电机温度，从站号1，全是保持寄存器（功能码3），全部32位浮点、字节交换2</user_input>
-输出：{"declared_count": 3, "points": [{"name": "桨叶角度", "addr": 3000, "uid": 1, "fun": 3, "type": 10, "swap": 2}, {"name": "变桨速度", "addr": 3002, "uid": 1, "fun": 3, "type": 10, "swap": 2}, {"name": "变桨电机温度", "addr": 3004, "uid": 1, "fun": 3, "type": 10, "swap": 2}], "reason": "从站号1与全局声明展开至全部3个点；保持寄存器→fun=3、32位浮点→type=10 按 point_field_hints 映射"}
+输出：{"declared_count": 3, "points": [{"name": "桨叶角度", "id": "blade_angle", "addr": 3000, "uid": 1, "fun": 3, "type": 10, "swap": 2}, {"name": "变桨速度", "id": "pitch_speed", "addr": 3002, "uid": 1, "fun": 3, "type": 10, "swap": 2}, {"name": "变桨电机温度", "id": "pitch_motor_temp", "addr": 3004, "uid": 1, "fun": 3, "type": 10, "swap": 2}], "reason": "从站号1与全局声明展开至全部3个点；保持寄存器→fun=3、32位浮点→type=10 按 point_field_hints 映射；中文名已翻译为 snake_case 英文标识"}
 
 ---
 用户：<user_input>读1号风机的线圈数据，从站号1，3000:阀门状态、3001:阀门反馈</user_input>
-输出：{"declared_count": 2, "points": [{"name": "阀门状态", "addr": 3000, "uid": 1, "fun": 1}, {"name": "阀门反馈", "addr": 3001, "uid": 1, "fun": 1}], "reason": "线圈点（fun=1）按跨字段规则 type 只能为布尔量(0)或位(15)，无法唯一确定，需向用户确认"}
+输出：{"declared_count": 2, "points": [{"name": "阀门状态", "id": "valve_status", "addr": 3000, "uid": 1, "fun": 1}, {"name": "阀门反馈", "id": "valve_feedback", "addr": 3001, "uid": 1, "fun": 1}], "reason": "线圈点（fun=1）按跨字段规则 type 只能为布尔量(0)或位(15)，无法唯一确定，需向用户确认"}
 
 ---
 用户：<user_input>接入1#风机，点表：3000:桨叶角度、3002:变桨速度，功能码3</user_input>
@@ -96,14 +99,14 @@ addr,name,fun,type,swap,uid
 3002,,3,10,2,1
 3004,变桨电机温度,3,10,2,1
 </file_data>
-输出：{"declared_count": null, "points": [{"name": "桨叶角度", "addr": 3000, "uid": 1, "fun": 3, "type": 10, "swap": 2}, {"name": "", "addr": 3002, "uid": 1, "fun": 3, "type": 10, "swap": 2}, {"name": "变桨电机温度", "addr": 3004, "uid": 1, "fun": 3, "type": 10, "swap": 2}], "reason": "点表来自文件解析数据，按列名映射字段；第二行无点名，name 填空串由系统生成"}
+输出：{"declared_count": null, "points": [{"name": "桨叶角度", "id": "blade_angle", "addr": 3000, "uid": 1, "fun": 3, "type": 10, "swap": 2}, {"name": "", "id": "", "addr": 3002, "uid": 1, "fun": 3, "type": 10, "swap": 2}, {"name": "变桨电机温度", "id": "pitch_motor_temp", "addr": 3004, "uid": 1, "fun": 3, "type": 10, "swap": 2}], "reason": "点表来自文件解析数据，按列名映射字段；第二行无点名，name 与 id 填空串由上游追问"}
 
 【side = receive，protocol = iec104，
   point_fields：[{"name":"addr","description":"信息对象地址（IOA）"}]】
 
 ---
 用户：<user_input>接入远动装置，点表：1000:有功功率、1002:无功功率</user_input>
-输出：{"declared_count": 2, "points": [{"name": "有功功率", "addr": 1000}, {"name": "无功功率", "addr": 1002}], "reason": "iec104 每点仅需 IOA 地址"}
+输出：{"declared_count": 2, "points": [{"name": "有功功率", "id": "active_power", "addr": 1000}, {"name": "无功功率", "id": "reactive_power", "addr": 1002}], "reason": "iec104 每点仅需 IOA 地址；中文名已翻译为 snake_case 英文标识"}
 
 【side = forward，protocol = asfp2，
   point_fields：[{"name":"addr","description":"转发地址（目标服务器点地址）"}]】

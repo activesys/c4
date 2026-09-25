@@ -244,3 +244,31 @@ export function validate_point_table(
     errors.push(...check_shm_overlap(points));
     return errors;
 }
+
+/**
+ * 点名→英文标识推导（agent.md §3.2.1.3b，2026-09-23 裁定）：
+ * 提供的英文标识（提取层翻译/用户合规英文原文）优先；其次合规英文点名原样用作 id；
+ * 其余情况一律报错——系统不再自动生成点名（p_ 生成已退役）。
+ * 返回 error 非空时 id 为空串，调用方按「报告用户要求提供合规英文点名」处理。
+ */
+export function derive_point_id(
+    raw_id: string,
+    name_raw: string,
+    ident_re: RegExp,
+    max_len: number,
+): { id: string; error: string | null } {
+    const rid = raw_id.trim();
+    if (rid !== "") {
+        return { id: rid, error: null };
+    }
+    if (name_raw.length > max_len) {
+        return { id: "", error: `点名太长（超过 ${max_len} 字节），需 1K 以内` };
+    }
+    if (ident_re.test(name_raw)) {
+        return { id: name_raw, error: null };
+    }
+    return {
+        id: "",
+        error: "缺少英文标识 id——中文/非规范点名须由提取层提供英文翻译（snake_case），系统不自动生成",
+    };
+}

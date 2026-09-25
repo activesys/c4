@@ -70,54 +70,66 @@ def _write_parseable_txt(tmp_path: Path) -> str:
 
 
 # ──────────────────────────────────────────────
-#  §6.1  tool_call.args 恒为 {}
+#  §6.1  上传解析为确定性步骤（无 tool_call 卡片事件）
 # ──────────────────────────────────────────────
 
 
 @pytest.mark.llm
-def test_tool_call_args_always_empty(agent: Any, tmp_path: Path) -> None:
+def test_upload_parses_without_tool_call(agent: Any, tmp_path: Path) -> None:
     """
-    6.1: 上传可解析 .txt 触发 txt_parser 工具调用；tool_call 事件 args 恒为 {}。
-    web.md §3.1.1 契约：工具卡片只展示 name 与进度，不展示 args。
+    6.1: 上传可解析 .txt → 确定性解析并流式返回结果文本；流中不含 tool_call 事件。
+    web.md §3.2.1/§3.2.2（2026-09-23 更新）：九阶段流水线将文件解析收敛为上传
+    接口的确定性步骤（解析文本经 <file_data> 注入提取层），不再产出解析工具的
+    tool_call/tool_result 卡片事件。
     """
     txt = _write_parseable_txt(tmp_path)
     with agent.upload(txt, "请解析此文件中的设备信息") as stream:
         events = list(stream)
+        text = stream.text_content()
 
+    assert events, "上传应产生 SSE 事件"
+    assert text.strip(), (
+        f"上传解析应产出解析结果文本，实际为空。事件类型: {[e.type for e in events]}"
+    )
     tool_calls = [
         p for e in events if (p := _payload(e)) is not None and p.get("type") == "tool_call"
     ]
-    assert tool_calls, (
-        "上传 .txt 应触发 txt_parser 工具调用（tool_call 事件）；"
-        f"实际事件类型: {[e.type for e in events]}"
+    assert not tool_calls, (
+        "上传解析不应产出 tool_call 事件（确定性解析，无工具卡片）；"
+        f"实际: {[p.get('name') for p in tool_calls]}"
     )
-    for p in tool_calls:
-        assert p.get("args") == {}, f"tool_call.args 应恒为 {{}}，实际: {p.get('args')!r}"
 
 
 # ──────────────────────────────────────────────
-#  §6.2  upload 事件不带 conversationId
+#  §6.2  upload 的 done 事件携带 conversationId
 # ──────────────────────────────────────────────
 
 
 @pytest.mark.llm
-def test_upload_events_lack_conversation_id(agent: Any, tmp_path: Path) -> None:
+def test_upload_done_carries_conversation_id(agent: Any, tmp_path: Path) -> None:
     """
-    6.2: 上传响应的事件对象无 conversationId 字段。
-    web.md §3.2.1：upload 的 SSE 事件（text/tool_call/tool_result/done/error）
-    均不带 conversationId。
+    6.2: 上传 SSE 的 done 事件携带 conversationId（其余事件不带）。
+    web.md §3.2.1/§3.2.2：upload 接收/回传 conversationId
+    （X-Conversation-Id 头 + done 事件），用于上传轮与后续对话轮的会话关联。
     """
     txt = _write_parseable_txt(tmp_path)
     with agent.upload(txt, "请解析此文件中的设备信息") as stream:
         events = list(stream)
+        header = stream.get_header("X-Conversation-Id")
 
     assert events, "上传应产生 SSE 事件"
-    for evt in events:
-        payload = _payload(evt)
-        if payload is not None:
-            assert "conversationId" not in payload, (
-                f"upload 事件不应带 conversationId，实际 payload: {payload}"
-            )
+    done_events = [e for e in events if e.type == "done"]
+    assert done_events, (
+        f"上传流应以 done 事件收尾，实际事件类型: {[e.type for e in events]}"
+    )
+    done_payloads = [p for e in done_events if (p := _payload(e)) is not None]
+    assert done_payloads, "done 事件应有 JSON 载荷"
+    for p in done_payloads:
+        assert p.get("conversationId"), f"done 事件应携带 conversationId，实际: {p!r}"
+    if header:
+        assert done_payloads[0].get("conversationId") == header, (
+            f"done.conversationId 应与 X-Conversation-Id 头一致: {done_payloads[0]!r} vs {header!r}"
+        )
 
 
 # ──────────────────────────────────────────────
@@ -147,47 +159,46 @@ def test_no_interrupt_event(agent: Any, tmp_path: Path) -> None:
 
 
 # ──────────────────────────────────────────────
-#  §6.4  早退分支返回文本后无 done
+#  §6.4  缺口聚合提问回合以 done 收尾
 # ──────────────────────────────────────────────
 
 
-def test_early_exit_branches_stream_without_done(agent: Any) -> None:
+def test_site_gap_question_round_completes_with_done(agent: Any) -> None:
     """
-    6.4: 「请提供场站名称…」与「已记录场站…」早退分支返回文本后流直接关闭、无 done。
-    web.md §4.2 流关闭兜底：前端须以 ReadableStream 关闭为终止信号，不等待 done。
-
-    两分支均确定性触发（site 未设置时走 super_worker 的早退路径，不依赖 LLM）：
-      - 消息含「华能/风电场/电场/场站」→ 「请提供场站名称和缩写…」（不固化 site）
-      - 消息含「场站名称：…，缩写：…」→ 「已记录场站：…」（固化 site）
+    6.4: site 未绑定时首条接入消息 → 缺口聚合提问（含场站名称与缩写缺口），
+    回合以 done 事件正常收尾。
+    web.md §4.2（2026-09-23 更新）：旧「请提供场站名称…」早退无 done 分支已被
+    缺口驱动流水线取代——提问即终局，events 以 done 收尾；前端仍保留流关闭兜底。
+    分支 1 为确定性渲染（缺口聚合，不依赖 LLM）。
     """
-    # 分支 1：请提供场站名称…（先触发，不固化 site，保证分支 2 仍可触发）
     with agent.chat("接入华能阿拉善1#风机") as stream:
         events_1 = list(stream)
         text_1 = stream.text_content()
 
-    assert "请提供场站名称" in text_1, (
-        f"应命中「请提供场站名称…」早退分支，实际回复: {text_1[:200]!r}"
+    # 聚合提问文本：指出场站名称与缩写缺口
+    assert "场站" in text_1, (
+        f"聚合提问应包含场站名称与缩写缺口，实际回复: {text_1[:200]!r}"
     )
     assert any((p := _payload(e)) is not None and p.get("type") == "text" for e in events_1), (
-        "早退分支应产出 text 事件"
+        "聚合提问应产出 text 事件"
     )
-    assert all(e.type != "done" for e in events_1), (
-        f"早退分支不应产出 done 事件，实际事件类型: {[e.type for e in events_1]}"
+    assert any(e.type == "done" for e in events_1), (
+        f"缺口提问回合应以 done 收尾，实际事件类型: {[e.type for e in events_1]}"
     )
 
-    # 分支 2：已记录场站…
+    # 分支 2：绑定场站 → 正常回合收尾（LLM 提取，宽松断言）
     with agent.chat("场站名称：华能阿拉善，缩写：hnals") as stream:
         events_2 = list(stream)
         text_2 = stream.text_content()
 
-    assert "已记录场站" in text_2, (
-        f"应命中「已记录场站…」早退分支，实际回复: {text_2[:200]!r}"
+    assert "场站" in text_2, (
+        f"场站绑定回复应提及场站，实际回复: {text_2[:200]!r}"
     )
     assert any((p := _payload(e)) is not None and p.get("type") == "text" for e in events_2), (
-        "早退分支应产出 text 事件"
+        "场站绑定回合应产出 text 事件"
     )
-    assert all(e.type != "done" for e in events_2), (
-        f"早退分支不应产出 done 事件，实际事件类型: {[e.type for e in events_2]}"
+    assert any(e.type == "done" for e in events_2), (
+        f"场站绑定回合应以 done 收尾，实际事件类型: {[e.type for e in events_2]}"
     )
 
 

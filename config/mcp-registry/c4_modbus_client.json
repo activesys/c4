@@ -17,6 +17,11 @@
   "point_schema": {
     "fields": [
       {
+        "name": "name",
+        "type": "string",
+        "description": "点名，必填：用户提供的点的业务名称，可为中文，Agent 原样保存；用户未提供时必须先询问，仍不提供则拒绝接入（不自动生成）"
+      },
+      {
         "name": "addr",
         "type": "integer",
         "description": "寄存器地址"

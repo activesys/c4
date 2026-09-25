@@ -1,6 +1,7 @@
 // c4/agent/src/subagents/tools/output_plan_steps.ts — step-decomposer
 // LLM 提供 deviceInfo（info-gatherer 产出），工具确定性生成 ServiceStep[]
-// 协议映射、id 生成（abbr 记忆）、默认字段填充、运行时强校验全部由 Registry 驱动
+// 协议映射、点名→id 推导（§3.2.1.3b：不自动生成）、实例 id（abbr 记忆）、
+// 默认字段填充、运行时强校验全部由 Registry 驱动
 
 import { readFileSync } from "node:fs";
 import { tool } from "langchain";
@@ -9,12 +10,12 @@ import type { McpServiceRegistry } from "../../registry/registry.js";
 import {
     IDENTIFIER_RE,
     MAX_IDENTIFIER_LENGTH,
-    generate_point_id,
     identifier_error,
     identity_field_key,
     point_duplicate_error,
     sanitize_identifier,
 } from "../../executor/executor.js";
+import { derive_point_id } from "../../executor/point_rules.js";
 import type {
     PointField,
     RegistryEntry,
@@ -27,7 +28,11 @@ import type {
 // 一律 .passthrough() 放行，具体字段名由 registry 的 config_schema/point_schema.fields 声明。
 
 const devicePointInputSchema = z.object({
-    name: z.string().describe("数据点名称（英文标识；无点名传空字符串，系统按身份字段自动生成）"),
+    name: z.string().describe("数据点点名（用户原点名，可为中文，原样传入；必填，缺省即拦截）"),
+    id: z.string().optional().describe(
+        "英文标识（agent.md §3.2.1.3b）：合规英文点名传原文，中文名传提取层翻译的 snake_case；" +
+        "未命名传空串。系统不自动生成",
+    ),
 }).passthrough();
 
 const deviceInputSchema = z.object({
@@ -249,24 +254,30 @@ export function generate_steps(
                 };
             }
 
-            let id: string;
-            if (!IDENTIFIER_RE.test(name_raw) && name_raw.length <= MAX_IDENTIFIER_LENGTH) {
-                if (identity_fields.length === 0) {
-                    return {
-                        steps,
-                        warnings,
-                        fatal: `设备 "${dev.name}" 存在缺少或非法点名的点，且 ${svc_type} 未声明 point_schema.identity_fields，无法生成点名`,
-                    };
-                }
-                id = generate_point_id(raw, identity_fields);
-            } else if (name_raw.length > MAX_IDENTIFIER_LENGTH) {
+            // 点名→id（agent.md §3.2.1.3b，2026-09-23 裁定）：id 来自提取层翻译或
+            // 用户合规英文原文——系统不自动生成，格式不符报告用户，不自动替换
+            const raw_id = typeof raw["id"] === "string" ? (raw["id"] as string) : "";
+            const derived = derive_point_id(
+                raw_id,
+                name_raw,
+                IDENTIFIER_RE,
+                MAX_IDENTIFIER_LENGTH,
+            );
+            if (derived.error !== null) {
                 return {
                     steps,
                     warnings,
-                    fatal: `设备 "${dev.name}" 的点名太长（超过 ${MAX_IDENTIFIER_LENGTH} 字节），请保证在 1K 以内`,
+                    fatal: `设备 "${dev.name}" 的点「${name_raw}」${derived.error}——请向用户提供合规英文点名（字母开头，仅字母/数字/下划线，1K 以内）后重试`,
                 };
-            } else {
-                id = name_raw;
+            }
+            const id = derived.id;
+            const id_err = identifier_error(id, "point.id");
+            if (id_err !== null) {
+                return {
+                    steps,
+                    warnings,
+                    fatal: `设备 "${dev.name}" 的点「${name_raw}」的英文标识 "${id}" ${id_err}——请修正后重试，系统不自动替换`,
+                };
             }
 
             if (identity_fields.length > 0) {
@@ -295,7 +306,8 @@ export function generate_steps(
             // 作为跨会话描述查重与对点展示的依据；Go 侧 json.Unmarshal 忽略该字段
             pt["name"] = name_raw;
             for (const [k, v] of Object.entries(raw)) {
-                if (k !== "name") pt[k] = v;
+                // id 已由 derive_point_id 定案、name 已原样保留——raw 的同名字段不回填
+                if (k !== "name" && k !== "id") pt[k] = v;
             }
             points.push(pt as unknown as ServicePoint);
         }
@@ -381,18 +393,9 @@ export function generate_steps(
                     if (ft_points_raw) {
                         const src = ft_points_raw[point_index] ?? {};
                         for (const f of required_fields) {
-                            let v = src[f];
-                            // 转发点名称继承（2026-09-17 用户裁定）：用户未提供转发端
-                            // 点名时，按映射关系取对应采集点的点名（采集点名此时已必填）
-                            if (
-                                f === "name" &&
-                                (v === undefined || v === null || v === "")
-                            ) {
-                                const w = pt as unknown as Record<string, unknown>;
-                                v = typeof w["name"] === "string" && w["name"] !== ""
-                                    ? w["name"]
-                                    : String(pt.id);
-                            }
+                            const v = src[f];
+                            // 转发点不含 name（2026-09-23 裁定）：点名经 key 解析采集点
+                            // 获得，落盘 name 属冗余数据——reader 注册表亦不得声明 name
                             if (v === undefined || v === null || v === "") {
                                 return {
                                     steps,
@@ -402,12 +405,6 @@ export function generate_steps(
                             }
                             rp[f] = v;
                         }
-                    } else if (required_fields.includes("name")) {
-                        // 用户未提供转发点表业务字段之外的点清单时，名称按映射继承
-                        const w = pt as unknown as Record<string, unknown>;
-                        rp["name"] = typeof w["name"] === "string" && w["name"] !== ""
-                            ? w["name"]
-                            : String(pt.id);
                     }
                     reader_points.push(rp as unknown as ServicePoint);
                     point_index++;
@@ -517,9 +514,9 @@ function validate_runtime_input(
 // ── 增量变更校验（2026-09-17 用户裁定，func_test_case 用例 10）───────
 // 此处仅保留 steps 构造前的两类判定；转发配对、描述查重、转发实例归属
 // 由 validate_step_invariants 在步骤层统一判定（devices/changes 双路径）。
-// ① 采集点点名必填：无 name 且无 id、或 id 为身份字段生成名
-//    （generate_point_id 的 p_ 前缀约定）→ 说明用户没有提供点名
-// ② 转发点名继承：批内对应采集点优先，其次既有点（名称缺省时回退采集点 id）
+// ① 采集点点名必填：无 name 且无 id、或 id 为历史身份字段生成名
+//    （p_ 前缀约定，生成机制已于 2026-09-23 退役）→ 说明用户没有提供点名
+// ② 转发点名引用：转发点无自身 name，展示时按序引用采集点点名（不落盘）
 function validate_increment_changes(
     changes: z.infer<typeof planStepsInputSchema>["changes"],
     current_config: Record<string, unknown> | null,
@@ -892,48 +889,33 @@ export function createOutputPlanStepsTool(
                     }
                     for (const p of c.points ?? []) {
                         const rec = p as unknown as Record<string, unknown>;
-                        // 点名归一：change 点缺 id/key 但带 name 时，name 即既有点的
-                        // point.id（配置点表只存 id 不存 name）——与 devices 路径的
-                        // name→id 转换一致，否则 merge 会把它误判为新点
+                        // 点名归一（agent.md §3.2.1.3b，2026-09-23 裁定）：change 点缺
+                        // id/key 时由点名推导 id——合规英文点名原样用作 id，name 原样保留
+        // （name+id 双字段落盘）；中文/非规范点名由提取层给 id，系统不自动生成
                         const has_id = typeof rec["id"] === "string" && (rec["id"] as string).length > 0;
                         const has_key = typeof rec["key"] === "string" && (rec["key"] as string).length > 0;
                         const name_raw =
                             typeof rec["name"] === "string" ? (rec["name"] as string).trim() : "";
-                        if (
-                            !has_id &&
-                            !has_key &&
-                            name_raw !== "" &&
-                            IDENTIFIER_RE.test(name_raw) &&
-                            name_raw.length <= MAX_IDENTIFIER_LENGTH
-                        ) {
-                            rec["id"] = name_raw;
-                            delete rec["name"];
-                        }
-                        // writer 点仍无 id → 按身份字段生成（与 devices 路径一致）；
-                        // 身份字段不全且无点名 → 可读报错，禁止产出无名点
-                        if (
-                            !has_id &&
-                            !has_key &&
-                            (rec["id"] === undefined || rec["id"] === null)
-                        ) {
-                            const entry = registry.queryRegistry(c.service_type);
-                            const identity_fields =
-                                entry?.point_schema.identity_fields ?? [];
-                            if (identity_fields.length > 0) {
-                                const ikey = identity_field_key(
-                                    rec,
-                                    identity_fields,
-                                );
-                                if (ikey === null) {
-                                    return JSON.stringify({
-                                        success: false,
-                                        error:
-                                            `变更点缺少身份字段（${identity_fields.join(", ")}）且未提供点名，无法定位或生成点：` +
-                                            JSON.stringify(rec),
-                                    });
-                                }
-                                rec["id"] = generate_point_id(rec, identity_fields);
+                        if (!has_id && !has_key) {
+                            const derived = derive_point_id(
+                                "",
+                                name_raw,
+                                IDENTIFIER_RE,
+                                MAX_IDENTIFIER_LENGTH,
+                            );
+                            if (
+                                derived.error !== null ||
+                                identifier_error(derived.id, "point.id") !== null
+                            ) {
+                                return JSON.stringify({
+                                    success: false,
+                                    error:
+                                        `变更点「${name_raw || JSON.stringify(rec)}」无法确定 point.id：` +
+                                        (derived.error ?? "英文标识格式非法") +
+                                        "——请向用户确认合规英文点名后重试，系统不自动生成",
+                                });
                             }
+                            rec["id"] = derived.id;
                         }
                         const pid = rec["id"];
                         if (typeof pid === "string" && pid.length > 0) {

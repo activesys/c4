@@ -19,6 +19,7 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+import uuid
 
 AGENT_JS = "/home/wangbo/work/activesys/c4/agent/dist/index.js"
 SHM_BINARY = "/usr/local/bin/c4_shm_manager"
@@ -326,14 +327,17 @@ def _post(path, body, timeout=300):
     return urllib.request.urlopen(req, timeout=timeout)
 
 
-def chat(message, history):
+def chat(message, history, conversation_id=None):
     """返回 (完整文本, 事件列表)；事件用于过程健康度断言（README §4）。
     事件形如 (type, name)：("tool_call","output_access_plan") / ("error","") 等。
     新架构（agent.md §2.8）：方案武装信号为 button_arm 语义事件（不再从工具事件推断——
     工具副作用 ≠ 语义状态）；本函数对旧工具事件与新语义事件双兼容探测。"""
     text_parts = []
     events = []
-    with _post("/api/chat", {"message": message, "history": history}) as resp:
+    payload = {"message": message, "history": history}
+    if conversation_id:
+        payload["conversationId"] = conversation_id
+    with _post("/api/chat", payload) as resp:
         buf = []
         for raw in resp:
             line = raw.decode("utf-8", "replace").rstrip("\n")
@@ -383,12 +387,15 @@ def wait_idle(timeout=90, gap=0.5):
 class Conv:
     def __init__(self):
         self.history = []
+        # web.md §3.1.2 契约：客户端生成并全程复用 conversationId（服务端按会话
+        # 隔离接入草稿，2026-09-23 起 state 按 conversationId 隔离）
+        self.conversation_id = f"e2e-{uuid.uuid4().hex[:12]}"
 
     def send(self, message):
         message = map_ports(message)
         PH.user(message)
         self.history.append({"role": "user", "content": message})
-        text, events = chat(message, self.history[:-1])
+        text, events = chat(message, self.history[:-1], self.conversation_id)
         log(f"  >> {message[:60]}...")
         log(f"  << {text[:280]}...")
         tools = {name for (t, name) in events if t == "tool_call"}
@@ -486,7 +493,8 @@ SUCCESS_MARK_RE = re.compile(r"执行完成|已执行成功|已配置完成|接�
 FAKE_TAIL_RE = re.compile(r"没有真正完成|重新执行|重新提交|接入失败|需人工核验|配置未生效")
 IDLE_TEXT_RE = re.compile(r"[\s.。…~]*\Z")
 PLAN_TOOLS = {"output_access_plan", "output_plan_steps"}  # 兼容旧实现探测；新架构（agent.md §3.2.0.1）方案层为纯代码，武装信号 = button_arm 事件
-BUTTON_BUDGET = {}   # 每用例按钮预算覆盖表；缺省 2（= send_flow 驱动器 clicked<2 上限）
+# 用例 29（崩溃恢复）整链路含 接入→删除→再接入 三次合法按钮确认，预算 3（2026-09-25）
+BUTTON_BUDGET = {"29": 3}   # 每用例按钮预算覆盖表；缺省 2（= send_flow 驱动器 clicked<2 上限）
 
 
 class ProcessHealth:
@@ -713,6 +721,17 @@ def prereq():
         wait_config(lambda c2: writer_of(c2, 1000) is not None
                     and forward_of(c2, 5000) is not None,
                     desc="1#风机 writer + 转发实例")
+        # 点名规格（agent.md §3.2.1.3b，2026-09-23 裁定）：采集点 name（用户原点名，
+        # 原样中文）+ id（英文标识）双字段落盘；转发点无 name 字段（经 key 解析，零冗余）
+        cfg = read_config()
+        wpt = points_of(cfg, "c4_asfp2_server", writer_of(cfg, 1000))[1000]
+        if wpt.get("name") != "风速":
+            raise Fail(f"采集点 name 未落盘或不符: {json.dumps(wpt, ensure_ascii=False)[:150]}")
+        if not re.fullmatch(r"[a-zA-Z][a-zA-Z0-9_]*", str(wpt.get("id", ""))):
+            raise Fail(f"采集点 id 非英文标识（应为点名原文/翻译，非 p_ 生成）: {wpt.get('id')}")
+        fpt = points_of(cfg, "c4_asfp2_client", forward_of(cfg, 5000))[5000]
+        if "name" in fpt:
+            raise Fail(f"转发点不应含 name 字段（冗余数据）: {json.dumps(fpt, ensure_ascii=False)[:150]}")
         wait_port(P_RECV1, True)
         inject(P_RECV1, 1000, 1009, times=3)
         time.sleep(2)

@@ -943,6 +943,8 @@ start 等工具被调用时，各 MCP Server 读取文件中同名顶层 key 对
 
 > **标识符命名规范**：各 MCP 服务配置中的 `id` 字段（即 `service_id`）和 points 数组中的 `id` 字段（即 `point_id`）均须匹配 `[a-zA-Z_]+`，仅允许字母和下划线，**不得包含 `.`**。`.` 被保留用作全局 key 的连接符，格式为 `{service_id}.{point_id}`（如 `hnals_1_scada.windspeed`）。Agent 在生成配置时负责校验此规则。
 
+> **点名落盘规则**：Writer（采集）服务的 `points[i]` 必须含 `name`——用户提供的原点名，Agent **原样保存**（可为中文，如「风速」），用于描述查重与对点展示，Go MCP 服务不消费；同时含 `id`（英文标识，参与全局 key）。Reader（转发）服务的 `points[i]` **不含 `name`**——点名经 `key` 解析采集点即得，落盘属冗余数据；`key`（引用采集点全局 key）即是对应关系与点名的唯一来源（展示对应关系由 Agent 按序解析呈现，见 agent.md §3.2.1.3b）。`c4_asfp2_server` 与 `c4_influxdb_client` 的逐字段规格见各自设计文档（`c4_asfp2_server.md` / `c4_influxdb_client.md` §2）。
+
 ### 3.2.2 c4_modbus_client 配置
 
 每个元素代表一个 Modbus TCP 设备连接。
@@ -1033,9 +1035,10 @@ start 等工具被调用时，各 MCP Server 读取文件中同名顶层 key 对
 | 字段 | 类型 | 含义 |
 |------|------|------|
 | `key` | string | 引用的 Writer 采集点标识，格式为 `{service_id}.{point_id}`（如 `hnals_1_scada.windspeed`）。`c4_shm_manager` 根据此 key 填入与 Writer 端相同的 shm_id |
-| `name` | string | 转发点名称（必填）：未提供时按映射关系继承对应采集点的点名；Go MCP 服务不消费此字段 |
 | `addr` | integer | ASFP2 地址（协议中的 key） |
 | `shm_id` | integer | 全局 shm_id，默认 0（未分配），由 `c4_shm_manager` 通过 key 匹配 Writer 后填入 |
+
+> **转发点无 `name` 字段**：点名经 `key` 解析采集点获得——key 已唯一确定对应关系，落盘 name 属冗余数据（见 §3.2.1 点名落盘规则）。
 
 ### 3.2.5 c4_shm_manager 与 Writer/Reader 分类
 
@@ -1084,8 +1087,8 @@ IEC104 采集（2 个主变 RTU）和 ASFP2 转发（到中心侧数据库和第
             "registers_quantity_max": 125,
             "timer": 1000,
             "points": [
-                {"id": "windspeed", "uid": 1, "addr": 1000, "fun": 3, "type": 10, "swap": 2, "shm_id": 1},
-                {"id": "temperature", "uid": 1, "addr": 1002, "fun": 3, "type": 10, "swap": 2, "shm_id": 2}
+                {"id": "windspeed", "name": "风速", "uid": 1, "addr": 1000, "fun": 3, "type": 10, "swap": 2, "shm_id": 1},
+                {"id": "temperature", "name": "机舱温度", "uid": 1, "addr": 1002, "fun": 3, "type": 10, "swap": 2, "shm_id": 2}
             ]
         },
         {
@@ -1102,8 +1105,8 @@ IEC104 采集（2 个主变 RTU）和 ASFP2 转发（到中心侧数据库和第
             "registers_quantity_max": 125,
             "timer": 1000,
             "points": [
-                {"id": "windspeed", "uid": 1, "addr": 1000, "fun": 3, "type": 10, "swap": 2, "shm_id": 3},
-                {"id": "temperature", "uid": 1, "addr": 1002, "fun": 3, "type": 10, "swap": 2, "shm_id": 4}
+                {"id": "windspeed", "name": "风速", "uid": 1, "addr": 1000, "fun": 3, "type": 10, "swap": 2, "shm_id": 3},
+                {"id": "temperature", "name": "机舱温度", "uid": 1, "addr": 1002, "fun": 3, "type": 10, "swap": 2, "shm_id": 4}
             ]
         }
     ],
@@ -1126,9 +1129,9 @@ IEC104 采集（2 个主变 RTU）和 ASFP2 转发（到中心侧数据库和第
             "it_timer": 1000,
             "gi_timer": 1000,
             "points": [
-                {"id": "uab", "addr": 16385, "shm_id": 5},
-                {"id": "ubc", "addr": 16386, "shm_id": 6},
-                {"id": "uac", "addr": 25601, "shm_id": 7}
+                {"id": "uab", "name": "UAB 线电压", "addr": 16385, "shm_id": 5},
+                {"id": "ubc", "name": "UBC 线电压", "addr": 16386, "shm_id": 6},
+                {"id": "uac", "name": "UAC 线电压", "addr": 25601, "shm_id": 7}
             ]
         },
         {
@@ -1149,9 +1152,9 @@ IEC104 采集（2 个主变 RTU）和 ASFP2 转发（到中心侧数据库和第
             "it_timer": 1000,
             "gi_timer": 1000,
             "points": [
-                {"id": "alarm1", "addr": 1, "shm_id": 8},
-                {"id": "alarm2", "addr": 2, "shm_id": 9},
-                {"id": "alarm3", "addr": 3, "shm_id": 10}
+                {"id": "alarm1", "name": "报警信号1", "addr": 1, "shm_id": 8},
+                {"id": "alarm2", "name": "报警信号2", "addr": 2, "shm_id": 9},
+                {"id": "alarm3", "name": "报警信号3", "addr": 3, "shm_id": 10}
             ]
         }
     ],

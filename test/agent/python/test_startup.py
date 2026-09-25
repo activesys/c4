@@ -882,7 +882,13 @@ class TestCrashRecovery:
             )
 
             # 断言: 标记删除 + 报告「接入不成功」+ 收敛完成（实例拉起）
-            assert not (config_dir / "pending_change.json").exists()
+            # （标记删除发生在 config 归一之后，轮询至截止时间——终态：标记必须被删）
+            marker_deadline = time.time() + 30
+            while (config_dir / "pending_change.json").exists() and time.time() < marker_deadline:
+                time.sleep(0.5)
+            assert not (config_dir / "pending_change.json").exists(), (
+                "恢复完成后事务标记 pending_change.json 应被删除"
+            )
             state = _wait_last_error(handle)
             state_payload = state.get("state", state)
             assert "接入不成功" in (state_payload.get("lastError") or "")

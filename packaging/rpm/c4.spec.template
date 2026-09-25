@@ -41,7 +41,7 @@ tar -xzf %{SOURCE0} -C %{buildroot}
 /usr/local/lib/c4/agent/node/bin/node
 /usr/local/lib/c4/agent/dist
 /usr/local/lib/c4/agent/node_modules
-/usr/local/lib/c4/agent/src/super_worker/prompts/system.txt
+/usr/local/lib/c4/agent/src/super_worker/prompts/*.txt
 /usr/local/lib/c4/frontend
 /usr/local/lib/c4/scripts/install.sh
 /usr/local/etc/c4/mcp-registry

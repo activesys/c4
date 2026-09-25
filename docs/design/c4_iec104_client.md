@@ -135,9 +135,9 @@ IEC 104 远动装置连接实例。
             "it_timer": 1000,
             "gi_timer": 1000,
             "points": [
-                {"id": "alarm1", "addr": 1, "shm_id": 8},
-                {"id": "uab", "addr": 16385, "shm_id": 5},
-                {"id": "energy_total", "addr": 25601, "shm_id": 11}
+                {"id": "alarm1", "name": "报警信号1", "addr": 1, "shm_id": 8},
+                {"id": "uab", "name": "UAB 线电压", "addr": 16385, "shm_id": 5},
+                {"id": "energy_total", "name": "电能量总量", "addr": 25601, "shm_id": 11}
             ]
         },
         {
@@ -159,8 +159,8 @@ IEC 104 远动装置连接实例。
             "it_timer": 1000,
             "gi_timer": 1000,
             "points": [
-                {"id": "alarm1", "addr": 1, "shm_id": 12},
-                {"id": "ubc", "addr": 16386, "shm_id": 13}
+                {"id": "alarm1", "name": "报警信号1", "addr": 1, "shm_id": 12},
+                {"id": "ubc", "name": "UBC 线电压", "addr": 16386, "shm_id": 13}
             ]
         }
     ]
@@ -197,6 +197,7 @@ IEC 104 远动装置连接实例。
 | 字段 | 类型 | 含义 |
 |------|------|------|
 | `id` | string | 采集点标识符。`{service_id}.{point_id}` 构成全局唯一 key，供 `c4_shm_manager` 通过 key 匹配分配 shm_id |
+| `name` | string | 点名（用户提供，必填）：点的业务名称，Agent 原样保存（可为中文）——描述查重与对点展示的依据；Go MCP 服务不消费此字段 |
 | `addr` | integer | 信息对象地址（IOA），字节数由实例级 `ioa_size` 决定（1/2/3 字节），取值 0 ~ (2^(8×ioa_size) − 1) |
 | `shm_id` | integer | 全局 shm_id，默认 0（未分配），由 `c4_shm_manager` 分配后回填 |
 

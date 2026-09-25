@@ -24,8 +24,13 @@
    每项含该点的 id。点级删除/点参数修改时必填；整实例删除时省略。
 5. point_updates：点参数修改（如"将 windspeed 的地址从 1000 改为 1010"）→
    [{"id": "匹配到的点 id", "addr": 1010}]；字段名按用户描述（addr 等）。
-6. add_points：新增点 [{"name": "用户给的点名", "addr": 地址, ...用户给出的其他字段}]。
-   用户未给的字段省略键，禁止编造。
+6. add_points：新增点 [{"name": "用户给的点名", "id": "英文标识（必填）", "addr": 地址,
+   "forward_addr": "用户给出的该点转发地址", ...用户给出的其他字段}]。
+   - id：点名本身是合规英文标识（字母开头，仅字母/数字/下划线）时原样；
+     中文名翻译为小写 snake_case（如 振动→vibration、齿轮箱油温→gearbox_oil_temp）。
+     系统以此作为点的唯一标识，无法翻译时 intent 填 null。
+   - forward_addr：仅当用户明确给出该新点的转发地址/转发点位置时填写，未给出省略键。
+   - 其余用户未给的字段省略键，禁止编造。
 7. 用户消息中若带有 JSON 文本（{"changes": ...} 结构），以其为准：intent 按内容判定，
    target_id 取其中实例 id，忽略其余提取。
 
@@ -41,5 +46,5 @@
   "instance_fields": {"字段名": "新值"},
   "points": [{"id": "点 id"}],
   "point_updates": [{"id": "点 id", "字段名": "新值"}],
-  "add_points": [{"name": "点名", "addr": 0}]
+  "add_points": [{"name": "点名", "id": "英文标识", "addr": 0, "forward_addr": "转发地址（如用户给出）"}]
 }

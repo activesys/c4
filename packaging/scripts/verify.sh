@@ -56,12 +56,14 @@ else
 fi
 if [ "$_ok" -eq 1 ]; then printf 'PASS V2\n'; else printf 'FAIL V2\n'; TOTAL_FAILS=$((TOTAL_FAILS + 1)); fi
 
-# ── V3：system.txt 双路径 + dist/index.js ────────────────────
+# ── V3：阶段 prompt 双路径 + dist/index.js ───────────────────
 _ok=1
-[ -f "$STAGING/usr/local/lib/c4/agent/dist/super_worker/prompts/system.txt" ] \
-    || _fail "dist/super_worker/prompts/system.txt 缺失"
-[ -f "$STAGING/usr/local/lib/c4/agent/src/super_worker/prompts/system.txt" ] \
-    || _fail "src/super_worker/prompts/system.txt 缺失"
+for _p in protocol_prompt location_prompt connection_prompt change_prompt point_prompt; do
+    [ -f "$STAGING/usr/local/lib/c4/agent/dist/super_worker/prompts/$_p.txt" ] \
+        || _fail "dist/super_worker/prompts/$_p.txt 缺失"
+    [ -f "$STAGING/usr/local/lib/c4/agent/src/super_worker/prompts/$_p.txt" ] \
+        || _fail "src/super_worker/prompts/$_p.txt 缺失"
+done
 [ -f "$STAGING/usr/local/lib/c4/agent/dist/index.js" ] \
     || _fail "dist/index.js 缺失"
 if [ "$_ok" -eq 1 ]; then printf 'PASS V3\n'; else printf 'FAIL V3\n'; TOTAL_FAILS=$((TOTAL_FAILS + 1)); fi

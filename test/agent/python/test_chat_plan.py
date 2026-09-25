@@ -63,8 +63,10 @@ class TestPlanGeneration:
             f"Upload should produce a response. Got: {upload_text[:200]}"
         )
 
-        # Step 2: 请求生成方案
-        with chat.send("生成接入方案，并转发到中心侧") as stream:
+        # Step 2: 一次补齐转发协议 + 目标（缺口闭合 → 方案层自动装配）
+        with chat.send(
+            "生成接入方案，转发采用asfp2协议，目标地址是127.0.0.1:19910"
+        ) as stream:
             plan_text = stream.text_content()
 
         assert len(plan_text) > 0, "Plan generation should produce a response"
@@ -75,6 +77,15 @@ class TestPlanGeneration:
         assert has_confirm, (
             f"Plan response should contain confirmation signal. "
             f"Got: {plan_text[:500]}"
+        )
+        # 转发对应展示（agent.md §3.2.1.3b，2026-09-23 裁定）：转发点逐条展示与
+        # 采集点的对应（采集 <地址>（<点名>） → 转发 <地址>），禁止两侧孤立列表
+        assert "与采集点按序一一对应" in plan_text, (
+            f"Forward plan should render per-point correspondence. "
+            f"Got: {plan_text[:500]}"
+        )
+        assert "→ 转发" in plan_text, (
+            f"Forward plan should list 采集→转发 pairs. Got: {plan_text[:500]}"
         )
         # 方案展示时可豁免协议名，但无例外黑名单仍需检查
         assert_no_technical_terms(plan_text, allow_protocols=True, allow_ports=True)
@@ -162,6 +173,54 @@ class TestPlanGeneration:
         # 无可用服务的回复属能力介绍场景（README §4.7：能力介绍时可用协议名，
         # 如"当前可用的接入协议有……"）——协议名豁免；无例外黑名单仍全量检查
         assert_no_technical_terms(text, allow_protocols=True)
+
+    @retry_llm(max_attempts=3)
+    def test_forward_count_mismatch_rejected(self, chat, agent, tmp_path):
+        """4.4.8: 采集/转发点表数量不等 → 拦截（agent.md §3.2.1.3b，2026-09-23 裁定）
+
+        采集 10 点 + 转发点表仅 5 个 → 不得出方案（button_arm 不出现）、
+        回复指出数量不一致并要求按序一一对应、config.json 无写入。
+        """
+        msg = (
+            "现在需要接入1号风机的数据，第三方厂家通过asfp2协议给我们转来1#风机数据，"
+            "10个点，从1000到1009，10个点分别是1000:风速、1001:功率、1002:风向、"
+            "1003:桨叶角度、1004:发电机转速、1005:齿轮箱油温、1006:塔筒温度、"
+            "1007:空气温度、1008:空气湿度、1009:大气压强，使用端口19091。"
+            "我们需要将这些数据转发到II区服务器上，转发采用asfp2协议，"
+            "目标地址是127.0.0.1:19991，点表5000~5004。"
+        )
+        with chat.send(msg) as stream:
+            reply = stream.text_content()
+            interrupt_id = find_interrupt_id(stream)
+
+        assert len(reply) > 0, "Reply should not be empty"
+
+        # button_arm 不出现——数量不等的点表不得进入方案确认
+        assert interrupt_id is None, (
+            f"Count mismatch must NOT enter confirm phase (no button_arm). "
+            f"Got: {reply[:500]}"
+        )
+
+        # 回复应指出数量问题并要求修正/询问转发点表（不截断、不自动补齐）
+        mismatch_signals = ["数量", "不一致", "一一对应", "对应", "转发点表", "转发地址"]
+        has_signal = any(kw in reply for kw in mismatch_signals)
+        assert has_signal, (
+            f"Reply should point out count mismatch / ask for correction. "
+            f"Got: {reply[:500]}"
+        )
+
+        # config.json 不应写入该设备
+        config_path = agent.config_dir / "config.json"
+        if config_path.exists():
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            for key, value in config.items():
+                if key == "c4_shm_manager" or not isinstance(value, list):
+                    continue
+                for inst in value:
+                    assert "wt1" not in str(inst.get("id", "")), (
+                        f"Count-mismatched plan must not be written to config. "
+                        f"Found instance: {inst.get('id')}"
+                    )
 
 
 # ══════════════════════════════════════════════

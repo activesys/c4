@@ -120,9 +120,9 @@ Modbus/TCP 设备连接实例。
             "hton_total": 0,
             "timer": 1000,
             "points": [
-                {"id": "windspeed", "uid": 1, "addr": 1000, "fun": 3, "type": 10, "swap": 2, "shm_id": 1},
-                {"id": "temperature", "uid": 1, "addr": 1002, "fun": 3, "type": 10, "swap": 2, "shm_id": 2},
-                {"id": "run_state", "uid": 1, "addr": 0, "fun": 1, "type": 15, "swap": 0, "shm_id": 3}
+                {"id": "windspeed", "name": "风速", "uid": 1, "addr": 1000, "fun": 3, "type": 10, "swap": 2, "shm_id": 1},
+                {"id": "temperature", "name": "机舱温度", "uid": 1, "addr": 1002, "fun": 3, "type": 10, "swap": 2, "shm_id": 2},
+                {"id": "run_state", "name": "运行状态", "uid": 1, "addr": 0, "fun": 1, "type": 15, "swap": 0, "shm_id": 3}
             ]
         },
         {
@@ -139,7 +139,7 @@ Modbus/TCP 设备连接实例。
             "hton_total": 0,
             "timer": 1000,
             "points": [
-                {"id": "windspeed", "uid": 1, "addr": 1000, "fun": 3, "type": 10, "swap": 2, "shm_id": 4}
+                {"id": "windspeed", "name": "风速", "uid": 1, "addr": 1000, "fun": 3, "type": 10, "swap": 2, "shm_id": 4}
             ]
         }
     ]
@@ -170,6 +170,7 @@ Modbus/TCP 设备连接实例。
 | 字段 | 类型 | 含义 |
 |------|------|------|
 | `id` | string | 采集点标识符。`{service_id}.{point_id}` 构成全局唯一 key，供 `c4_shm_manager` 通过 key 匹配分配 shm_id |
+| `name` | string | 点名（用户提供，必填）：点的业务名称，Agent 原样保存（可为中文）——描述查重与对点展示的依据；Go MCP 服务不消费此字段 |
 | `uid` | integer | 单元标识符（Unit Identifier），即 MBAP Header 中的从站地址 |
 | `addr` | integer | Modbus 地址，即 PDU 中的 Starting Address（0 基地址，直接编码进请求的 2 字节地址字段） |
 | `fun` | integer | Modbus 功能码：`1`(Read Coils) / `2`(Read Discrete Inputs) / `3`(Read Holding Registers) / `4`(Read Input Registers) |

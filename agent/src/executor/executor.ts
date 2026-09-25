@@ -195,8 +195,40 @@ export async function merge_config_from_steps(
 
     // writer 点去重后，同批次 reader 转发点的 key 必须跟随新 id（用例 10）
     const renames = new Map<string, Map<string, string>>();
+    // 本批次 writer 侧删除的完整引用（"实例id.点id"）——成对删除（func_test_case 用例 17）
+    // 时 reader 步骤先于 writer 步骤校验，其 key 引用的 writer 点在本批次内被删属合法，
+    // 不得按"引用不存在"拒绝（2026-09-23）
+    const batchDeletedRefs = new Set<string>();
+    for (const s of steps) {
+        const e2 = registry?.get_entry(s.service_type);
+        if (e2?.role !== "writer" || s.action !== "delete" || !Array.isArray(s.points)) continue;
+        const wid = String((s.instance as Record<string, unknown>)["id"] ?? "");
+        if (!wid) continue;
+        for (const dp of s.points) {
+            const pid = (dp as unknown as Record<string, unknown>)["id"];
+            if (typeof pid === "string" && pid) batchDeletedRefs.add(`${wid}.${pid}`);
+        }
+    }
+    const dumpPts = (arr: unknown): string =>
+        JSON.stringify(
+            (Array.isArray(arr) ? arr : []).map((p) => {
+                const r = p as Record<string, unknown>;
+                return {
+                    id: r["id"],
+                    key: r["key"],
+                    addr: r["addr"],
+                    kt: typeof r["addr"] === "number" ? "n" : typeof r["addr"],
+                };
+            }),
+        );
     for (const step of [...writerSteps, ...readerSteps]) {
         const svc_type = step.service_type;
+        if (MERGE_DEBUG) {
+            console.error(
+                `[merge] step ${svc_type}.${String((step.instance as Record<string, unknown>)?.["id"] ?? "")} ` +
+                    `${step.action} pts=${dumpPts(step.points)}`,
+            );
+        }
         if (svc_type === "c4_shm_manager") {
             return {
                 success: false,
@@ -229,7 +261,7 @@ export async function merge_config_from_steps(
                             (i2.points ?? []).some((p2) => point_match_key(p2) === pid),
                     );
                 });
-                if (!exists) {
+                if (!exists && !batchDeletedRefs.has(k)) {
                     throw new Error(
                         `转发点 ${k} 引用的采集点不存在（${writer_id} 上没有点 "${pid}"），请先确认采集侧点表`,
                     );
@@ -254,6 +286,20 @@ export async function merge_config_from_steps(
                     warnings,
                     error: `未知操作类型: ${(step as { action: string }).action}`,
                 };
+        }
+        if (MERGE_DEBUG) {
+            const tables = Object.entries(config)
+                .filter(([st]) => st !== "c4_shm_manager")
+                .map(([st, list]) => ({
+                    st,
+                    pts: (Array.isArray(list) ? (list as Array<Record<string, unknown>>).flatMap(
+                        (i) =>
+                            ((i["points"] ?? []) as Array<Record<string, unknown>>).map((pp) =>
+                                `${String(i["id"])}.${String(pp["id"] ?? pp["key"] ?? pp["addr"])}`,
+                            ),
+                    ) : []),
+                }));
+            console.error(`[merge] after-step tables=${JSON.stringify(tables)}`);
         }
     }
 
@@ -300,6 +346,8 @@ export async function merge_config_from_steps(
 // 不含点号：global key 以 `.` 作为分隔符（{instance.id}.{point.id}）
 export const IDENTIFIER_RE = /^[a-zA-Z][a-zA-Z0-9_]*$/;
 export const MAX_IDENTIFIER_LENGTH = 1024;
+/** merge 过程调试日志开关（C4_MERGE_DEBUG=1,输出至 agent stdout/e2e agent log） */
+const MERGE_DEBUG = process.env["C4_MERGE_DEBUG"] === "1";
 
 export function identifier_error(value: string, label: string): string | null {
     if (!IDENTIFIER_RE.test(value)) {
@@ -340,15 +388,8 @@ export function identity_field_key(
     return parts.join(", ");
 }
 
-/** 生成名 = `p_` + 身份字段值（先 sanitize_identifier）按 identity_fields 顺序用 `_` 连接 */
-export function generate_point_id(
-    rec: Record<string, unknown>,
-    identity_fields: string[],
-): string {
-    return "p_" + identity_fields
-        .map((f) => sanitize_identifier(String(rec[f] ?? "")))
-        .join("_");
-}
+// generate_point_id（p_ + 身份字段生成点名）已于 2026-09-23 退役——
+// agent.md §3.2.1.3b：id 来自用户点名原文或提取层翻译，系统不自动生成。
 
 /** 点重复报告（§3.2.1.3b 报告口径）：仅展示冲突项，二选一——提供新点表 / 结束本次接入任务 */
 export function point_duplicate_error(
@@ -660,6 +701,49 @@ function handle_modify(
             if (typeof id === "string" && id.length > 0) {
                 validate_identifier(id, "point.id");
             }
+            // 撞名裁定（func_test_case 用例 10/18，与 handle_add 同语义）：携带的
+            // 新点 id 与既有点相同、但业务地址不同 → 新点改名（windspeed_2）并
+            // 传播 reader key；地址也相同 → 视为更新该点。新点地址被其他 id 的
+            // 既有点占用 → 可读拒绝，禁止覆盖（覆盖会改写既有点地址造成数据损坏）
+            if (
+                typeof id === "string" && id.length > 0 &&
+                typeof rec["addr"] === "number"
+            ) {
+                const id_clash = target.points.find(
+                    (p) =>
+                        point_match_key(p) === id &&
+                        (p as unknown as Record<string, unknown>)["addr"] !== rec["addr"],
+                );
+                const addr_taken = target.points.find(
+                    (p) =>
+                        point_match_key(p) !== id &&
+                        (p as unknown as Record<string, unknown>)["addr"] === rec["addr"],
+                );
+                if (id_clash && !addr_taken) {
+                    let seq_n = 2;
+                    let cand_n = `${id}_${seq_n}`;
+                    const taken_n = (k2: string) =>
+                        target.points.some((p) => point_match_key(p) === k2);
+                    while (taken_n(cand_n)) {
+                        seq_n += 1;
+                        cand_n = `${id}_${seq_n}`;
+                    }
+                    rec["id"] = cand_n;
+                    if (renames && instance_id) {
+                        let mm = renames.get(instance_id);
+                        if (!mm) {
+                            mm = new Map<string, string>();
+                            renames.set(instance_id, mm);
+                        }
+                        mm.set(id, cand_n);
+                    }
+                    warnings.push(
+                        `modify: 点 "${id}" 与既有点同名但地址不同（addr ` +
+                            `${String((id_clash as unknown as Record<string, unknown>)["addr"])}→${String(rec["addr"])}），` +
+                            `新点去重为 "${cand_n}"`,
+                    );
+                }
+            }
             const match_key = point_match_key(step_pt);
             const existing_idx = target.points.findIndex(
                 (p) => point_match_key(p) === match_key,
@@ -688,6 +772,12 @@ function handle_modify(
                             `（${step.service_type}.${instance_id}），请更换地址或先删除原点`,
                         );
                     }
+                }
+                if (MERGE_DEBUG) {
+                    console.error(
+                        `[merge][modify-append] pt=${JSON.stringify(step_pt)} addrType=${typeof rec2["addr"]} ` +
+                            `existing=${JSON.stringify(target.points.map((p) => [p["addr"], p["id"] ?? p["key"]]))}`,
+                    );
                 }
                 // 新 point 追加，shm_id = 0
                 target.points.push({ ...step_pt, shm_id: step_pt.shm_id ?? 0 });
@@ -756,6 +846,12 @@ function handle_delete(
                 ]
                     .filter(Boolean)
                     .join(" 或 ");
+                if (MERGE_DEBUG) {
+                    console.error(
+                        `[merge][delete-miss] mk=${JSON.stringify(mk)} pt=${JSON.stringify(pt)} ` +
+                            `target keys=${JSON.stringify(target.points.map((p) => JSON.stringify(point_match_key(p))))}`,
+                    );
+                }
                 throw new Error(
                     `删除失败: ${step.service_type}.${instance_id} 不存在 ${want} 的点。当前点表: ${table}`,
                 );
