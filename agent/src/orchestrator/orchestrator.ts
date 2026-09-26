@@ -1,6 +1,6 @@
 // c4/agent/src/orchestrator/orchestrator.ts — Workflow 编排器
 // agent.md §1.4-§3.2：缺口驱动九阶段流水线。
-//   回合循环: ①取消检测 ②阶段提取(1-7，提示词驱动) ③缺口计算(聚合提问停等)
+//   回合循环: ①取消检测 ②阶段提取(1-7，提示词驱动) ③缺口计算(单缺口顺序提问停等)
 //   ④方案层装配(阶段8，纯代码：abbr 记忆 / 确定性推导 / L1+L2 校验) → button_arm 停等
 //   ⑤执行层(阶段9，确认按钮后：generate_steps 拆解 + 事务五步 + 回滚协议)。
 // 确认通道: 按钮唯一(§2.8)——[C4_BUTTON_CONFIRM]/[C4_BUTTON_CANCEL] 前缀；
@@ -44,6 +44,15 @@ import {
     deterministic_site_tag,
     llm_site_tag,
 } from "./site_check.js";
+import { zh_start_address } from "./zh_numeral.js";
+import {
+    ask_conn,
+    ask_points,
+    ask_protocol,
+    bind_bare,
+    parse_bare_value,
+    type Gap,
+} from "./gap_question.js";
 import {
     with_config_lock,
     ConfigBusyError,
@@ -99,6 +108,8 @@ interface SessionState {
     gapRepeat: number;
     /** 本回合场站归属判定结果（null=未触发；ambiguous=归属不明；other=他站资料） */
     turnSiteCheck: "ambiguous" | "other" | null;
+    /** 上一回合提问的缺口键（§2.6 单缺口顺序提问；裸值兜底绑定的目标） */
+    pendingGap: string | null;
 }
 
 function fresh_state(): SessionState {
@@ -113,6 +124,7 @@ function fresh_state(): SessionState {
         lastGapSignature: null,
         gapRepeat: 0,
         turnSiteCheck: null,
+        pendingGap: null,
     };
 }
 
@@ -440,24 +452,33 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
     const stateWriter = cfg.state;
 
     // ── LLM 调用 ───────────────────────────────────────────
+    // 本轮 LLM 提取调用序号（invoke_with_logging 每轮清零；仅作日志排序用）
+    let turnLlmRound = 0;
     async function llm_json(
         prompt_file: string,
         params: Record<string, string>,
         user_input: string,
+        conversation: string,
     ): Promise<Record<string, unknown> | null> {
         const rendered = render_prompt(prompt_file, params);
+        cfg.agentLogger.llm_call(conversation, ++turnLlmRound, [
+            { role: "system", content: rendered },
+            { role: "user", content: `<user_input>\n${user_input}\n</user_input>` },
+        ]);
         for (let attempt = 0; attempt < 3; attempt++) {
             try {
                 const res = await model.invoke([
                     { role: "system", content: rendered },
                     { role: "user", content: `<user_input>\n${user_input}\n</user_input>` },
                 ]);
-                const parsed = parse_json<Record<string, unknown>>(extract_text(res));
+                const text = extract_text(res);
+                cfg.agentLogger.llm_text(conversation, text);
+                const parsed = parse_json<Record<string, unknown>>(text);
                 if (parsed !== null) return parsed;
             } catch (err) {
                 if (attempt === 2) {
                     cfg.agentLogger.error(
-                        "orchestrator",
+                        conversation,
                         `LLM 调用失败: ${err instanceof Error ? err.message : String(err)}`,
                     );
                 }
@@ -606,6 +627,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
         user_text: string,
         file_data: string | null,
         state: SessionState,
+        conversation: string,
     ): Promise<boolean> {
         let progress = false;
         const semantic = clean_user_text(user_text);
@@ -616,7 +638,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
         const fwdIntentLlm =
             FORWARD_ON_RE.test(semantic) || FORWARD_OFF_RE.test(semantic)
                 ? null
-                : llm_json("forward_intent_prompt.txt", {}, semantic).catch(() => null);
+                : llm_json("forward_intent_prompt.txt", {}, semantic, conversation).catch(() => null);
 
         // 文件点表确定性列映射——设备级信息直接落位（协议列属用户显式声明）
         let filePoints: Array<Record<string, unknown>> | null = null;
@@ -679,6 +701,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                   "location_prompt.txt",
                   { known_site: `${state.site.name}（缩写 ${state.site.abbr}）` },
                   semantic,
+                  conversation,
               ).catch(() => null)
             : null;
 
@@ -713,6 +736,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 file_data !== null && filePoints === null
                     ? `${semantic}\n<file_data>\n${file_data.slice(0, 2000)}\n</file_data>`
                     : semantic,
+                conversation,
             );
             if (r) {
                 const match = String(r["match"] ?? "not_mentioned");
@@ -745,12 +769,22 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
 
         // 连接信息中的 ip/port 兜底捕获（确定性；提示词未覆盖的简写形式）
         if (state.recv.conn["ip"] === undefined) {
-            const ipM = semantic.match(/(?:IP|ip|地址)[^\d]{0,4}(\d{1,3}(?:\.\d{1,3}){3})/);
-            const bareIp = semantic.match(/(\d{1,3}(?:\.\d{1,3}){3})/);
-            if (ipM) {
-                state.recv.conn["ip"] = ipM[1];
+            // 带标签 IP 若处于去向语境（「II服务器地址是…」「转发目标地址…」）则属转发
+            // 目标，不得误入采集侧连接（func_test_case 用例 4，2026-09-26 recap 实测暴露）；
+            // 跳过去向语境命中，取第一个采集语境的带标签 IP
+            const ipMatches = [
+                ...semantic.matchAll(/(?:IP|ip|地址)[^\d]{0,4}(\d{1,3}(?:\.\d{1,3}){3})/g),
+            ];
+            for (const m of ipMatches) {
+                const idx = m.index ?? 0;
+                const ctx = semantic.slice(Math.max(0, idx - 12), idx);
+                if (/服务器|转发|目标|去向|II区/.test(ctx)) continue;
+                state.recv.conn["ip"] = m[1];
                 progress = true;
-            } else if (bareIp && !/转发|目标/.test(semantic) && !state.forwardIntent) {
+                break;
+            }
+            const bareIp = semantic.match(/(\d{1,3}(?:\.\d{1,3}){3})/);
+            if (state.recv.conn["ip"] === undefined && bareIp && !/转发|目标/.test(semantic) && !state.forwardIntent) {
                 state.recv.conn["ip"] = bareIp[1];
                 progress = true;
             }
@@ -793,6 +827,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                     ),
                 },
                 semantic,
+                conversation,
             );
             if (r && typeof r["connection"] === "object" && r["connection"] !== null) {
                 const conn = r["connection"] as Record<string, unknown>;
@@ -860,6 +895,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                     match_hints: match_hints_payload("reader"),
                 },
                 semantic,
+                conversation,
             );
             if (r) {
                 const match = String(r["match"] ?? "not_mentioned");
@@ -899,6 +935,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                         point_field_hints: hints,
                     },
                     input_text,
+                    conversation,
                 );
                 if (r && Array.isArray(r["points"]) && (r["points"] as unknown[]).length > 0) {
                     state.recv.points = r["points"] as Array<Record<string, unknown>>;
@@ -911,12 +948,17 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             }
         }
 
-        // 阶段6 转发点表：确定性地址范围展开优先，其余交 LLM
-        if (state.forwardIntent && state.fwd.protocol && state.recv.points && !state.fwd.points) {
+        // 阶段6 转发点表：确定性地址范围展开优先——阿拉伯数字范围（「点表5000~5009」）
+        // 与自然语言起始地址（「从一万开始」→ 10000 起，func_test_case 用例 5）。用户
+        // 显式给出的范围总是采纳（含对既有值的修正，不静默吞）；无范围信息且尚未提取
+        // 时才交 LLM——point_prompt（side=forward）禁止以采集点表编造转发地址（9a 条），
+        // 缺失即走缺口追问
+        if (state.forwardIntent && state.fwd.protocol && state.recv.points) {
             const n = state.recv.points.length;
             const rangeM = semantic.match(
-                /(?:转发地址|转发点表|点表)[^\d\n]{0,6}(\d{2,7})\s*(?:到|~|-|—|开始)?\s*(\d+)?/,
+                /(?:转发地址|转发点表|点表)[^\d\n]{0,6}(\d{2,7})(?![个点])\s*(?:到|~|-|—|开始)?\s*(\d+)?/,
             );
+            const zhStart = rangeM ? null : zh_start_address(semantic);
             if (rangeM) {
                 const start = Number(rangeM[1]);
                 const end = rangeM[2] !== undefined ? Number(rangeM[2]) : start + n - 1;
@@ -928,14 +970,21 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                     state.fwd.points = pts;
                     progress = true;
                 }
-            } else if (state.fwd.protocol === "influxdb") {
-                // §2.7.1 确定性推导：influxdb 点字段（measurement/field/type）全部可由
-                // 源点/场站/用户表名映射，无需 LLM 提取——此处仅落 addr 骨架，
-                // 方案层装配时填充推导字段
-                state.fwd.points = (state.recv.points ?? []).map((p) => ({
-                    addr: p["addr"],
-                }));
+            } else if (zhStart !== null) {
+                const pts: Array<Record<string, unknown>> = [];
+                for (let i = 0; i < n; i++) pts.push({ addr: zhStart + i });
+                state.fwd.points = pts;
                 progress = true;
+            } else if (!state.fwd.points) {
+                if (state.fwd.protocol === "influxdb") {
+                    // §2.7.1 确定性推导：influxdb 点字段（measurement/field/type）全部可由
+                    // 源点/场站/用户表名映射，无需 LLM 提取——此处仅落 addr 骨架，
+                    // 方案层装配时填充推导字段
+                    state.fwd.points = (state.recv.points ?? []).map((p) => ({
+                        addr: p["addr"],
+                    }));
+                    progress = true;
+                }
             } else {
                 const hit = entry_of_side(state.fwd, "reader");
                 if (hit) {
@@ -956,6 +1005,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                             point_field_hints: hints,
                         },
                         semantic,
+                        conversation,
                     );
                     if (r && Array.isArray(r["points"]) && (r["points"] as unknown[]).length > 0) {
                         state.fwd.points = r["points"] as Array<Record<string, unknown>>;
@@ -1002,6 +1052,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                             ),
                         },
                         semantic,
+                        conversation,
                     );
                     if (r && typeof r["connection"] === "object" && r["connection"] !== null) {
                         Object.assign(
@@ -1059,14 +1110,34 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
         label: string,
         side: SideDraft,
         role: "writer" | "reader",
-    ): { gaps: string[]; recap: string[] } {
-        const gaps: string[] = [];
+    ): { gaps: Gap[]; recap: string[] } {
+        const keyPrefix = label === "转发" ? "fwd" : "recv";
+        // ask 生成（§2.6 确切格式引导）：协议/点表缺口由 schema 生成确切问题；
+        // 校验类缺口（字段不完整/数量不符/点表问题）文案本身已具体，ask 即 text
+        const ask_of = (key: string, text: string): string => {
+            if (key.endsWith(".protocol")) {
+                return ask_protocol(label, protocol_candidates(role));
+            }
+            if (key === `${keyPrefix}.points`) {
+                const entry = entry_of_side(side, role);
+                const fields = (entry?.entry?.point_schema?.fields ?? []).map(
+                    (f: { name: string }) => ({ name: f.name }),
+                );
+                if (fields.length > 0) return ask_points(label, fields);
+            }
+            return text;
+        };
+        const mk = (key: string, text: string): Gap => ({ key, text, ask: ask_of(key, text) });
+        const gaps: Gap[] = [];
         const recap: string[] = [];
         if (!side.protocol) {
             gaps.push(
-                side.protocolRaw
-                    ? `「${side.protocolRaw}」暂不支持——${label}协议目前支持：${protocol_candidates(role).join("、")}`
-                    : `${label}协议（${label === "转发" ? "数据要转发到哪里、用什么方式" : "设备使用哪种通信方式"}）`,
+                mk(
+                    `${keyPrefix}.protocol`,
+                    side.protocolRaw
+                        ? `「${side.protocolRaw}」暂不支持——${label}协议目前支持：${protocol_candidates(role).join("、")}`
+                        : `${label}协议（${label === "转发" ? "数据要转发到哪里、用什么方式" : "设备使用哪种通信方式"}）`,
+                ),
             );
             // 已收到点表时仍复述已理解内容（4.2.1：解析结果出现在对话文本中）
             if (side.points && side.points.length > 0) {
@@ -1081,7 +1152,12 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
         }
         recap.push(`${label}协议：${side.protocol}`);
         if (!side.points || side.points.length === 0) {
-            gaps.push(`${label}点表（各点的${label === "转发" ? "转发地址" : "地址与类型"}等信息）`);
+            gaps.push(
+                mk(
+                    `${keyPrefix}.points`,
+                    `${label}点表（各点的${label === "转发" ? "转发地址" : "地址与类型"}等信息）`,
+                ),
+            );
             return { gaps, recap };
         }
         const svc = find_service_type(registry, normalize_protocol(side.protocol), role);
@@ -1103,12 +1179,20 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             }
         }
         if (missing.length > 0) {
-            gaps.push(`${label}点表字段不完整：${missing.slice(0, 3).join("；")}${missing.length > 3 ? "等" : ""}`);
+            gaps.push(
+                mk(
+                    `${keyPrefix}.points.fields`,
+                    `${label}点表字段不完整：${missing.slice(0, 3).join("；")}${missing.length > 3 ? "等" : ""}`,
+                ),
+            );
         }
         // L1：数量对账 + 身份查重/重叠（point_rules 共享契约）
         if (side.declared !== null && side.declared !== side.points.length) {
             gaps.push(
-                `${label}点表数量与声明不符：声明 ${side.declared} 个，实际 ${side.points.length} 个`,
+                mk(
+                    `${keyPrefix}.points.fields`,
+                    `${label}点表数量与声明不符：声明 ${side.declared} 个，实际 ${side.points.length} 个`,
+                ),
             );
         }
         if (svc) {
@@ -1116,7 +1200,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 required: missingFields,
                 label: svc,
             });
-            for (const it of issues) gaps.push(`${label}点表问题：${it}`);
+            for (const it of issues) gaps.push(mk(`${keyPrefix}.points.fields`, `${label}点表问题：${it}`));
         }
         recap.push(
             `${label}点表 ${side.points.length} 个点：${side.points
@@ -1136,11 +1220,15 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
         );
     }
 
-    function compute_gaps(state: SessionState): { gaps: string[]; recap: string[] } {
-        const gaps: string[] = [];
+    function compute_gaps(state: SessionState): { gaps: Gap[]; recap: string[] } {
+        const gaps: Gap[] = [];
         const recap: string[] = [];
         if (!state.site) {
-            gaps.push("场站名称与缩写（首次接入需要绑定场站，如：场站名称：华能阿拉善，缩写：hnals）");
+            gaps.push({
+                key: "site",
+                text: "场站名称与缩写（首次接入需要绑定场站，如：场站名称：华能阿拉善，缩写：hnals）",
+                ask: "请提供场站名称与缩写，例如：场站名称：华能阿拉善，缩写：hnals",
+            });
         } else {
             recap.push(`场站：${state.site.name}`);
         }
@@ -1151,12 +1239,17 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
         recap.push(...rg.recap);
         if (state.recv.protocol) {
             const miss = conn_missing(state.recv, "writer");
-            if (miss.length > 0) gaps.push(`设备连接信息还差：${miss.join("、")}`);
-            else {
+            if (miss.length > 0) {
+                gaps.push({
+                    key: "recv.conn",
+                    text: `设备连接信息还差：${miss.join("、")}`,
+                    ask: ask_conn("接入", conn_fields_of(state.recv, "writer", miss)),
+                });
+            } else {
                 const c = state.recv.conn;
-                recap.push(
-                    `设备连接：${String(c["ip"] ?? "")}${c["port"] ? `，端口 ${String(c["port"])}` : ""}`,
-                );
+                const ipPart = String(c["ip"] ?? "");
+                const portPart = c["port"] !== undefined ? `端口 ${String(c["port"])}` : "";
+                recap.push(`设备连接：${[ipPart, portPart].filter(Boolean).join("，")}`);
             }
         }
 
@@ -1167,10 +1260,27 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             recap.push(...fg.recap);
             if (state.fwd.protocol && state.fwd.points) {
                 const miss = conn_missing(state.fwd, "reader");
-                if (miss.length > 0) gaps.push(`转发目标连接信息还差：${miss.join("、")}`);
+                if (miss.length > 0) {
+                    gaps.push({
+                        key: "fwd.conn",
+                        text: `转发目标连接信息还差：${miss.join("、")}`,
+                        ask: ask_conn("转发", conn_fields_of(state.fwd, "reader", miss)),
+                    });
+                }
             }
         }
         return { gaps, recap };
+    }
+
+    /** 待补连接字段 → 提问字段清单（label 取 schema 描述主体，field_label 内部再截断） */
+    function conn_fields_of(
+        side: SideDraft,
+        role: "writer" | "reader",
+        miss: string[],
+    ): Array<{ name: string; description?: string }> {
+        const schema = (entry_of_side(side, role)?.entry?.config_schema?.fields ??
+            {}) as Record<string, { description?: string } | undefined>;
+        return miss.map((name) => ({ name, description: schema[name]?.description }));
     }
 
     // ── 方案层装配（§3.2.0.1，纯代码）──────────────────────
@@ -1439,9 +1549,9 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             `· 将新建设备 ${devId}（${devName}）——采用 ${state.recv.protocol} 协议`,
         );
         const c = state.recv.conn;
-        lines.push(
-            `· 设备连接：${String(c["ip"] ?? "")}${c["port"] ? `，端口 ${String(c["port"])}` : ""}`,
-        );
+        const ipPart = String(c["ip"] ?? "");
+        const portPart = c["port"] !== undefined ? `端口 ${String(c["port"])}` : "";
+        lines.push(`· 设备连接：${[ipPart, portPart].filter(Boolean).join("，")}`);
         lines.push(`· 采集点（${state.recv.points?.length ?? 0} 个）：`);
         for (const p of state.recv.points ?? []) {
             lines.push(`    - 地址 ${String(p["addr"])} ↔ ${String(p["name"] || "（未命名）")}`);
@@ -1501,14 +1611,22 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
     }
 
     // ── 执行层（阶段9 + 事务协议 §3.2.2 / c4_architecture §3.1.2）──
-    async function execute_steps(state: SessionState, steps: ServiceStep[]): Promise<string> {
+    async function execute_steps(
+        state: SessionState,
+        steps: ServiceStep[],
+        conversation: string,
+    ): Promise<string> {
         const lookup = {
             get_entry: (st: string) => registry.get_entry(st),
             service_types: () => registry.getServiceTypes(),
         };
         const services = [...new Set(steps.map((s) => s.service_type))];
+        cfg.agentLogger.tool_call(conversation, "apply_config_steps", {
+            services,
+            changes: steps.map((s) => ({ action: s.action, service_type: s.service_type })),
+        });
         try {
-            return await with_config_lock(async () => {
+            const okMsg = await with_config_lock(async () => {
                 await begin_config_transaction(
                     cfg.configPath,
                     "接入变更（对话确认触发）",
@@ -1557,6 +1675,9 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                             abbrReg.entries = next.entries;
                         }
                         await save_abbr_registry(abbrReg, abbrPath);
+                        cfg.agentLogger.memory(conversation, "save_abbr_registry", {
+                            entries: abbrReg.entries.length,
+                        });
                     } catch {
                         /* 记忆库写入失败不阻塞接入结果 */
                     }
@@ -1584,10 +1705,23 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                     throw new Error(friendly, { cause: err });
                 }
             });
+            cfg.agentLogger.tool_result(conversation, "apply_config_steps", {
+                success: true,
+                summary: okMsg,
+            });
+            return okMsg;
         } catch (err) {
             if (err instanceof ConfigBusyError) {
+                cfg.agentLogger.tool_result(conversation, "apply_config_steps", {
+                    success: false,
+                    busy: true,
+                });
                 return CONFIG_BUSY_MESSAGE;
             }
+            cfg.agentLogger.tool_result(conversation, "apply_config_steps", {
+                success: false,
+                error: err instanceof Error ? err.message : String(err),
+            });
             throw err;
         }
     }
@@ -1740,7 +1874,10 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
         return null;
     }
 
-    async function build_change_plan(user_text: string): Promise<{
+    async function build_change_plan(
+        user_text: string,
+        conversation: string,
+    ): Promise<{
         steps: ServiceStep[];
         display: string;
     } | null> {
@@ -1795,6 +1932,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 "change_prompt.txt",
                 { devices_json: JSON.stringify(devices) },
                 semantic,
+                conversation,
             );
             if (!r) return null;
         }
@@ -2040,7 +2178,11 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
     }
 
     // ── 确认通道执行（§2.8 按钮唯一）───────────────────────
-    async function* handle_confirm(user_text: string, state: SessionState): AsyncGenerator<AgentStreamEvent> {
+    async function* handle_confirm(
+        user_text: string,
+        state: SessionState,
+        conversation: string,
+    ): AsyncGenerator<AgentStreamEvent> {
             // ① 确定执行来源：会话方案（含完整转发链信息）优先，内嵌 JSON 直通兜底
             let steps: ServiceStep[] | null = null;
             if (state.accessPlan) {
@@ -2133,8 +2275,9 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             // ② 执行（事务 + 回滚协议）
             state.userConfirmed = true;
             stateWriter.setPhase("executing");
+            cfg.agentLogger.phase(conversation, "executing");
             try {
-                const okMsg = await execute_steps(state, steps);
+                const okMsg = await execute_steps(state, steps, conversation);
                 // 成功：方案被消耗 + 在途态清空（等价新会话，§2.4.2）
                 state.accessPlan = null;
                 state.userConfirmed = false;
@@ -2142,8 +2285,10 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 state.fwd = fresh_side();
                 state.forwardIntent = false;
                 state.locks = { receive: false, forward: false };
+                state.pendingGap = null;
                 stateWriter.setAccessPlan(false);
                 stateWriter.setPhase("idle");
+                cfg.agentLogger.phase(conversation, "idle");
                 stateWriter.setError(null);
                 yield { type: "text", content: okMsg };
             } catch (e) {
@@ -2229,8 +2374,33 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
     }
 
     // ── 主回合（§2.3 缺口驱动回合模型）─────────────────────
+    // ── 第二层运行日志接线（§5.2）──────────────────────────
+    // invoke 入口统一记录 user_input / done；事件顺序：
+    // user_input → (llm_call/llm_text | tool_call/tool_result | phase | memory) → done
+    async function* invoke_with_logging(
+        input: AgentInvokeInput,
+    ): AsyncGenerator<AgentStreamEvent> {
+        const conversation = input.conversationId ?? "orchestrator";
+        const lastMsg = (input.messages ?? []).filter((m) => m.role === "user").pop();
+        if (lastMsg) {
+            cfg.agentLogger.user_input(conversation, lastMsg.role, content_of(lastMsg));
+        }
+        turnLlmRound = 0;
+        try {
+            yield* invoke_turn(input, conversation);
+        } finally {
+            cfg.agentLogger.done(conversation);
+        }
+    }
+
     return {
-        async *invoke(input: AgentInvokeInput): AsyncGenerator<AgentStreamEvent> {
+        invoke: invoke_with_logging,
+    };
+
+    async function* invoke_turn(
+        input: AgentInvokeInput,
+        conversation: string,
+    ): AsyncGenerator<AgentStreamEvent> {
             const state = draft_of(input.conversationId);
             const msgs = input.messages ?? [];
             const userMsg = msgs.filter((m) => m.role === "user").pop();
@@ -2254,7 +2424,9 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 state.userConfirmed = false;
                 state.locks = { receive: false, forward: false };
                 state.gapRepeat = 0;
+                state.pendingGap = null;
                 stateWriter.setPhase("idle");
+                cfg.agentLogger.phase(conversation, "idle");
                 stateWriter.setAccessPlan(false);
                 yield { type: "button_disarm", reason: "用户取消本次接入" };
                 yield {
@@ -2270,15 +2442,17 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             if (trimmed.startsWith("[C4_BUTTON_CANCEL]")) {
                 state.accessPlan = null;
                 state.userConfirmed = false;
+                state.pendingGap = null;
                 stateWriter.setAccessPlan(false);
                 stateWriter.setPhase("idle");
+                cfg.agentLogger.phase(conversation, "idle");
                 yield { type: "button_disarm", reason: "用户取消执行" };
                 yield { type: "text", content: "好的，已取消本次接入方案，未做任何变更。" };
                 yield { type: "done" };
                 return;
             }
             if (trimmed.startsWith("[C4_BUTTON_CONFIRM]")) {
-                yield* handle_confirm(userText, state);
+                yield* handle_confirm(userText, state, conversation);
                 return;
             }
             if (state.userConfirmed) {
@@ -2290,6 +2464,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             const chit = chit_chat_reply(userText);
             if (chit !== null && !state.recv.points && !state.accessPlan) {
                 stateWriter.setPhase("idle");
+                cfg.agentLogger.phase(conversation, "idle");
                 yield { type: "text", content: chit };
                 yield { type: "done" };
                 return;
@@ -2304,11 +2479,12 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             }
 
             stateWriter.setPhase("collecting");
+            cfg.agentLogger.phase(conversation, "collecting");
 
             // ⑤ 变更流分叉（modify/delete，已接入设备的调整）
             if (CHANGE_INTENT_RE.test(userText) && !/^(接入|解析)/.test(trimmed)) {
                 console.error(`[route] change-intent hit: ${JSON.stringify(trimmed.slice(0, 50))}`);
-                const change = await build_change_plan(userText);
+                const change = await build_change_plan(userText, conversation);
                 console.error(
                     `[route] build_change_plan -> ${change === null ? "null" : `steps=${change.steps.length} display=${JSON.stringify(change.display.slice(0, 80))}`}`,
                 );
@@ -2326,6 +2502,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                     };
                     stateWriter.setAccessPlan(true);
                     stateWriter.setPhase("planning");
+                    cfg.agentLogger.phase(conversation, "planning");
                     yield { type: "text", content: change.display };
                     yield { type: "button_arm" };
                     yield { type: "done" };
@@ -2338,15 +2515,28 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             let file_error = false;
             const pathM = userText.match(/path=([^\s,，]+)/);
             if (pathM) {
+                cfg.agentLogger.tool_call(conversation, "parse_any_file", { path: pathM[1] });
                 if (existsSync(pathM[1])) {
                     try {
                         const parsed = parse_any_file(pathM[1]);
                         file_data = parsed.length > 8000 ? parsed.slice(0, 8000) : parsed;
+                        cfg.agentLogger.tool_result(conversation, "parse_any_file", {
+                            success: true,
+                            bytes: parsed.length,
+                        });
                     } catch {
                         file_error = true;
+                        cfg.agentLogger.tool_result(conversation, "parse_any_file", {
+                            success: false,
+                            error: "解析异常",
+                        });
                     }
                 } else {
                     file_error = true;
+                    cfg.agentLogger.tool_result(conversation, "parse_any_file", {
+                        success: false,
+                        error: "文件不存在",
+                    });
                 }
             }
             if (file_error) {
@@ -2363,10 +2553,15 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             }
             let extraction_progress = false;
             try {
-                extraction_progress = await run_stage_extraction(userText, file_data, state);
+                extraction_progress = await run_stage_extraction(
+                    userText,
+                    file_data,
+                    state,
+                    conversation,
+                );
             } catch (e) {
                 cfg.agentLogger.error(
-                    input.conversationId ?? "orchestrator",
+                    conversation,
                     `阶段提取异常: ${e instanceof Error ? e.message : String(e)}`,
                 );
             }
@@ -2389,19 +2584,56 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 return;
             }
 
-            // ⑦ 缺口计算 + 聚合提问（提问即终局，§2.6）
+            // ⑥.6 裸值兜底绑定（§2.6 单缺口顺序提问）：上一回合提问的缺口仍未闭合、
+            // 本回合各提取器无进展、消息为纯值片段（端口/IP/地址范围）→ 直接绑定给
+            // pending 缺口。宁可放过（走正常缺口追问）不可错绑。
+            if (!extraction_progress && state.pendingGap !== null) {
+                const bare = parse_bare_value(userText);
+                const bind = bare
+                    ? bind_bare(
+                          state.pendingGap,
+                          bare,
+                          state.pendingGap === "fwd.points"
+                              ? (state.recv.points?.length ?? null)
+                              : null,
+                      )
+                    : null;
+                if (bind?.kind === "conn") {
+                    const target = bind.side === "fwd" ? state.fwd.conn : state.recv.conn;
+                    if (bind.ip !== undefined) target["ip"] = bind.ip;
+                    if (bind.port !== undefined) target["port"] = bind.port;
+                    extraction_progress = true;
+                    cfg.agentLogger.memory(conversation, "pending_bind", {
+                        gap: state.pendingGap,
+                        ip: bind.ip,
+                        port: bind.port,
+                    });
+                } else if (bind?.kind === "points") {
+                    state.fwd.points = bind.addrs.map((a) => ({ addr: a }));
+                    extraction_progress = true;
+                    cfg.agentLogger.memory(conversation, "pending_bind", {
+                        gap: state.pendingGap,
+                        addrs: `${bind.addrs[0]}~${bind.addrs[bind.addrs.length - 1]}（${bind.addrs.length} 个）`,
+                    });
+                }
+            }
+
+            // ⑦ 缺口计算 + 单缺口顺序提问（提问即终局，§2.6）
             const { gaps, recap } = compute_gaps(state);
             if (gaps.length > 0) {
-                const signature = gaps.join("|");
+                // 只问依赖序最靠前的一个缺口——协议决定点表/连接的问题内容，
+                // 聚合清单会迫使用户面对尚无法确切回答的问题（C4H2 设计修订）
+                const asked = gaps[0];
                 if (extraction_progress) {
                     // 本回合有实质进展 → 连续追问计数归零（重发/补充信息均不算空转）
                     state.gapRepeat = 0;
                     state.lastGapSignature = null;
                 } else {
                     state.gapRepeat =
-                        signature === state.lastGapSignature ? state.gapRepeat + 1 : 0;
+                        asked.key === state.lastGapSignature ? state.gapRepeat + 1 : 0;
                 }
-                state.lastGapSignature = signature;
+                state.lastGapSignature = asked.key;
+                state.pendingGap = asked.key;
                 // 方案失效传播（§2.5）：信息仍在补充 → 撤销按钮
                 if (state.accessPlan) {
                     state.accessPlan = null;
@@ -2414,7 +2646,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                     yield {
                         type: "text",
                         content: `这些信息我连续几轮没能确认到，先为您收个尾：\n${gaps
-                            .map((g) => `· ${g}`)
+                            .map((g) => `· ${g.text}`)
                             .join(
                                 "\n",
                             )}\n您可以回复「取消」重新开始，或补充上述信息后再继续。`,
@@ -2426,14 +2658,12 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                     recap.length > 0
                         ? `本次接入目前已确认：\n${recap.map((r) => `· ${r}`).join("\n")}\n`
                         : "";
-                const question = `${head}还需要补充以下信息：\n${gaps
-                    .map((g) => `· ${g}`)
-                    .join("\n")}\n请提供后我将继续。`;
-                yield { type: "text", content: question };
+                yield { type: "text", content: `${head}${asked.ask}\n请提供后我将继续。` };
                 yield { type: "done" };
                 return;
             }
             state.gapRepeat = 0;
+            state.pendingGap = null;
 
             // ⑧ 方案层（阶段8，纯代码）：装配（含确定性推导）→ L2 同源校验 → 展示
             //（§2.7.1：推导填充发生在 L2 之前的方案层，故先装配后校验）
@@ -2495,10 +2725,10 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             state.accessPlan = { kind: "add", input: assembled.plan, display: assembled.display };
             stateWriter.setAccessPlan(true);
             stateWriter.setPhase("planning");
+            cfg.agentLogger.phase(conversation, "planning");
             // 方案展示含 abbr 绑定（§4.5.3 确认文本列「将新建设备 hnals_wt1」）
             yield { type: "text", content: assembled.display };
             yield { type: "button_arm" };
             yield { type: "done" };
-        },
-    };
+    }
 }

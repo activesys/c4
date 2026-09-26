@@ -2,9 +2,9 @@
 // 根据 agent.md §3.2.3 + c4_architecture.md §3.1.2 实现启动流程：
 //   1. 读取 ~/.local/c4/agent.json → Zod 校验
 //   2. McpServiceRegistry.loadFromDirectory()
-//   3. 构建 service_catalog → 注入 SuperWorker 系统提示
+//   3. 构建 service_catalog → 注入系统提示
 //   4. C4McpManager：连 Unix socket（env C4_SOCK_DIR，默认 /run/c4）——从不拉起 MCP 进程
-//   5. createC4Agent（SuperWorker 工厂）
+//   5. createOrchestrator（确定性对话编排器）
 //   6. 启动 Express 服务器
 //   7. 四级瀑布启动恢复：L0 config 健康 → L1 连接 → L2 收敛 → L3 监控接续
 //      （收敛不做全量 Stop-Start：无在途事务标记时仅 start，ALREADY_RUNNING 无动作）

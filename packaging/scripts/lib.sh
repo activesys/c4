@@ -17,7 +17,7 @@ ACCOUNT_HOME="/home/c4"
 # ── 版本与架构 ─────────────────────────────────────────────
 # 版本默认读 VERSION 文件，但允许 build.sh --version= 或环境变量覆盖；
 # 此处在 source 时仅作兜底。
-PKG_VERSION="${PKG_VERSION:-2.0.3}"
+PKG_VERSION="${PKG_VERSION:-2.0.5}"
 PKG_ARCH="${PKG_ARCH:-amd64}"
 RPM_ARCH="${RPM_ARCH:-x86_64}"
 CODENAME="C4H1"
