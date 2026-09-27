@@ -967,16 +967,22 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                         conversation,
                     );
                 let r = await extract();
-                // 串味兜底：receive 侧 LLM 偶发套用 point_prompt 9a 条（forward 侧专用，
-                // 2026-09-26 用例4 实测，temperature=0 仍出现）返回空点表。llm_json 只重试
-                // 解析失败，此处对"合法 JSON 空点表 + 消息含 addr:点名/addr是点名 形态"
-                // 语义重试一次
-                if (
-                    (!r ||
-                        !Array.isArray(r["points"]) ||
-                        (r["points"] as unknown[]).length === 0) &&
-                    /\d{2,7}\s*[:：是]/.test(semantic)
-                ) {
+                // 语义重试兜底（llm_json 只重试解析失败）：①空提取但消息含点表形态
+                // （9a 串味，2026-09-26 用例4 实测，temperature=0 仍出现）；②点缺英文
+                // 标识 id——id 由提取层翻译（非 schema 强制字段），模型偶发遗漏且方案层
+                // 会因「缺少英文标识」拒绝执行（2026-09-27 用例5 线上实测）
+                const extracted =
+                    r && Array.isArray(r["points"]) ? (r["points"] as unknown[]) : null;
+                const emptyWithTableShape =
+                    (!extracted || extracted.length === 0) &&
+                    /\d{2,7}\s*[:：是]/.test(semantic);
+                const missingId =
+                    extracted !== null &&
+                    extracted.some((p) => {
+                        const id = (p as Record<string, unknown>)["id"];
+                        return typeof id !== "string" || id.trim() === "";
+                    });
+                if (emptyWithTableShape || missingId) {
                     r = await extract();
                 }
                 if (r && Array.isArray(r["points"]) && (r["points"] as unknown[]).length > 0) {
@@ -2239,16 +2245,17 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
     ): AsyncGenerator<AgentStreamEvent> {
             // ① 确定执行来源：会话方案（含完整转发链信息）优先，内嵌 JSON 直通兜底
             let steps: ServiceStep[] | null = null;
+            let lastGen: ReturnType<typeof generate_steps> | null = null;
             if (state.accessPlan) {
                 if (state.accessPlan.kind === "changes") {
                     steps = state.accessPlan.steps ?? [];
                 } else if (state.accessPlan.input) {
-                    const result = generate_steps(
+                    lastGen = generate_steps(
                         state.accessPlan.input as never,
                         registry,
                         state.site?.abbr ?? "",
                     );
-                    if (!result.fatal) steps = result.steps;
+                    if (!lastGen.fatal) steps = lastGen.steps;
                 }
             }
             const embedded = steps === null ? extract_embedded_json(user_text) : null;
@@ -2321,6 +2328,20 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 }
             }
             if (!steps || steps.length === 0) {
+                console.error(
+                    `[confirm] no steps: hasPlan=${!!state.accessPlan} kind=${state.accessPlan?.kind ?? "-"} hasInput=${!!state.accessPlan?.input} ` +
+                        `genFatal=${lastGen?.fatal ?? "-"} genSteps=${lastGen ? lastGen.steps.length : "-"} genWarn=${JSON.stringify(lastGen?.warnings ?? [])}`,
+                );
+                // fatal 必须透出原因——此前被误吞为「没有待执行方案」，用户无从修正
+                //（2026-09-27 用例5：缺英文标识 id 被误报为没有方案）
+                if (lastGen?.fatal) {
+                    yield {
+                        type: "text",
+                        content: `方案无法执行：${lastGen.fatal}`,
+                    };
+                    yield { type: "done" };
+                    return;
+                }
                 yield { type: "text", content: "当前没有待执行的接入方案。请先提供设备信息，我生成方案后再确认。" };
                 yield { type: "done" };
                 return;
