@@ -10,6 +10,7 @@ import {
     ask_points,
     ask_protocol,
     bind_bare,
+    is_forward_mirror_answer,
     parse_bare_value,
 } from "../../src/orchestrator/gap_question.js";
 
@@ -103,6 +104,12 @@ describe("parse_bare_value", () => {
         expect(parse_bare_value("从10000开始")).toMatchObject({ number: 10000 });
     });
 
+    it("起始地址带点数「从1000开始，10个点。」→ number + count（2026-09-26 用例4 实测答法）", () => {
+        expect(parse_bare_value("从1000开始，10个点。")).toEqual({ number: 1000, count: 10 });
+        expect(parse_bare_value("从10000开始，共10个点")).toEqual({ number: 10000, count: 10 });
+        expect(parse_bare_value("1000开始，10个点")).toMatchObject({ number: 1000, count: 10 });
+    });
+
     it("非裸值消息 → null（不绑，走正常提取）", () => {
         expect(parse_bare_value("3000:风速:3")).toBeNull();
         expect(parse_bare_value("3000 风速")).toBeNull();
@@ -162,6 +169,23 @@ describe("bind_bare", () => {
         expect(bind_bare("fwd.points", { number: 10000 }, null)).toBeNull();
     });
 
+    it("未知采集点数时回退用户显式点数（「从1000开始，10个点」场景）", () => {
+        const r = bind_bare("fwd.points", { number: 1000, count: 10 }, null);
+        expect(r).toMatchObject({ kind: "points", side: "fwd" });
+        if (r?.kind === "points") {
+            expect(r.addrs).toEqual([1000, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009]);
+        }
+    });
+
+    it("采集点数已知时优先于用户附带点数（一一对应以采集侧为准）", () => {
+        const r = bind_bare("fwd.points", { number: 1000, count: 15 }, 10);
+        expect(r).toMatchObject({ kind: "points", side: "fwd" });
+        if (r?.kind === "points") {
+            expect(r.addrs).toHaveLength(10);
+            expect(r.addrs[9]).toBe(1009);
+        }
+    });
+
     it("接入点表缺口不参与绑定（点名必需，宁可放过不可错绑）", () => {
         expect(bind_bare("recv.points", { range: { start: 1000, end: 1009 } }, 10)).toBeNull();
     });
@@ -169,5 +193,25 @@ describe("bind_bare", () => {
     it("协议/场站缺口不参与绑定", () => {
         expect(bind_bare("recv.protocol", { port: 502 }, null)).toBeNull();
         expect(bind_bare("site", { port: 502 }, null)).toBeNull();
+    });
+});
+
+describe("is_forward_mirror_answer", () => {
+    it("2026-09-27 用例4 线上实际应答「与接入点表一致」→ 命中", () => {
+        expect(is_forward_mirror_answer("与接入点表一致")).toBe(true);
+        expect(is_forward_mirror_answer("与接收侧一致")).toBe(true);
+        expect(is_forward_mirror_answer("点表与I区一致")).toBe(true);
+        expect(is_forward_mirror_answer("跟采集一样")).toBe(true);
+        expect(is_forward_mirror_answer("一致")).toBe(true);
+    });
+
+    it("具体地址/其他内容不命中（宁可放过不可错绑）", () => {
+        expect(is_forward_mirror_answer("2390-2399")).toBe(false);
+        expect(is_forward_mirror_answer("从1000开始，10个点")).toBe(false);
+        expect(is_forward_mirror_answer("与I区不一致")).toBe(false);
+        expect(is_forward_mirror_answer("")).toBe(false);
+        expect(
+            is_forward_mirror_answer("转发点表用2390到2399，与I区一致的那批点"),
+        ).toBe(false);
     });
 });

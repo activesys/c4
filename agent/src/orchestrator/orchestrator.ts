@@ -50,6 +50,7 @@ import {
     ask_points,
     ask_protocol,
     bind_bare,
+    is_forward_mirror_answer,
     parse_bare_value,
     type Gap,
 } from "./gap_question.js";
@@ -75,6 +76,8 @@ interface SideDraft {
     points: Array<Record<string, unknown>> | null;
     declared: number | null;
     conn: Record<string, unknown>;
+    /** 转发点表等价应答已受理（「与接收侧一致」）→ 不设缺口，方案层确定性推导=采集地址 */
+    pointsMirror: boolean;
 }
 
 function fresh_side(): SideDraft {
@@ -86,6 +89,7 @@ function fresh_side(): SideDraft {
         points: null,
         declared: null,
         conn: {},
+        pointsMirror: false,
     };
 }
 
@@ -138,6 +142,20 @@ const FORWARD_OFF_RE = /不需要转发|不转发|无需转发|仅采集|只采�
 // 修改/删除意图（针对已接入设备）
 const CHANGE_INTENT_RE =
     /不再采集|停用|删除|移除|删了|删掉|去掉|改为|改成|修改|调整|更新|增加.{0,8}点|追加.{0,8}点|添加.{0,8}点|加点|新增点/;
+
+// point_prompt 9a 条按侧别注入（2026-09-27 用例4 线上事故：receive 侧 prompt 携带
+// forward 侧禁抄规则时，消息中的「点表与I区一致」触发词把提取带偏为空数组——
+// 侧别限定行压不住小模型的短语模式匹配，必须让触发文案不出现在对侧 prompt 中）
+const RECEIVE_SIDE_RULES =
+    "receive 侧必须从输入逐点提取接收点表：输入含「addr:点名」「addr是点名」" +
+    "「点表X~Y」等点表形态时，禁止返回空数组。";
+const FORWARD_SIDE_RULES =
+    "forward 侧转发 addr 禁止借用采集点表的地址，只能来自用户对转发侧的明确表述" +
+    "（如「点表5000~5009」「从一万开始」）。用户未提供转发地址、或仅给出等价描述" +
+    "（「点表与I区/采集/接收一致」）而无具体地址数字时——禁止把采集侧 addr（或任何" +
+    "未经用户给出的数字）复制为转发 addr，此时 points 返回空数组 []，reason 注明" +
+    "「用户未提供转发地址，需向用户询问」（上游会以缺口追问；等价描述由上游在缺口" +
+    "应答层受理，走方案层与采集一致的确定性推导）。";
 
 // ── 小工具 ─────────────────────────────────────────────────
 
@@ -696,7 +714,15 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
         // 语义判定在此先行发起（与本回合其余提取阶段并行），确定性地名比对在阶段
         // 提取出口执行，两者仲裁取更保守方（见本函数尾「归属判定合并」）。
         state.turnSiteCheck = null;
-        const siteTagLlm = state.site
+        // 纯值片段应答（裸端口/IP/地址范围、协议名）不含任何场站信息，跳过归属
+        // 判定——location_prompt 对此类消息的保守误判（rule5 ambiguous）会以
+        // 「归属不明确」中断正常应答流（2026-09-27 用例4 e2e 实测：应答「asfp2」
+        // 被误判停机两轮）
+        const siteFragment =
+            semantic.trim().length <= 24 &&
+            (parse_bare_value(semantic) !== null ||
+                supported_protocol_token(semantic.trim(), registry, "reader"));
+        const siteTagLlm = state.site && !siteFragment
             ? llm_json(
                   "location_prompt.txt",
                   { known_site: `${state.site.name}（缩写 ${state.site.abbr}）` },
@@ -926,17 +952,33 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                     (file_data !== null && filePoints === null
                         ? `<file_data>\n${file_data.slice(0, 4000)}\n</file_data>\n`
                         : "") + semantic;
-                const r = await llm_json(
-                    "point_prompt.txt",
-                    {
-                        side: "receive",
-                        protocol: state.recv.protocol,
-                        point_fields: JSON.stringify(fields),
-                        point_field_hints: hints,
-                    },
-                    input_text,
-                    conversation,
-                );
+                const protocol = state.recv.protocol;
+                const extract = () =>
+                    llm_json(
+                        "point_prompt.txt",
+                        {
+                            side: "receive",
+                            protocol,
+                            point_fields: JSON.stringify(fields),
+                            point_field_hints: hints,
+                            side_rules: RECEIVE_SIDE_RULES,
+                        },
+                        input_text,
+                        conversation,
+                    );
+                let r = await extract();
+                // 串味兜底：receive 侧 LLM 偶发套用 point_prompt 9a 条（forward 侧专用，
+                // 2026-09-26 用例4 实测，temperature=0 仍出现）返回空点表。llm_json 只重试
+                // 解析失败，此处对"合法 JSON 空点表 + 消息含 addr:点名/addr是点名 形态"
+                // 语义重试一次
+                if (
+                    (!r ||
+                        !Array.isArray(r["points"]) ||
+                        (r["points"] as unknown[]).length === 0) &&
+                    /\d{2,7}\s*[:：是]/.test(semantic)
+                ) {
+                    r = await extract();
+                }
                 if (r && Array.isArray(r["points"]) && (r["points"] as unknown[]).length > 0) {
                     state.recv.points = r["points"] as Array<Record<string, unknown>>;
                     state.recv.declared =
@@ -1003,6 +1045,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                             protocol: state.fwd.protocol,
                             point_fields: JSON.stringify(fields),
                             point_field_hints: hints,
+                            side_rules: FORWARD_SIDE_RULES,
                         },
                         semantic,
                         conversation,
@@ -1123,7 +1166,13 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 const fields = (entry?.entry?.point_schema?.fields ?? []).map(
                     (f: { name: string }) => ({ name: f.name }),
                 );
-                if (fields.length > 0) return ask_points(label, fields);
+                if (fields.length > 0) {
+                    const base = ask_points(label, fields);
+                    // 等价应答提示（func_test_case 用例4：「点表与I区一致」是常见表述）
+                    return label === "转发"
+                        ? `${base}如与接收/采集侧点表一致，直接回复「与接收侧一致」即可。`
+                        : base;
+                }
             }
             return text;
         };
@@ -1152,12 +1201,17 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
         }
         recap.push(`${label}协议：${side.protocol}`);
         if (!side.points || side.points.length === 0) {
-            gaps.push(
-                mk(
-                    `${keyPrefix}.points`,
-                    `${label}点表（各点的${label === "转发" ? "转发地址" : "地址与类型"}等信息）`,
-                ),
-            );
+            if (side.pointsMirror) {
+                // 等价应答已受理：不设缺口，方案层确定性推导（转发=采集地址，方案中标注）
+                recap.push(`${label}点表：与采集侧一致（方案中标注，确认即批准）`);
+            } else {
+                gaps.push(
+                    mk(
+                        `${keyPrefix}.points`,
+                        `${label}点表（各点的${label === "转发" ? "转发地址" : "地址与类型"}等信息）`,
+                    ),
+                );
+            }
             return { gaps, recap };
         }
         const svc = find_service_type(registry, normalize_protocol(side.protocol), role);
@@ -1258,7 +1312,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             const fg = side_gaps("转发", state.fwd, "reader");
             gaps.push(...fg.gaps);
             recap.push(...fg.recap);
-            if (state.fwd.protocol && state.fwd.points) {
+            if (state.fwd.protocol && (state.fwd.points || state.fwd.pointsMirror)) {
                 const miss = conn_missing(state.fwd, "reader");
                 if (miss.length > 0) {
                     gaps.push({
@@ -2588,33 +2642,50 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             // 本回合各提取器无进展、消息为纯值片段（端口/IP/地址范围）→ 直接绑定给
             // pending 缺口。宁可放过（走正常缺口追问）不可错绑。
             if (!extraction_progress && state.pendingGap !== null) {
-                const bare = parse_bare_value(userText);
-                const bind = bare
-                    ? bind_bare(
-                          state.pendingGap,
-                          bare,
-                          state.pendingGap === "fwd.points"
-                              ? (state.recv.points?.length ?? null)
-                              : null,
-                      )
-                    : null;
-                if (bind?.kind === "conn") {
-                    const target = bind.side === "fwd" ? state.fwd.conn : state.recv.conn;
-                    if (bind.ip !== undefined) target["ip"] = bind.ip;
-                    if (bind.port !== undefined) target["port"] = bind.port;
+                // 转发点表等价应答（「与接入点表一致」）：提取层按 9a 禁止采纳等价
+                // 描述，置 mirror 标记交方案层确定性推导（转发=采集地址，方案中标注，
+                // 确认即批准）——2026-09-27 用例4 线上事故：等价应答无法收敛，用户
+                // 被迫改口具体地址，错装 1000~1009
+                if (
+                    state.pendingGap === "fwd.points" &&
+                    is_forward_mirror_answer(userText)
+                ) {
+                    state.fwd.pointsMirror = true;
                     extraction_progress = true;
                     cfg.agentLogger.memory(conversation, "pending_bind", {
-                        gap: state.pendingGap,
-                        ip: bind.ip,
-                        port: bind.port,
+                        gap: "fwd.points",
+                        addrs: "与接收侧一致（方案层推导）",
                     });
-                } else if (bind?.kind === "points") {
-                    state.fwd.points = bind.addrs.map((a) => ({ addr: a }));
-                    extraction_progress = true;
-                    cfg.agentLogger.memory(conversation, "pending_bind", {
-                        gap: state.pendingGap,
-                        addrs: `${bind.addrs[0]}~${bind.addrs[bind.addrs.length - 1]}（${bind.addrs.length} 个）`,
-                    });
+                } else {
+                    const bare = parse_bare_value(userText);
+                    const bind = bare
+                        ? bind_bare(
+                              state.pendingGap,
+                              bare,
+                              state.pendingGap === "fwd.points"
+                                  ? (state.recv.points?.length ?? null)
+                                  : null,
+                          )
+                        : null;
+                    if (bind?.kind === "conn") {
+                        const target = bind.side === "fwd" ? state.fwd.conn : state.recv.conn;
+                        if (bind.ip !== undefined) target["ip"] = bind.ip;
+                        if (bind.port !== undefined) target["port"] = bind.port;
+                        extraction_progress = true;
+                        cfg.agentLogger.memory(conversation, "pending_bind", {
+                            gap: state.pendingGap,
+                            ip: bind.ip,
+                            port: bind.port,
+                        });
+                    } else if (bind?.kind === "points") {
+                        state.fwd.points = bind.addrs.map((a) => ({ addr: a }));
+                        state.fwd.pointsMirror = false;
+                        extraction_progress = true;
+                        cfg.agentLogger.memory(conversation, "pending_bind", {
+                            gap: state.pendingGap,
+                            addrs: `${bind.addrs[0]}~${bind.addrs[bind.addrs.length - 1]}（${bind.addrs.length} 个）`,
+                        });
+                    }
                 }
             }
 

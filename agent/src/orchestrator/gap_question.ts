@@ -112,6 +112,8 @@ export interface BareValue {
     range?: { start: number; end: number };
     /** 不带范围的裸数字（作为起始地址解释） */
     number?: number;
+    /** 起始地址表述附带的点数（"从1000开始，10个点"）——pointCount 未知时的兜底 */
+    count?: number;
 }
 
 export function parse_bare_value(message: string): BareValue | null {
@@ -135,8 +137,13 @@ export function parse_bare_value(message: string): BareValue | null {
         bare.range = { start: Number(m[1]), end: Number(m[2]) };
         return bare;
     }
-    if ((m = t.match(/^(?:从)?\s*(\d{2,7})\s*(?:号|开始|起)?$/))) {
+    if (
+        (m = t.match(
+            /^(?:从)?\s*(\d{2,7})\s*(?:号|开始|起)?(?:\s*[，,、]\s*共?\s*(\d{1,5})\s*个点)?[。.]?$/,
+        ))
+    ) {
         bare.number = Number(m[1]);
+        if (m[2] !== undefined) bare.count = Number(m[2]);
     }
     return Object.keys(bare).length > 0 ? bare : null;
 }
@@ -146,6 +153,24 @@ export type GapBind =
     | { kind: "conn"; side: "recv" | "fwd"; ip?: string; port?: number }
     | { kind: "points"; side: "fwd"; addrs: number[] }
     | null;
+
+// ── 转发点表等价应答（mirror）─────────────────────────────────
+// 「与接收/接入/采集/I区一致」类应答：提取层按 9a 禁止采纳等价描述（不编造），
+// 但可交方案层确定性推导（转发=采集，方案中标注，确认即批准）。判定从宽收窄到
+// 短句 + 等价词，仅用于 pendingGap=fwd.points 的应答语境，宁可放过不可错绑。
+export function is_forward_mirror_answer(text: string): boolean {
+    const t = text.trim();
+    if (t.length === 0 || t.length > 32) return false;
+    // 消息已含显式地址（范围/起始）→ 显式表述优先，不按等价受理
+    if (/\d{2,7}\s*(?:[-~—]|到)\s*\d{2,7}/.test(t)) return false;
+    if (/(?:从|自)\s*\d{2,7}\s*(?:开始|起)/.test(t)) return false;
+    return (
+        /(与|同|跟)(接收|接入|采集|本侧|上侧|I区|Ⅰ区).{0,4}(?<![不非没])(?:一致|相同|一样)/.test(
+            t,
+        ) ||
+        /^(?<![不非没])(?:一致|相同|一样)(吧|即可|就可以了|可以了)?$/.test(t)
+    );
+}
 
 /**
  * 把裸值绑定给 pending 缺口。
@@ -170,10 +195,16 @@ export function bind_bare(key: string, bare: BareValue, pointCount: number | nul
             const addrs = Array.from({ length: count }, (_, i) => start + i);
             return { kind: "points", side: "fwd", addrs };
         }
-        if (bare.number !== undefined && pointCount !== null && pointCount > 0) {
-            const start = bare.number;
-            const addrs = Array.from({ length: pointCount }, (_, i) => start + i);
-            return { kind: "points", side: "fwd", addrs };
+        if (bare.number !== undefined) {
+            // 点数优先用接收侧点表（一一对应强制在方案层把关），未知时回退用户
+            // 显式给出的点数（"从1000开始，10个点"）——都没有则放过，走缺口追问
+            const count =
+                pointCount !== null && pointCount > 0 ? pointCount : (bare.count ?? 0);
+            if (count > 0) {
+                const start = bare.number;
+                const addrs = Array.from({ length: count }, (_, i) => start + i);
+                return { kind: "points", side: "fwd", addrs };
+            }
         }
     }
     return null;

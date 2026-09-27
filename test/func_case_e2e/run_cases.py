@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# func_test_case 用例 16~29（含用例 10）E2E runner —— 隔离 agent 实例
+# func_test_case 用例 4、16~29（含用例 10）E2E runner —— 隔离 agent 实例
 # （独立 config-dir / shm c4_e2e / 19xxx 端口映射，不与生产 agent 及用户 Web 测试互相干扰）。
 # 独立服务模型（c4_architecture.md §3.1.1）：测试栈自启六个 MCP 服务二进制
 # （RESIDENT 模式：stdin=/dev/null，仅监听 <sock-dir>/<service>.sock、零实例），
 # Agent 与 MCP 栈经同一 C4_SOCK_DIR 连接——Agent 从不拉起 MCP 进程。
 # 用法（root）: python3 run_cases.py <case>
-#   case: prereq|16|17|18|19|20|21|22|23|24|25|26|27|28|29|10|all
+#   case: 4|prereq|16|17|18|19|20|21|22|23|24|25|26|27|28|29|10|all
 import json
 import os
 import re
@@ -180,6 +180,12 @@ MSG_CASE1 = (
     "10个点分别是1000:风速、1001:功率、1002:风向、1003:桨叶角度、1004:发电机转速、1005:齿轮箱油温、"
     "1006:塔筒温度、1007:空气温度、1008:空气湿度、1009:大气压强，使用端口9001。"
     "我们需要将这些数据转发到II区服务器上，转发采用asfp2协议，目标地址是127.0.0.1:9900，点表5000~5009。"
+)
+MSG4 = (
+    "现在需要接入升压站的数据，第三方厂家转过来的，asfp2协议，"
+    "2390:电网频率，2391是正向有功，2392是反向有功，2393是正向无功，2394是反向无功，"
+    "2395是uab，2396是ubc，2397是uac，2398是变压器油温，2399是环境温度。"
+    "II服务器地址是127.0.0.1:9900，点表与I区一致。"
 )
 MSG_WT2_BODY = (
     "再接入2号风机，第三方厂家通过asfp2协议转来2#风机数据，10个点，从1100到1109，"
@@ -427,6 +433,15 @@ class Conv:
 
 # ── 多轮应答流程（镜像手工测试：Agent 追问则按用例答案回答）──
 CASE_ANSWERS = {
+    "4": [
+        # 锚定问句「请提供…」：回复的复述/清单（「接入协议：asfp2」「转发点表（各点的
+        # 转发地址等信息）」）也含关键词，裸关键词会答非所问（2026-09-27 实测教训）。
+        # 转发点表按等价应答（「与接入点表一致」）——镜像线上故障：等价应答须走
+        # 方案层「与采集一致」推导收敛，不得迫使改口具体地址
+        ("请提供.*连接信息", "9001"),
+        ("请提供.*协议", "asfp2"),
+        ("请提供.*转发点表|请提供.*转发地址", "与接入点表一致"),
+    ],
     "prereq": [("协议", "接收和转发都采用asfp2协议"), ("是否", "确认执行")],
     "16": [("转发地址", "转发地址5010"), ("是否", "是，在1#风机上加点，转发地址5010")],
     "17": [("是否", "是，确认删除地址1006的塔筒温度点")],
@@ -1385,6 +1400,34 @@ def case_reset():
     log("  reset OK（全新环境）")
 
 
+def case4():
+    """用例4：转发点表描述模糊（仅「点表与I区一致」），多次询问与推断后接入（升压站）。
+    关键点（func_test_case.md 用例4）：接收点表「:」与「是」混述须解析为 10 点；
+    转发 addr 是必要项，Agent 须追问/推断得 2390~2399 一一对应，不得编造。"""
+    AGENT.reset()
+    c = Conv()
+    text, confirmed = send_flow(c, "4", MSG4)
+    if not confirmed:
+        raise Fail(f"未进入确认流程: {text[:200]}")
+
+    def check(cfg):
+        return writer_of(cfg, 2390) is not None and forward_of(cfg, 2390) is not None
+    cfg = wait_config(check, timeout=240, desc="升压站 writer + 转发实例")
+    w = points_of(cfg, "c4_asfp2_server", writer_of(cfg, 2390))
+    if sorted(w) != list(range(2390, 2400)):
+        raise Fail(f"接收点表异常（松散文本应解析为 2390~2399 十点）: {sorted(w)}")
+    if w[2390].get("name") != "电网频率" or w[2399].get("name") != "环境温度":
+        raise Fail(f"「:」与「是」混述点名解析错误: {w[2390].get('name')}/{w[2399].get('name')}")
+    if find_inst(cfg, "c4_asfp2_server", port=P_RECV1) is None:
+        raise Fail(f"接收端口不是 {P_RECV1}")
+    f = points_of(cfg, "c4_asfp2_client", forward_of(cfg, 2390))
+    if sorted(f) != list(range(2390, 2400)):
+        raise Fail(f"转发点表异常（应与I区一致 2390~2399 一一对应，禁止编造）: {sorted(f)}")
+    if find_inst(cfg, "c4_asfp2_client", ip="127.0.0.1", port=P_FWD1) is None:
+        raise Fail(f"转发目标不是 127.0.0.1:{P_FWD1}")
+    log("  用例4 PASS ✓（接收/转发均 2390~2399 一一对应）")
+
+
 def case30():
     recv = start_receiver(P_FWD1)
     try:
@@ -1740,10 +1783,10 @@ def case42():
 
 
 CASES = {
-    "prereq": prereq, "16": case16, "17": case17, "18": case18, "19": case19,
-    "20": case20, "21": case21, "22": case22, "23": case23, "24": case24,
-    "25": case25, "26": case26, "27": case27, "28": case28, "29": case29,
-    "10": case10,
+    "prereq": prereq, "4": case4, "16": case16, "17": case17, "18": case18,
+    "19": case19, "20": case20, "21": case21, "22": case22, "23": case23,
+    "24": case24, "25": case25, "26": case26, "27": case27, "28": case28,
+    "29": case29, "10": case10,
 }
 
 CASES.update({
