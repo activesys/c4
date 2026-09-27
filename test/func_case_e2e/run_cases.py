@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# func_test_case 用例 4、16~29（含用例 10）E2E runner —— 隔离 agent 实例
+# func_test_case 用例 4、6、16~29（含用例 10）E2E runner —— 隔离 agent 实例
 # （独立 config-dir / shm c4_e2e / 19xxx 端口映射，不与生产 agent 及用户 Web 测试互相干扰）。
 # 独立服务模型（c4_architecture.md §3.1.1）：测试栈自启六个 MCP 服务二进制
 # （RESIDENT 模式：stdin=/dev/null，仅监听 <sock-dir>/<service>.sock、零实例），
 # Agent 与 MCP 栈经同一 C4_SOCK_DIR 连接——Agent 从不拉起 MCP 进程。
 # 用法（root）: python3 run_cases.py <case>
-#   case: 4|prereq|16|17|18|19|20|21|22|23|24|25|26|27|28|29|10|all
+#   case: 4|6|prereq|16|17|18|19|20|21|22|23|24|25|26|27|28|29|10|all
 import json
 import os
 import re
@@ -186,6 +186,12 @@ MSG4 = (
     "2390:电网频率，2391是正向有功，2392是反向有功，2393是正向无功，2394是反向无功，"
     "2395是uab，2396是ubc，2397是uac，2398是变压器油温，2399是环境温度。"
     "II服务器地址是127.0.0.1:9900，点表与I区一致。"
+)
+MSG6 = (
+    "现在需要接入1号风机的数据，第三方厂家给我们转来1#风机数据，10个点，从1000到1009，"
+    "10个点分别是1000:风速、1001:功率、1002:风向、1003:桨叶角度、1004:发电机转速、1005:齿轮箱油温、"
+    "1006:塔筒温度、1007:空气温度、1008:空气湿度、1009:大气压强，使用端口9001。"
+    "我们需要将这些数据转发到II区服务器上，目标地址是127.0.0.1:9900，点表5000~5009。"
 )
 MSG_WT2_BODY = (
     "再接入2号风机，第三方厂家通过asfp2协议转来2#风机数据，10个点，从1100到1109，"
@@ -442,10 +448,14 @@ CASE_ANSWERS = {
         ("请提供.*协议", "asfp2"),
         ("请提供.*转发点表|请提供.*转发地址", "与接入点表一致"),
     ],
+    "6": [("请提供.*协议", "asfp2")],  # 消息无协议：只应问协议，其余信息 catch-up 补提取
     "prereq": [("协议", "接收和转发都采用asfp2协议"), ("是否", "确认执行")],
     "16": [("转发地址", "转发地址5010"), ("是否", "是，在1#风机上加点，转发地址5010")],
     "17": [("是否", "是，确认删除地址1006的塔筒温度点")],
-    "10": [("转发地址", "转发地址5011"), ("是否", "是，确认追加，新点名叫风速2")],
+    "10": [
+        ("重名|更换点名", "新点名叫转速，转发地址5011"),
+        ("转发地址", "转发地址5011"),
+    ],
     "21": [("协议", "接收和转发都采用asfp2协议"), ("是否", "确认执行")],
     "22": [("协议", "接收和转发都采用asfp2协议"), ("是否", "确认执行")],
     "25": [("是否", "是，确认删除2号风机"), ("整台|全部|数据点", "是，删除整台2号风机及其全部数据点")],
@@ -1129,12 +1139,16 @@ def _read_seqs(shm_ids: set[int]) -> dict[int, int]:
 
 
 def case10():
-    wid0 = writer_of(read_config(), 1000)
-    before = points_of(read_config(), "c4_asfp2_server", wid0)
+    """用例10（2026-09-27 禁止重名修订）：追加点的点名与已有点撞名 → 必须拒绝并
+    要求换名，用户换名后成对追加（不得静默改名 windspeed_2，不得覆盖原点）。"""
     c = Conv()
     text, confirmed = send_flow(c, "10", "给1#风机再追加一个数据点，地址2000，点名也叫风速，转发地址5011。")
     if not confirmed:
         raise Fail(f"未进入确认流程: {text[:200]}")
+    # 撞名必须被拒绝一次（禁止重名裁定）
+    alltext = "\n".join(str(m.get("content", "")) for m in c.history)
+    if not re.search(r"重名|已存在", alltext):
+        raise Fail("撞名未被拒绝：全程未出现重名提示")
 
     def check(cfg):
         wid = writer_of(cfg, 1000)
@@ -1142,8 +1156,8 @@ def case10():
     cfg = wait_config(check, timeout=180, desc="addr=2000 新增")
     w = points_of(cfg, "c4_asfp2_server", writer_of(cfg, 1000))
     old, new = w.get(1000, {}).get("id"), w[2000]["id"]
-    if new == old == "windspeed":
-        raise Fail(f"撞名点静默覆盖：addr1000 与 addr2000 同名 {new}")
+    if new == old:
+        raise Fail(f"新点 id 与原点相同（重名未拦截）: {new}")
     if w[1000].get("addr") != 1000:
         raise Fail("windspeed 原 addr 被改写")
     fid_new = forward_of(cfg, 5011)
@@ -1153,8 +1167,8 @@ def case10():
     f_new = points_of(cfg, "c4_asfp2_client", fid_new)[5011]
     f_old = points_of(cfg, "c4_asfp2_client", fid_old)[5000]
     if not f_new.get("key", "").endswith(f".{new}") or not f_old.get("key", "").endswith(f".{old}"):
-        raise Fail(f"转发侧 key 未跟随改名: new={f_new.get('key')}, old={f_old.get('key')}")
-    log(f"  用例10 PASS ✓（writer: {old}+{new} 去重共存；转发 key 已跟随改名）")
+        raise Fail(f"转发侧 key 未跟随: new={f_new.get('key')}, old={f_old.get('key')}")
+    log(f"  用例10 PASS ✓（撞名拒绝后换名：{old} + {new} 共存；转发 5011 成对）")
 
 
 # ══ 用例 30~43：modbus / iec104 / influxdb 真实服务扩展 ══════════════════
@@ -1398,6 +1412,38 @@ def case_reset():
     """清空隔离环境（等价全新环境）：停实例、清 config/shm、重启 agent。"""
     AGENT.reset()
     log("  reset OK（全新环境）")
+
+
+def case6():
+    """用例6：消息未给出协议——Agent 先问协议；协议补齐后 catch-up 补提取
+    （2026-09-27 新增机制），首条消息里的接收点表/转发点表/端口/目标地址
+    不得要求用户重述。"""
+    AGENT.reset()
+    recv = start_receiver(P_FWD1)
+    try:
+        c = Conv()
+        text, confirmed = send_flow(c, "6", MSG6)
+        if not confirmed:
+            raise Fail(f"未进入确认流程: {text[:200]}")
+
+        def check(cfg):
+            return writer_of(cfg, 1000) is not None and forward_of(cfg, 5000) is not None
+        cfg = wait_config(check, timeout=240, desc="1号风机 writer + 转发实例")
+        w = points_of(cfg, "c4_asfp2_server", writer_of(cfg, 1000))
+        if sorted(w) != list(range(1000, 1010)):
+            raise Fail(f"接收点表异常（首条消息已给出，应 catch-up 落位）: {sorted(w)}")
+        if find_inst(cfg, "c4_asfp2_server", port=P_RECV1) is None:
+            raise Fail(f"接收端口不是 {P_RECV1}")
+        f = points_of(cfg, "c4_asfp2_client", forward_of(cfg, 5000))
+        if sorted(f) != list(range(5000, 5010)):
+            raise Fail(f"转发点表异常（首条消息已给出 5000~5009）: {sorted(f)}")
+        if find_inst(cfg, "c4_asfp2_client", ip="127.0.0.1", port=P_FWD1) is None:
+            raise Fail(f"转发目标不是 127.0.0.1:{P_FWD1}")
+        log("  用例6 PASS ✓（协议一轮应答后，首条消息信息经 catch-up 全部落位）")
+
+
+    finally:
+        recv.stop()
 
 
 def case4():
@@ -1783,10 +1829,10 @@ def case42():
 
 
 CASES = {
-    "prereq": prereq, "4": case4, "16": case16, "17": case17, "18": case18,
-    "19": case19, "20": case20, "21": case21, "22": case22, "23": case23,
-    "24": case24, "25": case25, "26": case26, "27": case27, "28": case28,
-    "29": case29, "10": case10,
+    "prereq": prereq, "4": case4, "6": case6, "16": case16, "17": case17,
+    "18": case18, "19": case19, "20": case20, "21": case21, "22": case22,
+    "23": case23, "24": case24, "25": case25, "26": case26, "27": case27,
+    "28": case28, "29": case29, "10": case10,
 }
 
 CASES.update({

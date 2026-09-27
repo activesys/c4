@@ -1,5 +1,5 @@
 // c4/agent/test/orchestrator/gap_question.test.ts
-// 单缺口顺序提问纯函数单测（agent.md §2.6 C4H2 修订：聚合提问 → 单缺口顺序提问）
+// 单缺口顺序提问纯函数单测（agent.md §2.6 C4He 修订：聚合提问 → 单缺口顺序提问）
 //   - ask_* 确切提问文本生成：要求（字段清单）与示例（写法不限）分离
 //   - parse_bare_value / bind_bare：裸值兜底绑定（宁可放过不可错绑）
 // 运行：cd c4/agent && npm test
@@ -10,6 +10,7 @@ import {
     ask_points,
     ask_protocol,
     bind_bare,
+    bind_change_answer,
     is_forward_mirror_answer,
     parse_bare_value,
 } from "../../src/orchestrator/gap_question.js";
@@ -213,5 +214,92 @@ describe("is_forward_mirror_answer", () => {
         expect(
             is_forward_mirror_answer("转发点表用2390到2399，与I区一致的那批点"),
         ).toBe(false);
+    });
+});
+
+describe("bind_change_answer（变更流应答绑定，2026-09-27 用例10）", () => {
+    it("点名应答：中文词 → 落 name，不落 id", () => {
+        const draft = [{ addr: 2000 }];
+        expect(bind_change_answer("change.name", "风速2", draft)).toBe(true);
+        expect(draft[0]["name"]).toBe("风速2");
+        expect(draft[0]["id"]).toBeUndefined();
+    });
+
+    it("点名应答：英文形态 → name 与 id 同时落（用户原文提供）", () => {
+        const draft = [{ addr: 2000 }];
+        expect(bind_change_answer("change.name", "vibration", draft)).toBe(true);
+        expect(draft[0]["name"]).toBe("vibration");
+        expect(draft[0]["id"]).toBe("vibration");
+    });
+
+    it("点名应答：撞名换名场景 → 覆盖已拒绝的旧名，且旧名派生的 id 一并作废", () => {
+        const draft = [{ addr: 1010, name: "功率", id: "power" }];
+        expect(bind_change_answer("change.name", "角度", draft)).toBe(true);
+        expect(draft[0]["name"]).toBe("角度");
+        // 旧 id 残留会被 id 重复比对误判重名（「角度 vs 功率」死循环实测）
+        expect(draft[0]["id"]).toBeUndefined();
+    });
+
+    it("点名应答：换名为英文形态 → 旧 id 作废并以新名原文为 id", () => {
+        const draft = [{ addr: 1010, name: "功率", id: "power" }];
+        expect(bind_change_answer("change.name", "angle", draft)).toBe(true);
+        expect(draft[0]["name"]).toBe("angle");
+        expect(draft[0]["id"]).toBe("angle");
+    });
+
+    it("点名应答：纯数字/多词句子 → 拒绝绑定", () => {
+        expect(bind_change_answer("change.name", "6000", [{ addr: 2000 }])).toBe(false);
+        expect(bind_change_answer("change.name", "风速 风速2", [{ addr: 2000 }])).toBe(false);
+    });
+
+    it("英文标识应答：合规标识 → 落 id", () => {
+        const draft = [{ addr: 2000, name: "功率" }];
+        expect(bind_change_answer("change.id", "power_2", draft)).toBe(true);
+        expect(draft[0]["id"]).toBe("power_2");
+    });
+
+    it("英文标识应答：非法标识 → 拒绝绑定", () => {
+        expect(bind_change_answer("change.id", "2power", [{ addr: 2000 }])).toBe(false);
+        expect(bind_change_answer("change.id", "功率", [{ addr: 2000 }])).toBe(false);
+    });
+
+    it("转发地址应答：恰一点缺失 + 纯数字 → 落 forward_addr（用例10「6000」场景）", () => {
+        const draft = [{ addr: 2000, name: "风速2", id: "wind_speed_2" }];
+        expect(bind_change_answer("change.forward_addr", "6000", draft)).toBe(true);
+        expect(draft[0]["forward_addr"]).toBe(6000);
+    });
+
+    it("转发地址应答：多点缺失无法对应 → 拒绝绑定", () => {
+        const draft = [{ addr: 2000 }, { addr: 2001 }];
+        expect(bind_change_answer("change.forward_addr", "6000", draft)).toBe(false);
+    });
+
+    it("转发地址应答：范围/IP 形态不是转发地址 → 拒绝绑定", () => {
+        const draft = [{ addr: 2000 }];
+        expect(
+            bind_change_answer("change.forward_addr", "2390-2399", draft),
+        ).toBe(false);
+        expect(
+            bind_change_answer("change.forward_addr", "192.168.1.5:502", draft),
+        ).toBe(false);
+    });
+});
+
+describe("bind_change_answer：change.addr（先点名后补地址，2026-09-27「反向有功」）", () => {
+    it("无址条目 + 纯数字应答 → 落 addr", () => {
+        const draft = [{ name: "反向有功", id: "reverse_active_power" }];
+        expect(bind_change_answer("change.addr", "2800", draft)).toBe(true);
+        expect(draft[0]["addr"]).toBe(2800);
+    });
+
+    it("多点缺地址无法对应 → 拒绝绑定", () => {
+        const draft = [{ name: "a" }, { name: "b" }];
+        expect(bind_change_answer("change.addr", "2800", draft)).toBe(false);
+    });
+
+    it("范围/IP 形态不是点位地址 → 拒绝绑定", () => {
+        const draft = [{ name: "a" }];
+        expect(bind_change_answer("change.addr", "2390-2399", draft)).toBe(false);
+        expect(bind_change_answer("change.addr", "192.168.1.5", draft)).toBe(false);
     });
 });

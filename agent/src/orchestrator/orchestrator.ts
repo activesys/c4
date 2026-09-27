@@ -50,6 +50,7 @@ import {
     ask_points,
     ask_protocol,
     bind_bare,
+    bind_change_answer,
     is_forward_mirror_answer,
     parse_bare_value,
     type Gap,
@@ -114,6 +115,15 @@ interface SessionState {
     turnSiteCheck: "ambiguous" | "other" | null;
     /** 上一回合提问的缺口键（§2.6 单缺口顺序提问；裸值兜底绑定的目标） */
     pendingGap: string | null;
+    /** 累积用户消息原文（catch-up 补提取，2026-09-27 用例6）：闸门后到时对累积文本补跑 */
+    userTexts: string[];
+    /** 变更流程追问中（缺点名/缺转发地址/待选设备）——应答回合强制走变更分叉 */
+    pendingChangeAsk: boolean;
+    /** 变更流追加草稿（单调累积，addr 为键——已确认字段不被后续轮次重解析覆盖，
+     *  2026-09-27 用例10：轮4 重解析曾丢已确认点名并漏绑转发地址） */
+    changeAddPoints: Array<Record<string, unknown>> | null;
+    /** 变更流追加草稿的目标设备 id（草稿创建时确定，应答轮复用） */
+    changeTargetId: string | null;
 }
 
 function fresh_state(): SessionState {
@@ -129,6 +139,10 @@ function fresh_state(): SessionState {
         gapRepeat: 0,
         turnSiteCheck: null,
         pendingGap: null,
+        userTexts: [],
+        pendingChangeAsk: false,
+        changeAddPoints: null,
+        changeTargetId: null,
     };
 }
 
@@ -138,6 +152,28 @@ const CANCEL_WORDS = new Set(["取消", "算了", "不接了", "放弃", "停止
 // 转发意图：肯定表述命中且否定表述未命中（"不需要转发/仅采集"不激活转发链）
 const FORWARD_ON_RE = /转发|入库|写入|上传|推送|发送到/;
 const FORWARD_OFF_RE = /不需要转发|不转发|无需转发|仅采集|只采集|不用转发/;
+
+// catch-up 句级作用域筛选（2026-09-27 用例6）：逐轮提取只看当前消息，闸门后到的
+// 信息需对累积文本补提取——但累积文本常同时含接收表与转发表，9a/规则9 的提示词
+// 纪律压不住小模型（实测 receive 侧把「点表5000~5009」当接收表提取）。两侧各自
+// 只喂本侧句子：转发侧取含转发关键词的句子，接收侧取不含的
+function forward_scoped_text(texts: string[]): string {
+    if (texts.length === 0) return "";
+    return texts
+        .join("\n")
+        .split(/[。．！!？?]+/)
+        .filter((s) => /转发|入库|写入|上传|推送|发送到|目标|服务器/.test(s))
+        .join("\n");
+}
+
+function receive_scoped_text(texts: string[]): string {
+    if (texts.length === 0) return "";
+    return texts
+        .join("\n")
+        .split(/[。．！!？?]+/)
+        .filter((s) => !/转发|入库|写入|上传|推送|发送到/.test(s))
+        .join("\n");
+}
 
 // 修改/删除意图（针对已接入设备）
 const CHANGE_INTENT_RE =
@@ -483,6 +519,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             { role: "system", content: rendered },
             { role: "user", content: `<user_input>\n${user_input}\n</user_input>` },
         ]);
+        let sawNonEmpty = false;
         for (let attempt = 0; attempt < 3; attempt++) {
             try {
                 const res = await model.invoke([
@@ -491,6 +528,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 ]);
                 const text = extract_text(res);
                 cfg.agentLogger.llm_text(conversation, text);
+                if (text.trim() !== "") sawNonEmpty = true;
                 const parsed = parse_json<Record<string, unknown>>(text);
                 if (parsed !== null) return parsed;
             } catch (err) {
@@ -501,6 +539,14 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                     );
                 }
             }
+        }
+        // 连续空响应（3 次全空，glm-4.5-air 偶发，2026-09-27 用例10 实测）——显式记
+        // error 事件，调用方据此向用户降级提示而非静默转换话题
+        if (!sawNonEmpty) {
+            cfg.agentLogger.error(
+                conversation,
+                `LLM 连续 3 次空响应（${prompt_file}）——提取失败，走调用方降级路径`,
+            );
         }
         return null;
     }
@@ -649,6 +695,17 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
     ): Promise<boolean> {
         let progress = false;
         const semantic = clean_user_text(user_text);
+
+        // 累积用户文本（catch-up 补提取，2026-09-27 用例6）：逐轮提取只看当前消息，
+        // 协议等闸门后到时，先前消息里已给出的点表/连接信息会被永久跳过——原文按序
+        // 累积，闸门打开的回合对累积文本补提取。按钮/取消回合不进入本函数，不入缓冲
+        // 相邻去重：变更分叉已累积过当前消息时不再重复入缓冲
+        if (state.userTexts[state.userTexts.length - 1] !== semantic) {
+            state.userTexts.push(semantic);
+        }
+        const semanticAll = state.userTexts.join("\n");
+        const fwdScoped = forward_scoped_text(state.userTexts);
+        const recvScoped = receive_scoped_text(state.userTexts);
 
         // 转发意图 LLM 兜底判定（阶段5-7 激活条件）：仅当关键词快路未命中时发起，
         // 与后续提取阶段并行以摊薄延迟。func_test_case 用例 4：去向表述（「II服务器
@@ -852,7 +909,9 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                             | undefined)?.["connection_hints"] ?? [],
                     ),
                 },
-                semantic,
+                // catch-up：协议后到时，先前消息里的长尾连接表述按正确 schema 补提取
+                //（只喂接收侧句子，防串侧）
+                recvScoped.trim() !== "" ? recvScoped : semanticAll,
                 conversation,
             );
             if (r && typeof r["connection"] === "object" && r["connection"] !== null) {
@@ -951,7 +1010,10 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 const input_text =
                     (file_data !== null && filePoints === null
                         ? `<file_data>\n${file_data.slice(0, 4000)}\n</file_data>\n`
-                        : "") + semantic;
+                        : "") +
+                    // catch-up（2026-09-27 用例6）：协议后到时对接收侧句子补提取，
+                    // 不把含转发关键词的句子喂给 receive 提取器（防串侧）
+                    (recvScoped.trim() !== "" ? recvScoped : semanticAll);
                 const protocol = state.recv.protocol;
                 const extract = () =>
                     llm_json(
@@ -968,28 +1030,43 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                     );
                 let r = await extract();
                 // 语义重试兜底（llm_json 只重试解析失败）：①空提取但消息含点表形态
-                // （9a 串味，2026-09-26 用例4 实测，temperature=0 仍出现）；②点缺英文
-                // 标识 id——id 由提取层翻译（非 schema 强制字段），模型偶发遗漏且方案层
-                // 会因「缺少英文标识」拒绝执行（2026-09-27 用例5 线上实测）
-                const extracted =
-                    r && Array.isArray(r["points"]) ? (r["points"] as unknown[]) : null;
-                const emptyWithTableShape =
-                    (!extracted || extracted.length === 0) &&
-                    /\d{2,7}\s*[:：是]/.test(semantic);
-                const missingId =
-                    extracted !== null &&
-                    extracted.some((p) => {
-                        const id = (p as Record<string, unknown>)["id"];
-                        return typeof id !== "string" || id.trim() === "";
-                    });
-                if (emptyWithTableShape || missingId) {
+                // （9a 串味，2026-09-26 用例4 实测，temperature=0 仍出现）；②点缺点名或
+                // 英文标识 id——两者均由提取层提供（非 schema 强制字段），模型偶发遗漏，
+                // 方案层会因缺 id/缺点名拒绝执行（2026-09-27 用例5/用例6 线上实测）
+                const incomplete = (
+                    pts: Array<Record<string, unknown>> | null,
+                ): boolean =>
+                    pts !== null &&
+                    pts.some(
+                        (p) =>
+                            typeof p["name"] !== "string" ||
+                            p["name"].trim() === "" ||
+                            typeof p["id"] !== "string" ||
+                            p["id"].trim() === "",
+                    );
+                let pts =
+                    r && Array.isArray(r["points"])
+                        ? (r["points"] as Array<Record<string, unknown>>)
+                        : null;
+                if (
+                    ((!pts || pts.length === 0) &&
+                        /\d{2,7}\s*[:：是]/.test(semantic)) ||
+                    incomplete(pts)
+                ) {
                     r = await extract();
+                    pts =
+                        r && Array.isArray(r["points"])
+                            ? (r["points"] as Array<Record<string, unknown>>)
+                            : null;
                 }
-                if (r && Array.isArray(r["points"]) && (r["points"] as unknown[]).length > 0) {
-                    state.recv.points = r["points"] as Array<Record<string, unknown>>;
+                // 验收：点缺点名/缺 id 不落槽位（§3.2.1.3b 由缺口向用户追问），
+                // 防止空名点/错侧点流入方案（2026-09-27 用例6 实测：错侧点表
+                // 5000~5009 空名流入方案，确认时才 fatal）
+                if (pts && pts.length > 0 && !incomplete(pts)) {
+                    state.recv.points = pts;
                     state.recv.declared =
-                        typeof r["declared_count"] === "number"
-                            ? (r["declared_count"] as number)
+                        typeof r?.["declared_count"] === "number"
+                            ? (r?.["declared_count"] as number)
                             : null;
                     progress = true;
                 }
@@ -1003,10 +1080,14 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
         // 缺失即走缺口追问
         if (state.forwardIntent && state.fwd.protocol && state.recv.points) {
             const n = state.recv.points.length;
-            const rangeM = semantic.match(
+            // catch-up（2026-09-27 用例6）：确定性扫描扩展到「含转发关键词的句子」的
+            // 累积文本——当前消息优先（显式重述总是采纳），无命中再扫历史转发句，
+            // 避免把接收侧点表表述误认成转发地址
+            const fwdScopedNow = fwdScoped ? `${semantic}\n${fwdScoped}` : semantic;
+            const rangeM = fwdScopedNow.match(
                 /(?:转发地址|转发点表|点表)[^\d\n]{0,6}(\d{2,7})(?![个点])\s*(?:到|~|-|—|开始)?\s*(\d+)?/,
             );
-            const zhStart = rangeM ? null : zh_start_address(semantic);
+            const zhStart = rangeM ? null : zh_start_address(fwdScopedNow);
             if (rangeM) {
                 const start = Number(rangeM[1]);
                 const end = rangeM[2] !== undefined ? Number(rangeM[2]) : start + n - 1;
@@ -1069,9 +1150,17 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
         // connection_prompt 提取需注入协议，仍在协议已明时进行
         if (state.forwardIntent) {
             if (state.fwd.conn["ip"] === undefined || state.fwd.conn["port"] === undefined) {
-                const m = semantic.match(
-                    /(?:转发到|目标|服务器)[^\d]{0,6}(\d{1,3}(?:\.\d{1,3}){3})[:：](\d{2,5})/,
-                );
+                // catch-up：当前消息无 ip:port 时，扫累积文本中的转发关键词句子
+                //（2026-09-27 用例6：目标地址在协议之前的消息里给出）
+                const m =
+                    semantic.match(
+                        /(?:转发到|目标|服务器)[^\d]{0,6}(\d{1,3}(?:\.\d{1,3}){3})[:：](\d{2,5})/,
+                    ) ??
+                    (fwdScoped
+                        ? fwdScoped.match(
+                              /(?:转发到|目标|服务器)[^\d]{0,6}(\d{1,3}(?:\.\d{1,3}){3})[:：](\d{2,5})/,
+                          )
+                        : null);
                 if (m) {
                     state.fwd.conn["ip"] = m[1];
                     state.fwd.conn["port"] = Number(m[2]);
@@ -1100,7 +1189,9 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                                     | undefined)?.["connection_hints"] ?? [],
                             ),
                         },
-                        semantic,
+                        // catch-up：协议后到时按正确 schema 对转发侧句子补提取（如
+                        // influxdb 的 url 在协议之前的消息里给出）
+                        fwdScoped.trim() !== "" ? fwdScoped : semanticAll,
                         conversation,
                     );
                     if (r && typeof r["connection"] === "object" && r["connection"] !== null) {
@@ -1937,11 +2028,16 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
     async function build_change_plan(
         user_text: string,
         conversation: string,
+        state: SessionState,
     ): Promise<{
         steps: ServiceStep[];
         display: string;
+        /** 追问类返回（缺英文标识/缺转发地址/待选设备）：用户应答后须重入本分叉 */
+        ask?: boolean;
     } | null> {
-        const semantic = clean_user_text(user_text);
+        // catch-up（2026-09-27 用例10）：变更追问的应答（「风速」「5010」）需要与原始
+        // 请求拼接才有语义——解析输入为累积用户文本（含当前消息，由调用方先行累积）
+        const semantic = clean_user_text(state.userTexts.join("\n"));
         let current: Record<string, unknown> | null;
         try {
             current = JSON.parse(readFileSync(cfg.configPath, "utf-8"));
@@ -1985,6 +2081,94 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             return null; // devices 形状 → 交由确认通道直接执行
         }
 
+        // 裸值兜底绑定（§2.6 变更流，2026-09-27 用例10）：追问点名/英文标识/转发地址
+        // 后的纯值应答直接落入追加草稿——全量重解析曾丢已确认字段（轮4 实测）并
+        // 漏绑转发地址。绑定后：
+        //   - 英文标识/转发地址应答 → 草稿已齐备，直接评估（零 LLM）
+        //   - 中文点名应答（英文标识未定）→ 专用微翻译（id_translate_prompt）补 id
+        //     ——不得落回全量重解析：累积文本含被拒旧名，change_prompt 会把 id 回填
+        //     为旧名派生值，再次误报重名（「角度 vs 功率」死循环实测）
+        if (
+            state.pendingGap !== null &&
+            state.pendingGap.startsWith("change.") &&
+            state.changeAddPoints !== null &&
+            state.changeAddPoints.length > 0 &&
+            state.changeTargetId !== null
+        ) {
+            const bound = bind_change_answer(
+                state.pendingGap as
+                    | "change.name"
+                    | "change.id"
+                    | "change.forward_addr"
+                    | "change.addr",
+                user_text,
+                state.changeAddPoints,
+            );
+            if (bound) {
+                cfg.agentLogger.memory(conversation, "pending_bind", {
+                    gap: state.pendingGap,
+                    draft: JSON.stringify(state.changeAddPoints),
+                });
+                // 中文点名待翻译 → 专用微翻译补 id（干净上下文，不重解析）
+                const pt0 = state.changeAddPoints[0];
+                const nm0 = String(pt0["name"] ?? "").trim();
+                const id0 = String(pt0["id"] ?? "").trim();
+                if (
+                    state.pendingGap === "change.name" &&
+                    id0 === "" &&
+                    nm0 !== "" &&
+                    !IDENTIFIER_RE.test(nm0)
+                ) {
+                    const existing = devices
+                        .map((d) => {
+                            const pts = (d["points"] ?? []) as Array<
+                                Record<string, unknown>
+                            >;
+                            return `${String(d["id"])}：${pts
+                                .map(
+                                    (p) =>
+                                        `${String(p["name"] ?? "")}(${String(p["id"] ?? "")})`,
+                                )
+                                .join("、")}`;
+                        })
+                        .join("\n");
+                    const tr = await llm_json(
+                        "id_translate_prompt.txt",
+                        { existing_points: existing, name: nm0 },
+                        nm0,
+                        conversation,
+                    );
+                    const tid = tr ? String(tr["id"] ?? "").trim() : "";
+                    if (tid !== "" && IDENTIFIER_RE.test(tid)) {
+                        pt0["id"] = tid;
+                    } else {
+                        // 翻译失败/不合规 → 降级问用户英文标识（系统不自动生成）
+                        state.pendingGap = "change.id";
+                        return {
+                            steps: [],
+                            display: `新增点「${nm0}」英文标识自动翻译失败——请直接提供英文标识后重试（系统不自动生成）。`,
+                            ask: true,
+                        };
+                    }
+                }
+                const bdev = devices.find(
+                    (d) => String(d["id"]) === state.changeTargetId,
+                );
+                if (!bdev) {
+                    state.changeAddPoints = null;
+                    state.pendingGap = null;
+                    return null;
+                }
+                return evaluate_change_add(
+                    state,
+                    state.changeTargetId,
+                    String(bdev["service_type"]),
+                    bdev,
+                    current,
+                );
+            }
+        }
+
         // 确定性解析优先（常见表述），LLM change_prompt 兜底长尾表述
         let r = deterministic_change_parse(semantic, devices);
         if (r === null) {
@@ -1994,7 +2178,35 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 semantic,
                 conversation,
             );
-            if (!r) return null;
+            if (!r) {
+                // 降级（§2.6）：草稿已有内容时按草稿评估——缺什么问什么（如点名已
+                // 确认仅缺英文标识翻译失败 → 请用户提供英文标识），草稿为空才提示
+                // 服务异常。不再静默跌落进接入管线造成答非所问（用例10 轮5 实测）
+                if (
+                    state.changeAddPoints !== null &&
+                    state.changeAddPoints.length > 0 &&
+                    state.changeTargetId !== null
+                ) {
+                    const ddev = devices.find(
+                        (d) => String(d["id"]) === state.changeTargetId,
+                    );
+                    if (ddev) {
+                        return evaluate_change_add(
+                            state,
+                            state.changeTargetId,
+                            String(ddev["service_type"]),
+                            ddev,
+                            current,
+                        );
+                    }
+                }
+                return {
+                    steps: [],
+                    display:
+                        "变更解析服务暂时异常，未能理解本次应答。请稍后重试，或换一种表述（例如：点名 vibration，地址 2000，转发地址 6000）。",
+                    ask: true,
+                };
+            }
         }
         const action = String(r["intent"] ?? "");
         if (action === "point_not_found") {
@@ -2088,93 +2300,42 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 .join("；");
             detail = `在 ${targetId} 上修改：${[ftxt, ptxt].filter(Boolean).join("；")}`;
         } else if (action === "add_points") {
-            const ap = (r["add_points"] ?? []) as Array<Record<string, unknown>>;
-            if (ap.length === 0) return null;
-            // 点名→id（agent.md §3.2.1.3b）：id 由 change_prompt 翻译/用户原文提供；
-            // 缺失且点名非合规英文 → 可读拒绝（系统不自动生成）
-            for (const p of ap) {
-                const nm = String(p["name"] ?? "").trim();
-                let id = String(p["id"] ?? "").trim();
-                if (id === "" && IDENTIFIER_RE.test(nm)) id = nm;
-                const err = id === "" ? "缺少英文标识 id" : identifier_error(id, "point.id");
-                if (err) {
-                    return {
-                        steps: [],
-                        display: `新增点「${nm || "?"}」${err}——请提供英文点名或确认中文名的英文翻译后重试（系统不自动生成）。`,
-                    };
+            // 草稿合并（单调累积）：有 addr 按 addr 为键；无 addr（先给点名的场景，
+            // 2026-09-27「反向有功」实测）按点名匹配，匹配不到以无址条目入草稿，
+            // 地址成为后续缺口——不再因缺 addr 丢弃整点
+            const parsed = (r["add_points"] ?? []) as Array<Record<string, unknown>>;
+            const draft = state.changeAddPoints ?? [];
+            for (const p of parsed) {
+                let d: Record<string, unknown> | undefined;
+                if (p["addr"] !== undefined) {
+                    const addr = Number(p["addr"]);
+                    d = draft.find((q) => Number(q["addr"]) === addr);
+                    if (!d) {
+                        d = { addr };
+                        draft.push(d);
+                    }
+                } else {
+                    const nm = String(p["name"] ?? "").trim();
+                    d =
+                        nm !== ""
+                            ? draft.find((q) => String(q["name"] ?? "").trim() === nm)
+                            : undefined;
+                    if (!d) {
+                        d = {};
+                        draft.push(d);
+                    }
                 }
-                p["id"] = id;
-            }
-            // addr 数值化（change_prompt 可能产出字符串数字——字符串 addr 会绕过
-            // merge 的地址冲突检查，造成同址双点，2026-09-24 用例 18）
-            for (const p of ap) {
-                if (p["addr"] !== undefined) p["addr"] = Number(p["addr"]);
-                if (p["forward_addr"] !== undefined) p["forward_addr"] = Number(p["forward_addr"]);
-            }
-            changes.push({
-                action: "modify",
-                service_type: svcType,
-                instance: { id: targetId },
-                points: ap,
-            });
-            detail = `给 ${targetId} 增加点：${ap
-                .map((p) => `${String(p["name"] ?? "")}(地址 ${String(p["addr"] ?? "?")})`)
-                .join("、")}`;
-            // 新增采集点必须同时转发（func_test_case 用例 16/20 裁定）：存在既有
-            // 转发链路而用户未给出转发地址 → 先询问（不静默顺延、不遗漏转发）；
-            // 给出转发地址 → reader 侧成对追加（key = writer 实例 id.点 id）
-            const reader = find_reader_for_writer(current, targetId);
-            if (reader) {
-                const missingForward = ap.filter(
-                    (p) => p["forward_addr"] === undefined || p["forward_addr"] === null,
-                );
-                if (missingForward.length > 0) {
-                    return {
-                        steps: [],
-                        display:
-                            `新增点${missingForward
-                                .map(
-                                    (p) =>
-                                        `「${String(p["name"] ?? "")}（地址 ${String(p["addr"] ?? "?")}）」`,
-                                )
-                                .join("、")}还需要转发地址——` +
-                            `当前转发链路 ${reader.id} 的转发地址已用到 ${reader.maxAddr}。` +
-                            `请告知每个新增点的转发地址后重试。`,
-                    };
+                for (const k of ["name", "id", "addr", "forward_addr"] as const) {
+                    const v = p[k];
+                    if (d[k] === undefined && v !== undefined && String(v).trim() !== "") {
+                        d[k] = v;
+                    }
                 }
             }
-            // 地址占用预检（func_test_case 用例 18）：新增点地址与既有采集点相同 →
-            // 可读拒绝（转发询问在前——用例 20 场景先问转发，补齐后再验占用）
-            const devPts = (dev["points"] ?? []) as Array<Record<string, unknown>>;
-            for (const p of ap) {
-                const occupied = devPts.find(
-                    (q) => Number(q["addr"]) === Number(p["addr"]),
-                );
-                if (occupied) {
-                    return {
-                        steps: [],
-                        display: `地址 ${String(p["addr"])} 已被点「${String(
-                            occupied["name"] ?? occupied["id"] ?? "?",
-                        )}」占用，无法新增。请更换地址，或先删除原点后再试。`,
-                    };
-                }
-            }
-            const fwdPts = ap
-                .filter((p) => p["forward_addr"] !== undefined && p["forward_addr"] !== null)
-                .map((p) => ({
-                    key: `${targetId}.${String(p["id"])}`,
-                    addr: Number(p["forward_addr"]),
-                    shm_id: 0,
-                }));
-            if (fwdPts.length > 0 && reader) {
-                changes.push({
-                    action: "modify",
-                    service_type: reader.service_type,
-                    instance: { id: reader.id },
-                    points: fwdPts,
-                });
-                detail += `；成对转发至 ${reader.id}`;
-            }
+            state.changeAddPoints = draft;
+            state.changeTargetId = targetId;
+            if (draft.length === 0) return null;
+            return evaluate_change_add(state, targetId, svcType, dev, current);
         } else {
             return null;
         }
@@ -2190,6 +2351,201 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 points: (c["points"] ?? []) as ServiceStep["points"],
             })),
             display,
+        };
+    }
+
+    // ── 变更追加草稿评估（§2.6 单缺口顺序提问 + 草稿单调累积，2026-09-27 用例10）──
+    // 以 changeAddPoints 草稿为准逐项检查：点名 → 英文标识 → 撞名 → 转发地址 →
+    // 地址占用。每个追问置 pendingGap（change.*）供下一轮裸值应答经 bind_change_answer
+    // 直接绑定；草稿在方案产出或终态错误时消费/清空
+    function evaluate_change_add(
+        state: SessionState,
+        targetId: string,
+        svcType: string,
+        dev: Record<string, unknown>,
+        current: Record<string, unknown>,
+    ): { steps: ServiceStep[]; display: string; ask?: boolean } | null {
+        const ap = state.changeAddPoints ?? [];
+        if (ap.length === 0) return null;
+        // ① 点名 / 英文标识（agent.md §3.2.1.3b：不自动生成，逐项问齐）
+        for (const p of ap) {
+            const nm = String(p["name"] ?? "").trim();
+            let id = String(p["id"] ?? "").trim();
+            // 点名为合规英文标识 → 原文即 id（用户原文提供，非系统生成）
+            if (id === "" && nm !== "" && IDENTIFIER_RE.test(nm)) id = nm;
+            if (nm === "") {
+                state.pendingGap = "change.name";
+                return {
+                    steps: [],
+                    display:
+                        "请提供新增点的点名（中文名即可；英文标识确认点名后另行提供——系统不自动生成）。",
+                    ask: true,
+                };
+            }
+            if (id === "") {
+                state.pendingGap = "change.id";
+                return {
+                    steps: [],
+                    display: `新增点「${nm}」缺少英文标识 id——请提供英文点名或确认中文名的英文翻译后重试（系统不自动生成）。`,
+                    ask: true,
+                };
+            }
+            const err = identifier_error(id, "point.id");
+            if (err) {
+                state.pendingGap = "change.id";
+                return {
+                    steps: [],
+                    display: `新增点「${nm}」${err}——请更换英文标识后重试（系统不自动生成）。`,
+                    ask: true,
+                };
+            }
+        }
+        // addr 数值化（字符串数字会绕过 merge 的地址冲突检查——2026-09-24 用例 18）
+        for (const p of ap) {
+            if (p["addr"] !== undefined) p["addr"] = Number(p["addr"]);
+            if (p["forward_addr"] !== undefined) p["forward_addr"] = Number(p["forward_addr"]);
+        }
+        // ② 禁止重名（2026-09-27 裁定）：与设备已有点重名 → 拒绝并要求换名
+        const devPts0 = (dev["points"] ?? []) as Array<Record<string, unknown>>;
+        for (const p of ap) {
+            const nm = String(p["name"] ?? "").trim();
+            const pid = String(p["id"] ?? "");
+            const dup = devPts0.find(
+                (q) =>
+                    (nm !== "" && String(q["name"] ?? "").trim() === nm) ||
+                    (pid !== "" &&
+                        String(q["id"] ?? "") !== "" &&
+                        String(q["id"]) === pid),
+            );
+            if (dup) {
+                state.pendingGap = "change.name";
+                return {
+                    steps: [],
+                    display: `点名「${nm || pid}」与已有点「${String(
+                        dup["name"] ?? "",
+                    )}」（addr ${String(dup["addr"] ?? "?")}）重名——禁止重名，请更换点名。`,
+                    ask: true,
+                };
+            }
+        }
+        // ③ 地址占用预检（func_test_case 用例 18）——先于转发询问：地址已被占用的
+        // 点没有必要问转发地址（2026-09-27 实测：占用晚检导致用户白答一轮转发地址）。
+        // 占用拒绝保留点名/英文标识、仅作废被占地址——用户换址后草稿直接续用，
+        // 不再清空草稿丢失上下文
+        const devPts = (dev["points"] ?? []) as Array<Record<string, unknown>>;
+        for (const p of ap) {
+            if (p["addr"] === undefined) continue;
+            const occupied = devPts.find(
+                (q) => Number(q["addr"]) === Number(p["addr"]),
+            );
+            if (occupied) {
+                const occupiedAddr = p["addr"];
+                delete p["addr"];
+                state.pendingGap = "change.addr";
+                return {
+                    steps: [],
+                    display: `地址 ${String(occupiedAddr)} 已被点「${String(
+                        occupied["name"] ?? occupied["id"] ?? "?",
+                    )}」占用，无法新增——点名与英文标识已保留，请更换数据点地址（如 1011），或回复「取消」结束本次变更。`,
+                    ask: true,
+                };
+            }
+        }
+        // ④ 数据点地址（先给点名后补地址的场景——2026-09-27「反向有功」实测）
+        for (const p of ap) {
+            if (p["addr"] === undefined) {
+                state.pendingGap = "change.addr";
+                return {
+                    steps: [],
+                    display: `请提供新增点「${String(
+                        p["name"] ?? "",
+                    )}」的数据点地址（采集侧点位地址，如 1010）。`,
+                    ask: true,
+                };
+            }
+        }
+        // ⑤ 新增采集点必须同时转发（func_test_case 用例 16/20 裁定）：缺转发地址
+        // → 询问（不静默顺延）；给出 → reader 侧成对追加（key = writer 实例 id.点 id）
+        const reader = find_reader_for_writer(current, targetId);
+        if (reader) {
+            const missingForward = ap.filter(
+                (p) => p["forward_addr"] === undefined || p["forward_addr"] === null,
+            );
+            if (missingForward.length > 0) {
+                state.pendingGap = "change.forward_addr";
+                return {
+                    steps: [],
+                    display:
+                        `新增点${missingForward
+                            .map(
+                                (p) =>
+                                    `「${String(p["name"] ?? "")}（地址 ${String(p["addr"] ?? "?")}）」`,
+                            )
+                            .join("、")}还需要转发地址——` +
+                        `当前转发链路 ${reader.id} 的转发地址已用到 ${reader.maxAddr}。` +
+                        `请告知每个新增点的转发地址后重试。`,
+                    ask: true,
+                };
+            }
+            // 转发地址占用预检：reader 侧既有同址点（key 不同）→ 执行期合并会拦截
+            // 回滚（2026-09-27「正向有功 9999 vs wind_frequency」实测）——前置到方案
+            // 期，保留草稿只作废冲突的转发地址
+            const readerInst = (
+                (current[reader.service_type] ?? []) as Array<Record<string, unknown>>
+            ).find((i) => String(i["id"]) === reader.id);
+            const readerPts = (readerInst?.["points"] ?? []) as Array<
+                Record<string, unknown>
+            >;
+            for (const p of ap) {
+                const fwd = p["forward_addr"];
+                const occ = readerPts.find(
+                    (q) => Number(q["addr"]) === Number(fwd),
+                );
+                if (occ) {
+                    delete p["forward_addr"];
+                    state.pendingGap = "change.forward_addr";
+                    return {
+                        steps: [],
+                        display: `转发地址 ${String(fwd)} 已被既有转发点「${String(
+                            occ["key"] ?? "?",
+                        )}」占用——点名与英文标识已保留，请更换转发地址，或回复「取消」结束本次变更。`,
+                        ask: true,
+                    };
+                }
+            }
+        }
+        // ⑥ 组装 steps：writer 点追加 + reader 成对转发
+        const steps: ServiceStep[] = [
+            {
+                action: "modify",
+                service_type: svcType,
+                instance: { id: targetId },
+                points: ap as ServiceStep["points"],
+            },
+        ];
+        let detail = `给 ${targetId} 增加点：${ap
+            .map((p) => `${String(p["name"] ?? "")}(地址 ${String(p["addr"] ?? "?")})`)
+            .join("、")}`;
+        const fwdPts = ap.map((p) => ({
+            key: `${targetId}.${String(p["id"])}`,
+            addr: Number(p["forward_addr"]),
+            shm_id: 0,
+        }));
+        if (reader) {
+            steps.push({
+                action: "modify",
+                service_type: reader.service_type,
+                instance: { id: reader.id },
+                points: fwdPts,
+            });
+            detail += `；成对转发至 ${reader.id}`;
+        }
+        // ⑥ 完成：草稿消费（方案待确认；确认/取消由 accessPlan 生命周期管理）
+        state.changeAddPoints = null;
+        state.pendingGap = null;
+        return {
+            steps,
+            display: `变更方案如下：\n· ${detail}\n是否确认执行？请点击下方「确认」按钮；如需取消请点击「取消」。`,
         };
     }
 
@@ -2361,6 +2717,9 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 state.forwardIntent = false;
                 state.locks = { receive: false, forward: false };
                 state.pendingGap = null;
+                state.pendingChangeAsk = false;
+                state.changeAddPoints = null;
+                state.userTexts = [];
                 stateWriter.setAccessPlan(false);
                 stateWriter.setPhase("idle");
                 cfg.agentLogger.phase(conversation, "idle");
@@ -2462,7 +2821,14 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
         }
         turnLlmRound = 0;
         try {
-            yield* invoke_turn(input, conversation);
+            for await (const ev of invoke_turn(input, conversation)) {
+                // 确定性回复落盘（§5.2）：提问/方案/错误文本与 LLM 输出同等可追溯
+                //（2026-09-27 用例10 排查盲区补齐——此前提问文本不落盘）
+                if (ev.type === "text") {
+                    cfg.agentLogger.assistant_text(conversation, ev.content);
+                }
+                yield ev;
+            }
         } finally {
             cfg.agentLogger.done(conversation);
         }
@@ -2500,6 +2866,9 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 state.locks = { receive: false, forward: false };
                 state.gapRepeat = 0;
                 state.pendingGap = null;
+                state.pendingChangeAsk = false;
+                state.changeAddPoints = null;
+                state.userTexts = [];
                 stateWriter.setPhase("idle");
                 cfg.agentLogger.phase(conversation, "idle");
                 stateWriter.setAccessPlan(false);
@@ -2518,6 +2887,8 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 state.accessPlan = null;
                 state.userConfirmed = false;
                 state.pendingGap = null;
+                state.pendingChangeAsk = false;
+                state.changeAddPoints = null;
                 stateWriter.setAccessPlan(false);
                 stateWriter.setPhase("idle");
                 cfg.agentLogger.phase(conversation, "idle");
@@ -2556,20 +2927,31 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             stateWriter.setPhase("collecting");
             cfg.agentLogger.phase(conversation, "collecting");
 
-            // ⑤ 变更流分叉（modify/delete，已接入设备的调整）
-            if (CHANGE_INTENT_RE.test(userText) && !/^(接入|解析)/.test(trimmed)) {
-                console.error(`[route] change-intent hit: ${JSON.stringify(trimmed.slice(0, 50))}`);
-                const change = await build_change_plan(userText, conversation);
+            // ⑤ 变更流分叉（modify/delete/add_points，已接入设备的调整）；
+            // pendingChangeAsk：变更追问（缺点名/缺转发地址/待选设备）的应答回合
+            // 强制走本分叉，解析输入为累积用户文本（2026-09-27 用例10）
+            if (
+                state.pendingChangeAsk ||
+                (CHANGE_INTENT_RE.test(userText) && !/^(接入|解析)/.test(trimmed))
+            ) {
+                console.error(
+                    `[route] change-intent hit: ${JSON.stringify(trimmed.slice(0, 50))} pending=${state.pendingChangeAsk}`,
+                );
+                state.userTexts.push(clean_user_text(userText));
+                const change = await build_change_plan(userText, conversation, state);
                 console.error(
                     `[route] build_change_plan -> ${change === null ? "null" : `steps=${change.steps.length} display=${JSON.stringify(change.display.slice(0, 80))}`}`,
                 );
                 if (change !== null) {
                     if (change.steps.length === 0) {
-                        // 目标不存在的友好错误
+                        // 追问类（缺点名/缺转发地址/待选设备）→ 置位等待应答；
+                        // 终态错误（设备/点不存在等）→ 复位
+                        state.pendingChangeAsk = change.ask === true;
                         yield { type: "text", content: change.display };
                         yield { type: "done" };
                         return;
                     }
+                    state.pendingChangeAsk = false;
                     state.accessPlan = {
                         kind: "changes",
                         steps: change.steps,
@@ -2580,6 +2962,16 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                     cfg.agentLogger.phase(conversation, "planning");
                     yield { type: "text", content: change.display };
                     yield { type: "button_arm" };
+                    yield { type: "done" };
+                    return;
+                }
+                // build 失败（如变更意图 LLM 空响应）：不得跌回新接入流程问协议
+                //（2026-09-27 用例10 实测：追加请求被误导入接入问答）
+                if (state.pendingChangeAsk) {
+                    yield {
+                        type: "text",
+                        content: "变更请求处理失败，请重试，或回复「取消」结束本次变更。",
+                    };
                     yield { type: "done" };
                     return;
                 }
@@ -2714,7 +3106,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             const { gaps, recap } = compute_gaps(state);
             if (gaps.length > 0) {
                 // 只问依赖序最靠前的一个缺口——协议决定点表/连接的问题内容，
-                // 聚合清单会迫使用户面对尚无法确切回答的问题（C4H2 设计修订）
+                // 聚合清单会迫使用户面对尚无法确切回答的问题（C4He 设计修订）
                 const asked = gaps[0];
                 if (extraction_progress) {
                     // 本回合有实质进展 → 连续追问计数归零（重发/补充信息均不算空转）

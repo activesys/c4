@@ -480,36 +480,14 @@ async function handle_add(
                 if (existing_idx >= 0) {
                     const existing_rec = existing.points[existing_idx] as unknown as Record<string, unknown>;
                     const pt_rec = pt as unknown as Record<string, unknown>;
-                    // 撞名保护（func_test_case 用例 10）：同名点但业务地址不同 → 独立新点
-                    // （追加序号去重）。禁止覆盖——覆盖会改写既有点 addr 造成数据损坏。
+                    // 禁止重名（2026-09-27 裁定）：同名点但地址不同 → 拒绝（原「追加序号
+                    // 去重改名」废止——改名产出用户未命名的点，违反点名必填原则）
                     if (
                         existing_rec["addr"] !== pt_rec["addr"] &&
                         typeof pt_rec["id"] === "string" && pt_rec["id"].length > 0
                     ) {
-                        const base = String(pt_rec["id"]);
-                        let seq = 2;
-                        let cand = `${base}_${seq}`;
-                        const taken = (k: string) =>
-                            existing.points.some((p) => point_match_key(p) === k);
-                        while (taken(cand)) {
-                            seq += 1;
-                            cand = `${base}_${seq}`;
-                        }
-                        pt_rec["id"] = cand;
-                        if (renames && typeof instance_id === "string") {
-                            let m = renames.get(instance_id);
-                            if (!m) {
-                                m = new Map<string, string>();
-                                renames.set(instance_id, m);
-                            }
-                            m.set(base, cand);
-                        }
-                        existing.points.push(
-                            { ...pt, id: cand, shm_id: 0 } as unknown as ServicePoint,
-                        );
-                        warnings.push(
-                            `add: 点 "${base}" 撞名且地址不同（addr ` +
-                            `${String(existing_rec["addr"])}→${String(pt_rec["addr"])}），去重为 "${cand}"`,
+                        throw new Error(
+                            `点名 "${String(pt_rec["id"])}" 与已有点重名（该点 addr ${String(existing_rec["addr"])}，新点 addr ${String(pt_rec["addr"])}）——禁止重名，请更换点名或地址`,
                         );
                     } else {
                         existing.points[existing_idx] = {

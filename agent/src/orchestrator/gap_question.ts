@@ -1,5 +1,5 @@
 // c4/agent/src/orchestrator/gap_question.ts — 单缺口顺序提问文本生成（agent.md §2.6）
-// 设计原则（C4H2：聚合提问 → 单缺口顺序提问）：
+// 设计原则（C4He：聚合提问 → 单缺口顺序提问）：
 //   - 每回合只提问依赖序最靠前的一个缺口，问题文本由 registry schema 生成；
 //   - 要求 = 字段完备性（schema 必填字段清单，缺了走字段级缺口追问）；
 //   - 格式 = 示例（"写法不限"，解析宽容不变，不引入书写格式校验器）；
@@ -208,4 +208,71 @@ export function bind_bare(key: string, bare: BareValue, pointCount: number | nul
         }
     }
     return null;
+}
+
+// ── 变更流应答绑定（§2.6 裸值兜底，2026-09-27 用例10）────────
+// 变更追问（点名/英文标识/转发地址）的应答此前走全量重解析——累积文本重解析
+// 曾丢已确认字段、漏绑转发地址。此处将纯值应答直接落入追加草稿：
+// 宁可放过（走正常解析）不可错绑。
+
+/** 英文标识形态（与 executor.IDENTIFIER_RE 一致的保守复刻，仅用于绑定预判） */
+const CHANGE_ID_RE = /^[a-zA-Z][a-zA-Z0-9_]*$/;
+
+/**
+ * 把变更追问的应答绑定给追加草稿（原地修改 draft 中的点条目）。
+ * - change.name：单词应答（中/英文，非纯数字）→ 覆盖草稿唯一点的点名
+ *   （撞名换名场景依赖覆盖语义）；英文形态同时落 id（用户原文提供，不自动生成）
+ * - change.id：英文标识应答 → 落 id
+ * - change.forward_addr：纯数字应答 → 落 forward_addr（仅当恰有一点缺转发地址）
+ * 返回 false = 未绑定（非裸值/多点歧义），交回正常解析。
+ */
+export function bind_change_answer(
+    key: "change.name" | "change.id" | "change.forward_addr" | "change.addr",
+    message: string,
+    draft: Array<Record<string, unknown>>,
+): boolean {
+    const t = message.trim();
+    if (t.length === 0 || t.length > 32) return false;
+    if (key === "change.forward_addr") {
+        // 多点缺转发地址时无法对应，不绑（宁可放过不可错绑）
+        const missing = draft.filter(
+            (p) => p["forward_addr"] === undefined || p["forward_addr"] === null,
+        );
+        if (missing.length !== 1) return false;
+        const bare = parse_bare_value(t);
+        // 仅接受纯数字形态（端口/IP:port 不作转发地址）
+        if (!bare || bare.range || bare.ip !== undefined || bare.number === undefined) {
+            return false;
+        }
+        missing[0]["forward_addr"] = bare.number;
+        return true;
+    }
+    if (key === "change.addr") {
+        // 数据点地址应答：纯数字 → 绑给唯一点缺地址的草稿条目（多点歧义不绑）
+        const missing = draft.filter((p) => p["addr"] === undefined);
+        if (missing.length !== 1) return false;
+        const bare = parse_bare_value(t);
+        if (!bare || bare.range || bare.ip !== undefined || bare.number === undefined) {
+            return false;
+        }
+        missing[0]["addr"] = bare.number;
+        return true;
+    }
+    // 点名/英文标识：仅绑单点草稿（多点追加由 change_prompt 整体给出）
+    if (draft.length !== 1) return false;
+    if (key === "change.name") {
+        if (/^[0-9]+$/.test(t)) return false;
+        if (!/^[\u4e00-\u9fa5A-Za-z][\u4e00-\u9fa5A-Za-z0-9_]{0,23}$/.test(t)) return false;
+        draft[0]["name"] = t;
+        // 换名连带：旧名派生的 id 一并作废——撞名换名后残留旧 id 会被 id 重复比对
+        // 误判重名（2026-09-27 用例10「角度/压强 vs 功率(id=power)」死循环实测）；
+        // id 作废后由 orchestrator 落回 change_prompt 重新翻译，英文形态以新名原文为 id
+        delete draft[0]["id"];
+        if (CHANGE_ID_RE.test(t)) draft[0]["id"] = t;
+        return true;
+    }
+    // change.id
+    if (!CHANGE_ID_RE.test(t)) return false;
+    draft[0]["id"] = t;
+    return true;
 }

@@ -1,6 +1,6 @@
 # func_case_e2e — E2E 测试设计与环境模型
 
-> **被测对象**：`test/func_test_case.md` 用例 4、16~28（含用例 10）的端到端 runner（`run_cases.py`）
+> **被测对象**：`test/func_test_case.md` 用例 4、6、16~28（含用例 10）的端到端 runner（`run_cases.py`）
 > **设计参考**：`docs/design/c4_architecture.md` §3.1.1（部署形态：独立系统服务与 Unix Socket 通道）、
 > §3.1.2（变更事务与 Agent 启动/恢复四级瀑布）、§3.1.1 故障矩阵；`docs/design/c4_deployment.md` §6.3（shm 损坏恢复）
 
@@ -9,7 +9,7 @@
 不与生产 agent 及用户 Web 测试互相干扰。用法（root）：
 
 ```bash
-python3 run_cases.py <case>   # case: 4|prereq|16|17|18|19|20|21|22|23|24|25|26|27|28|29|10|all
+python3 run_cases.py <case>   # case: 4|6|prereq|16|17|18|19|20|21|22|23|24|25|26|27|28|29|10|all
 ```
 
 ---

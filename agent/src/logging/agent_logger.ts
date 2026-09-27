@@ -121,6 +121,11 @@ export class AgentLogger {
         this._write("llm_text", "info", conversation, { content });
     }
 
+    /** 确定性回复文本（提问/方案展示/错误——非 LLM 产物，2026-09-27 用例10 排查盲区补齐） */
+    assistant_text(conversation: string, content: string): void {
+        this._write("assistant_text", "info", conversation, { content });
+    }
+
     /** 工具调用（含真实参数）。 */
     tool_call(conversation: string, name: string, args: unknown): void {
         this._write("tool_call", "info", conversation, { name, args });
