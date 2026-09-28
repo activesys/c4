@@ -177,6 +177,18 @@ export function createUploadRouter(agent: C4Agent): Router {
                     case "text":
                         sendSSE(res, null, { type: "text", content: event.content });
                         break;
+                    case "button_arm":
+                        // §2.4.4 按钮事件与 /api/chat 同构转发——上传轮闭齐缺口出方案
+                        // 时，不转发则 web 按钮永不渲染（2026-09-28 上传追加实测）
+                        sendSSE(res, null, { type: "button_arm", conversationId });
+                        break;
+                    case "button_disarm":
+                        sendSSE(res, null, {
+                            type: "button_disarm",
+                            reason: event.reason,
+                            conversationId,
+                        });
+                        break;
                     case "tool_call":
                         sendSSE(res, null, { type: "tool_call", name: event.name, args: event.args });
                         break;

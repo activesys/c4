@@ -23,7 +23,7 @@ import { PointDisplayPanel } from "./PointDisplayPanel";
 import { streamUpload, classifyFileType } from "@frontend/api/upload";
 
 export function ChatView(): JSX.Element {
-  const { status, messages, toolCards, assistantText, send, streamEcho, endEcho, planArmed, getConversationId, setConversationId } =
+  const { status, messages, toolCards, assistantText, send, streamEcho, endEcho, planArmed, getConversationId, setConversationId, setPlanArmed, setAssistantText } =
     useChatStream();
   const [draft, setDraft] = useState("");
   const uploadMessage = "请解析此文件中的设备信息";
@@ -83,10 +83,16 @@ export function ChatView(): JSX.Element {
         (ev) => {
           if (ev.type === "text") {
             // 解析结果纯文本回显（web.md §3.2.2）：累积进单个气泡，随 history 回传，
-            // 不逐段转发为对话轮次。
-            streamEcho(
-              typeof ev.data.content === "string" ? ev.data.content : "",
-            );
+            // 不逐段转发为对话轮次。同步累积 assistantText——上传轮直接产出方案时
+            // 确认按钮的句式判定依赖它（否则 button_arm 已到但按钮永不渲染）。
+            const content =
+              typeof ev.data.content === "string" ? ev.data.content : "";
+            streamEcho(content);
+            setAssistantText((prev) => prev + content);
+          } else if (ev.type === "button_arm") {
+            setPlanArmed(true);
+          } else if (ev.type === "button_disarm") {
+            setPlanArmed(false);
           } else if (ev.type === "error") {
             const msg =
               typeof ev.data.message === "string" ? ev.data.message : "文件解析失败";

@@ -210,6 +210,35 @@ export function bind_bare(key: string, bare: BareValue, pointCount: number | nul
     return null;
 }
 
+// ── 接收端口确定性捕获（2026-09-28 用例7：监听9001端口）──────
+
+/** 转发语境子句——接收端口捕获须排除（「转发到9999端口」不是接收端口） */
+const RECEIVE_PORT_EXCLUDE_RE = /转发|入库|写入|推送|发送|目标|服务器/;
+
+/**
+ * 从消息中确定性捕获数据接收（监听）端口。覆盖三种表述：
+ * 前缀「端口9001/端口：9001」、后缀「9001端口」「监听9001端口」、「监听 9001」。
+ * 含转发关键词的子句整体排除（转发端口不是接收端口，宁可放过不可错绑）。
+ */
+export function parse_receive_port(message: string): number | null {
+    const clauses = message
+        .split(/[，,。；;;\n]+/)
+        .map((c) => c.trim())
+        .filter((c) => c.length > 0 && !RECEIVE_PORT_EXCLUDE_RE.test(c));
+    for (const clause of clauses) {
+        // 前缀：「端口9001」「端口：9001」「接收端口使用7867」（端口后可有少量连接词）
+        let m = clause.match(/(?:接收|监听|接入)?端口[^0-9]{0,6}(\d{2,5})/);
+        if (m) return Number(m[1]);
+        // 后缀：「9001端口」「监听9001端口」
+        m = clause.match(/(?:监听|接收)?\s*(\d{2,5})\s*端口/);
+        if (m) return Number(m[1]);
+        // 「监听 9001」「接收 9001」
+        m = clause.match(/(?:监听|接收)\s*(\d{2,5})/);
+        if (m) return Number(m[1]);
+    }
+    return null;
+}
+
 // ── 变更流应答绑定（§2.6 裸值兜底，2026-09-27 用例10）────────
 // 变更追问（点名/英文标识/转发地址）的应答此前走全量重解析——累积文本重解析
 // 曾丢已确认字段、漏绑转发地址。此处将纯值应答直接落入追加草稿：

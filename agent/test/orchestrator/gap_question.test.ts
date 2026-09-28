@@ -13,6 +13,7 @@ import {
     bind_change_answer,
     is_forward_mirror_answer,
     parse_bare_value,
+    parse_receive_port,
 } from "../../src/orchestrator/gap_question.js";
 
 describe("ask_protocol", () => {
@@ -301,5 +302,32 @@ describe("bind_change_answer：change.addr（先点名后补地址，2026-09-27�
         const draft = [{ name: "a" }];
         expect(bind_change_answer("change.addr", "2390-2399", draft)).toBe(false);
         expect(bind_change_answer("change.addr", "192.168.1.5", draft)).toBe(false);
+    });
+});
+
+describe("parse_receive_port（接收端口确定性捕获，2026-09-28 用例7）", () => {
+    it("后缀形式「监听9001端口」→ 9001（曾漏捕）", () => {
+        expect(parse_receive_port("监听9001端口")).toBe(9001);
+        expect(
+            parse_receive_port("监听9001端口，我们需要将这些数据转发到II区服务器上"),
+        ).toBe(9001);
+    });
+
+    it("前缀形式照常捕获", () => {
+        expect(parse_receive_port("接收端口使用7867")).toBe(7867);
+        expect(parse_receive_port("端口：9001")).toBe(9001);
+        expect(parse_receive_port("监听 9001")).toBe(9001);
+    });
+
+    it("转发语境子句排除（转发端口不是接收端口）", () => {
+        expect(parse_receive_port("转发目标端口9999")).toBeNull();
+        expect(
+            parse_receive_port("转发到127.0.0.1:9900，转发端口9999"),
+        ).toBeNull();
+    });
+
+    it("无端口表述 → null", () => {
+        expect(parse_receive_port("接入1号风机的数据")).toBeNull();
+        expect(parse_receive_port("")).toBeNull();
     });
 });

@@ -53,6 +53,7 @@ import {
     bind_change_answer,
     is_forward_mirror_answer,
     parse_bare_value,
+    parse_receive_port,
     type Gap,
 } from "./gap_question.js";
 import {
@@ -600,9 +601,12 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
         text: string,
         role: "writer" | "reader",
         side_keywords: RegExp,
+        side_exclude?: RegExp,
     ): string | null {
-        const clauses = text.split(/[,,。;;\n\n]/).map((c) => c.trim()).filter((c) => c.length > 0);
-        const scoped = clauses.filter((c) => side_keywords.test(c));
+        const clauses = text.split(/[，,。；;;\n]+/).map((c) => c.trim()).filter((c) => c.length > 0);
+        const scoped = clauses.filter(
+            (c) => side_keywords.test(c) && !(side_exclude && side_exclude.test(c)),
+        );
         if (scoped.length === 0) return null;
         for (const e of registry.getServiceCatalogEntries()) {
             if (e.role !== role) continue;
@@ -628,11 +632,24 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
 
     // 显式协议声明的 token 提取（"使用 DNP3 协议"/"协议：modbus"）——
     // 仅在带侧别关键词的子句内扫描，避免把历史回显（上一步解析结果）误当本侧声明
-    function declared_protocol_token(text: string, clauseFilter: RegExp): string | null {
+    // 转发语境子句——接入侧协议捕获必须排除（「转发采用asfp2协议」含裸「采用/协议」
+    // 关键词会通过接入侧过滤，被误记为接入协议。2026-09-28 用例7 实测）
+    const FORWARD_CLAUSE_RE = /转发|入库|写入|推送|发送|目标|服务器/;
+
+    function declared_protocol_token(
+        text: string,
+        clauseFilter: RegExp,
+        clauseExclude?: RegExp,
+    ): string | null {
         const clauses = text
-            .split(/[,,。;;\n]+/)
+            .split(/[，,。；;;\n]+/)
             .map((c) => c.trim())
-            .filter((c) => c.length > 0 && clauseFilter.test(c));
+            .filter(
+                (c) =>
+                    c.length > 0 &&
+                    clauseFilter.test(c) &&
+                    !(clauseExclude && clauseExclude.test(c)),
+            );
         for (const clause of clauses) {
             const m =
                 clause.match(/([A-Za-z][A-Za-z0-9]{2,15})\s*(?:协议|规约)/) ??
@@ -793,6 +810,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             const declared = declared_protocol_token(
                 semantic,
                 /采集|接入|接收|采用|数据源|上传|设备|协议|规约/,
+                FORWARD_CLAUSE_RE,
             );
             if (declared !== null && !supported_protocol_token(declared, registry, "writer")) {
                 state.recv.protocolRaw = declared;
@@ -800,7 +818,12 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             }
         }
         if (!state.recv.protocol && !state.recv.protocolRaw && semantic.length > 0) {
-            const aliasHit = alias_match_protocol(semantic, "writer", /采集|接入|接收|采用|数据源|上传|设备|协议/);
+            const aliasHit = alias_match_protocol(
+                semantic,
+                "writer",
+                /采集|接入|接收|采用|数据源|上传|设备|协议/,
+                FORWARD_CLAUSE_RE,
+            );
             if (aliasHit) {
                 if (!state.locks.receive || state.recv.protocol === null) {
                     state.recv.protocol = aliasHit;
@@ -873,9 +896,12 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             }
         }
         if (state.recv.conn["port"] === undefined) {
-            const portM = semantic.match(/(?:端口|port)[:：]?\s*(\d{2,5})/i);
-            if (portM) {
-                state.recv.conn["port"] = Number(portM[1]);
+            // 确定性端口捕获（parse_receive_port）：前缀「端口9001」/后缀「9001端口」
+            // /「监听 9001」三种表述，含转发关键词的子句整体排除
+            //（2026-09-28 用例7：后缀「监听9001端口」曾漏捕，LLM 兜底也返回空）
+            const recvPort = parse_receive_port(semantic);
+            if (recvPort !== null) {
+                state.recv.conn["port"] = recvPort;
                 progress = true;
             }
         }
@@ -926,7 +952,9 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
         }
         if (state.recv.deviceName === null) {
             const stop = new Set(["使用", "的", "是", "叫", "不", "已", "在", "为", "与", "和"]);
-            const dm = semantic.match(/(?:设备名称|设备)[:：]?\s*([^\s，。,]{2,24})/);
+            // (?!信息)：上传信封的固定话术「请解析此文件中的设备信息」会把「信息」
+            // 误提为设备名（2026-09-28 上传实测，recap 曾显示「设备：信息」）
+            const dm = semantic.match(/(?:设备名称|设备)[:：]?\s*(?!信息)([^\s，。,]{2,24})/);
             const dm2 = dm && !stop.has(dm[1].slice(0, 2)) ? dm[1] : null;
             const hm = semantic.match(/接入(?:另一个设备|华能)?[：:]?\s*([^\s，。,]*\d+#\S+)/);
             // 常见编号表述（func_test_case 用例 1 形态）：「1号风机」「1#风机」
@@ -2991,6 +3019,12 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                             success: true,
                             bytes: parsed.length,
                         });
+                        // 即时回执（§3.5）：上传回合的回显气泡在 LLM 提取期间（20~35s）
+                        // 需有可见反馈，否则用户感知「没有反应」而重复上传
+                        yield {
+                            type: "text",
+                            content: `已收到文件（${parsed.length} 字节），正在解析设备信息…`,
+                        };
                     } catch {
                         file_error = true;
                         cfg.agentLogger.tool_result(conversation, "parse_any_file", {

@@ -75,7 +75,10 @@ export function createChatRouter(agent: C4Agent): Router {
         }
 
         // Determine conversation ID (new or resumed)
-        const conversationId = body.conversationId ?? randomUUID();
+        // （2026-09-28 修复）前端首消息传空串 conversationId——`??` 不挡空串，
+        // 会话键退化为 "" 且回传空串不被前端存储；上传轮再生成新 ID 时同会话
+        // 草稿丢失（已捕获的端口等全部清零，用例7 实测）。改用 || 兜底空串
+        const conversationId = body.conversationId || randomUUID();
 
         // Build messages for agent invocation
         const messages: Array<{ role: string; content: string }> = [];

@@ -60,6 +60,10 @@ export interface UseChatStreamReturn {
   endEcho: () => void;
   /** 确认按钮武装（v0.2.0：后端 button_arm/button_disarm 事件驱动，web.md §3.1.3） */
   planArmed: boolean;
+  /** 武装状态回写（上传轮产出方案时由 ChatView 依 button_arm 事件驱动） */
+  setPlanArmed: (armed: boolean) => void;
+  /** 确认句式判定文本回写（上传轮方案文本经回显气泡累积，按钮句式判定依赖它） */
+  setAssistantText: (updater: string | ((prev: string) => string)) => void;
   /** 读取当前会话 ID（供上传流程复用同一会话） */
   getConversationId: () => string;
   /** 设置当前会话 ID（上传流程拿到服务端回传的 ID 后回写） */
@@ -286,5 +290,5 @@ export function useChatStream(): UseChatStreamReturn {
     [],
   );
 
-  return { status, messages, toolCards, assistantText, error, send, streamEcho, endEcho, planArmed, getConversationId, setConversationId, reset };
+  return { status, messages, toolCards, assistantText, error, send, streamEcho, endEcho, planArmed, getConversationId, setConversationId, setPlanArmed, setAssistantText, reset };
 }
