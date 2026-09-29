@@ -118,6 +118,9 @@ interface SessionState {
     pendingGap: string | null;
     /** 累积用户消息原文（catch-up 补提取，2026-09-27 用例6）：闸门后到时对累积文本补跑 */
     userTexts: string[];
+    /** 会话内最近一次上传文件的解析结果（2026-09-29 用例11 缺陷B）：file_data 原为回合
+     *  局部变量，协议等闸门后到时补提取拿不到已上传的点表，导致重复追问。新上传覆盖 */
+    fileTable: string | null;
     /** 变更流程追问中（缺点名/缺转发地址/待选设备）——应答回合强制走变更分叉 */
     pendingChangeAsk: boolean;
     /** 变更流追加草稿（单调累积，addr 为键——已确认字段不被后续轮次重解析覆盖，
@@ -141,6 +144,7 @@ function fresh_state(): SessionState {
         turnSiteCheck: null,
         pendingGap: null,
         userTexts: [],
+        fileTable: null,
         pendingChangeAsk: false,
         changeAddPoints: null,
         changeTargetId: null,
@@ -153,6 +157,13 @@ const CANCEL_WORDS = new Set(["取消", "算了", "不接了", "放弃", "停止
 // 转发意图：肯定表述命中且否定表述未命中（"不需要转发/仅采集"不激活转发链）
 const FORWARD_ON_RE = /转发|入库|写入|上传|推送|发送到/;
 const FORWARD_OFF_RE = /不需要转发|不转发|无需转发|仅采集|只采集|不用转发/;
+// 否定短语剥除后再判肯定语境：OFF 短语（「不需要转发」）本身含「转发」字样，直接用
+// FORWARD_ON_RE 判定会把拒绝误判为肯定（2026-09-29 用例11 拒绝转发应答处理）
+function forward_on_without_off(text: string): boolean {
+    return FORWARD_ON_RE.test(
+        text.replace(/不需要转发|不转发|无需转发|不用转发|仅采集|只采集/g, ""),
+    );
+}
 
 // catch-up 句级作用域筛选（2026-09-27 用例6）：逐轮提取只看当前消息，闸门后到的
 // 信息需对累积文本补提取——但累积文本常同时含接收表与转发表，9a/规则9 的提示词
@@ -192,7 +203,10 @@ const FORWARD_SIDE_RULES =
     "（「点表与I区/采集/接收一致」）而无具体地址数字时——禁止把采集侧 addr（或任何" +
     "未经用户给出的数字）复制为转发 addr，此时 points 返回空数组 []，reason 注明" +
     "「用户未提供转发地址，需向用户询问」（上游会以缺口追问；等价描述由上游在缺口" +
-    "应答层受理，走方案层与采集一致的确定性推导）。";
+    "应答层受理，走方案层与采集一致的确定性推导）。" +
+    "例外——输入含 <file_data> 时：该文件是用户针对转发点表的显式提供（用户在被询问" +
+    "转发点表时上传），文件中的地址列即用户给出的转发地址，逐行提取为各点的 addr" +
+    "（点名/名称列忽略，转发点无点名），此情形不算借用采集地址。";
 
 // ── 小工具 ─────────────────────────────────────────────────
 
@@ -864,6 +878,16 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
         // 裸 IP 兜底捕获——意图为真时消息中的地址属转发目标，不得误入采集侧连接
         // （func_test_case 用例 4）。
         let fwdIntentHit = FORWARD_ON_RE.test(semantic);
+        // 追问应答闸门（2026-09-29 用例11）：上轮问的是「转发协议与目标」（平台要求
+        // writer/reader 成对，纯采集无法生效），本轮应答除明确拒绝外一律视为表达转发
+        // 意图——纯协议名/纯地址应答不含转发关键词，不能依赖 LLM 意图判定
+        if (
+            !fwdIntentHit &&
+            state.pendingGap === "fwd.required" &&
+            !FORWARD_OFF_RE.test(semantic)
+        ) {
+            fwdIntentHit = true;
+        }
         if (!fwdIntentHit && !FORWARD_OFF_RE.test(semantic) && fwdIntentLlm) {
             const v = await fwdIntentLlm;
             fwdIntentHit = v !== null && (v["intent"] === true || v["intent"] === "true");
@@ -976,7 +1000,11 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
 
         // 显式否认转发 → 回退（即使用户此前提过）
         // （转发意图的正向判定已在采集侧连接捕获前完成——意图为真时消息中的地址属转发目标）
-        if (state.forwardIntent && FORWARD_OFF_RE.test(semantic) && !FORWARD_ON_RE.test(semantic)) {
+        if (
+            state.forwardIntent &&
+            FORWARD_OFF_RE.test(semantic) &&
+            !forward_on_without_off(semantic)
+        ) {
             state.forwardIntent = false;
             state.fwd = fresh_side();
         }
@@ -1035,9 +1063,13 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                         "point_field_hints"
                     ] ?? {},
                 );
+                // 文件数据通道（2026-09-29 用例11 缺陷B）：本回合新上传优先，否则复用
+                // 会话内已解析文件（行737 的草稿重置仍只由当回合新文件触发）——协议等
+                // 闸门后到时，补提取不再丢已上传的点表
+                const fileTable = file_data ?? state.fileTable;
                 const input_text =
-                    (file_data !== null && filePoints === null
-                        ? `<file_data>\n${file_data.slice(0, 4000)}\n</file_data>\n`
+                    (fileTable !== null && filePoints === null
+                        ? `<file_data>\n${fileTable.slice(0, 4000)}\n</file_data>\n`
                         : "") +
                     // catch-up（2026-09-27 用例6）：协议后到时对接收侧句子补提取，
                     // 不把含转发关键词的句子喂给 receive 提取器（防串侧）
@@ -1103,15 +1135,53 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
 
         // 阶段6 转发点表：确定性地址范围展开优先——阿拉伯数字范围（「点表5000~5009」）
         // 与自然语言起始地址（「从一万开始」→ 10000 起，func_test_case 用例 5）。用户
-        // 显式给出的范围总是采纳（含对既有值的修正，不静默吞）；无范围信息且尚未提取
-        // 时才交 LLM——point_prompt（side=forward）禁止以采集点表编造转发地址（9a 条），
-        // 缺失即走缺口追问
+        // 显式给出的范围总是采纳（含对既有值的修正，不静默吞）；无范围信息时 influxdb
+        // 走确定性推导、其余协议交 LLM——文本重述或 <file_data> 文件通道（2026-09-29
+        // 用例11 缺陷C）。point_prompt（side=forward）禁止以采集点表编造转发地址
+        //（9a 条），空结果不落槽位，缺失即走缺口追问
         if (state.forwardIntent && state.fwd.protocol && state.recv.points) {
             const n = state.recv.points.length;
+            const fwdProtocol = state.fwd.protocol;
             // catch-up（2026-09-27 用例6）：确定性扫描扩展到「含转发关键词的句子」的
             // 累积文本——当前消息优先（显式重述总是采纳），无命中再扫历史转发句，
             // 避免把接收侧点表表述误认成转发地址
             const fwdScopedNow = fwdScoped ? `${semantic}\n${fwdScoped}` : semantic;
+            // 转发点表 LLM 提取（首提/重提共用）：输入只能是用户对转发侧的显式表述
+            //（文本重述或文件通道），空结果不落槽位
+            const extract_fwd_points = async (input: string): Promise<void> => {
+                const hit = entry_of_side(state.fwd, "reader");
+                if (!hit) {
+                    return;
+                }
+                const fields = (hit.entry?.point_schema?.fields ?? []).map(
+                    (f: { name: string }) => f.name,
+                );
+                const hints = JSON.stringify(
+                    (hit.entry?.prompt_hints as Record<string, unknown> | undefined)?.[
+                        "point_field_hints"
+                    ] ?? {},
+                );
+                const r = await llm_json(
+                    "point_prompt.txt",
+                    {
+                        side: "forward",
+                        protocol: fwdProtocol,
+                        point_fields: JSON.stringify(fields),
+                        point_field_hints: hints,
+                        side_rules: FORWARD_SIDE_RULES,
+                    },
+                    input,
+                    conversation,
+                );
+                const pts =
+                    r && Array.isArray(r["points"])
+                        ? (r["points"] as Array<Record<string, unknown>>)
+                        : null;
+                if (pts && pts.length > 0) {
+                    state.fwd.points = pts;
+                    progress = true;
+                }
+            };
             const rangeM = fwdScopedNow.match(
                 /(?:转发地址|转发点表|点表)[^\d\n]{0,6}(\d{2,7})(?![个点])\s*(?:到|~|-|—|开始)?\s*(\d+)?/,
             );
@@ -1141,35 +1211,20 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                         addr: p["addr"],
                     }));
                     progress = true;
-                }
-            } else {
-                const hit = entry_of_side(state.fwd, "reader");
-                if (hit) {
-                    const fields = (hit.entry?.point_schema?.fields ?? []).map(
-                        (f: { name: string }) => f.name,
-                    );
-                    const hints = JSON.stringify(
-                        (hit.entry?.prompt_hints as Record<string, unknown> | undefined)?.[
-                            "point_field_hints"
-                        ] ?? {},
-                    );
-                    const r = await llm_json(
-                        "point_prompt.txt",
-                        {
-                            side: "forward",
-                            protocol: state.fwd.protocol,
-                            point_fields: JSON.stringify(fields),
-                            point_field_hints: hints,
-                            side_rules: FORWARD_SIDE_RULES,
-                        },
-                        semantic,
-                        conversation,
-                    );
-                    if (r && Array.isArray(r["points"]) && (r["points"] as unknown[]).length > 0) {
-                        state.fwd.points = r["points"] as Array<Record<string, unknown>>;
-                        progress = true;
+                } else {
+                    // 文件数据通道（2026-09-29 用例11 缺陷C）：文本无显式范围时注入
+                    // <file_data>——被问「转发点表」时上传点表文件是常见应答。仅限本回合
+                    // 新上传（2026-09-29 用户裁定：会话内历史文件不得自动充作转发点表，
+                    // 否则转发点表缺口被静默跳过、不再询问；接入侧 catch-up 仍可用
+                    // state.fileTable，两侧语义不同）
+                    if (file_data !== null) {
+                        await extract_fwd_points(
+                            `<file_data>\n${file_data.slice(0, 4000)}\n</file_data>\n${fwdScopedNow}`,
+                        );
                     }
                 }
+            } else {
+                await extract_fwd_points(semantic);
             }
         }
 
@@ -1432,6 +1487,20 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             }
         }
 
+        // 平台硬约束（2026-09-29 用例11 实测）：c4_shm_manager 要求设备配置 writer/reader
+        // 成对（CONFIG_MISSING_SECTION），纯采集方案必然执行失败——接收点表就绪而用户无
+        // 转发意向、且无既有转发链路可沿用时，转发是必答缺口，不再放行只采集方案
+        if (
+            state.recv.points !== null &&
+            !state.forwardIntent &&
+            find_existing_reader_info(state) === null
+        ) {
+            gaps.push({
+                key: "fwd.required",
+                text: "转发协议与转发目标（平台要求数据点必须同时配置转发，不支持只采集）",
+                ask: "采集数据需要同时配置转发。请提供转发协议与转发目标，例如：转发采用asfp2协议到127.0.0.1:9900",
+            });
+        }
         if (state.forwardIntent) {
             if (!state.fwd.protocol) recap.push("转发：意向已明确，细节待补充");
             const fg = side_gaps("转发", state.fwd, "reader");
@@ -1694,6 +1763,19 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 plan_device_points(state, ft);
             }
             forward_targets.push(ft);
+        }
+
+        // 平台硬约束兜底（2026-09-29 用例11）：缺转发目标的纯采集方案不得进入确认——
+        // 正常路径由 compute_gaps 的 fwd.required 缺口提前追问，此处防两处判定不一致时
+        // 漏拦（确认后执行才报 CONFIG_MISSING_SECTION 的体验不可接受）
+        if ((state.recv.points ?? []).length > 0 && forward_targets.length === 0) {
+            return {
+                plan: {},
+                display: "",
+                issue:
+                    "采集数据需要同时配置转发（平台要求数据点必须成对配置转发，不支持只采集）。" +
+                    "请提供转发协议与转发目标，例如：转发采用asfp2协议到127.0.0.1:9900。",
+            };
         }
 
         // 一一对应强制（agent.md §3.2.1.3b，2026-09-23 裁定）：采集/转发点表必须
@@ -2748,6 +2830,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 state.pendingChangeAsk = false;
                 state.changeAddPoints = null;
                 state.userTexts = [];
+                state.fileTable = null;
                 stateWriter.setAccessPlan(false);
                 stateWriter.setPhase("idle");
                 cfg.agentLogger.phase(conversation, "idle");
@@ -2897,6 +2980,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 state.pendingChangeAsk = false;
                 state.changeAddPoints = null;
                 state.userTexts = [];
+                state.fileTable = null;
                 stateWriter.setPhase("idle");
                 cfg.agentLogger.phase(conversation, "idle");
                 stateWriter.setAccessPlan(false);
@@ -3015,6 +3099,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                     try {
                         const parsed = parse_any_file(pathM[1]);
                         file_data = parsed.length > 8000 ? parsed.slice(0, 8000) : parsed;
+                        state.fileTable = file_data;
                         cfg.agentLogger.tool_result(conversation, "parse_any_file", {
                             success: true,
                             bytes: parsed.length,
@@ -3134,6 +3219,23 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                         });
                     }
                 }
+            }
+
+            // 拒绝转发应答（2026-09-29 用例11）：平台要求 writer/reader 成对，只采集无法
+            // 生效——明确告知约束并引导补充，而非重复追问至收摊
+            if (
+                !extraction_progress &&
+                state.pendingGap === "fwd.required" &&
+                FORWARD_OFF_RE.test(userText) &&
+                !forward_on_without_off(userText)
+            ) {
+                yield {
+                    type: "text",
+                    content:
+                        "平台要求数据点必须同时配置转发，无法只采集不转发。请提供转发协议与转发目标（例如：转发采用asfp2协议到127.0.0.1:9900）；或回复「取消」结束本次接入。",
+                };
+                yield { type: "done" };
+                return;
             }
 
             // ⑦ 缺口计算 + 单缺口顺序提问（提问即终局，§2.6）

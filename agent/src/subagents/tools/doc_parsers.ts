@@ -19,7 +19,25 @@ interface TabularData {
 function parse_csv_raw(content: string): TabularData {
     const lines = content.split(/\r?\n/).filter((l) => l.trim().length > 0);
     if (lines.length === 0) return { headers: [], rows: [], rowCount: 0 };
-    const headers = lines[0]!.split(",").map((h) => h.trim());
+    const first = lines[0]!.split(",").map((h) => h.trim());
+    // 无表头检测（2026-09-29 用例11）：点表文件常无表头行，首行即数据（如
+    // 「1000,风速」）——被当表头会吞掉第一个点（10 点解析成 9 点）。首格为纯数字
+    // （地址/序号值，列名几乎不可能是纯数字）时判定为无表头，整表按数据行处理，
+    // 表头置中性列名 col1..colN（列语义由消费方按值推断）
+    if (/^\d+$/.test(first[0] ?? "")) {
+        const rows: string[][] = [];
+        for (const line of lines) {
+            const cols = line.split(",").map((c) => c.trim());
+            if (cols.length === 0 || cols.every((c) => c.length === 0)) continue;
+            rows.push(cols);
+        }
+        return {
+            headers: (rows[0] ?? []).map((_, i) => `col${i + 1}`),
+            rows,
+            rowCount: rows.length,
+        };
+    }
+    const headers = first;
     const rows: string[][] = [];
     for (let i = 1; i < lines.length; i++) {
         const cols = lines[i]!.split(",").map((c) => c.trim());
