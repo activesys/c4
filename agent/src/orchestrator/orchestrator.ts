@@ -616,10 +616,13 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
         role: "writer" | "reader",
         side_keywords: RegExp,
         side_exclude?: RegExp,
+        side_keep?: RegExp,
     ): string | null {
         const clauses = text.split(/[，,。；;;\n]+/).map((c) => c.trim()).filter((c) => c.length > 0);
         const scoped = clauses.filter(
-            (c) => side_keywords.test(c) && !(side_exclude && side_exclude.test(c)),
+            (c) =>
+                side_keywords.test(c) &&
+                !(side_exclude && side_exclude.test(c) && !(side_keep && side_keep.test(c))),
         );
         if (scoped.length === 0) return null;
         for (const e of registry.getServiceCatalogEntries()) {
@@ -649,11 +652,18 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
     // 转发语境子句——接入侧协议捕获必须排除（「转发采用asfp2协议」含裸「采用/协议」
     // 关键词会通过接入侧过滤，被误记为接入协议。2026-09-28 用例7 实测）
     const FORWARD_CLAUSE_RE = /转发|入库|写入|推送|发送|目标|服务器/;
+    // 双侧同时声明（2026-09-29 用例11 循环实测：「接收和转发都是用asfp2协议」单子句
+    // 同时含接收与转发表述——被 FORWARD_CLAUSE_RE 整句排除，接收侧的显式声明丢失）。
+    // 命中本模式的子句不被转发排除；纯转发子句（「接入成功后转发采用asfp2协议」无
+    // 并列/概括词）仍照旧排除，防止转发声明误入接收侧
+    const BOTH_SIDES_RE =
+        /(?:(?:接收|采集|接入|数据源)[^\d]{0,6}(?:和|与|及|都|均|同时)[^\d]{0,6}(?:转发|发送|上传|入库|推送))|(?:(?:转发|发送|上传|入库|推送)[^\d]{0,6}(?:和|与|及|都|均|同时)[^\d]{0,6}(?:接收|采集|接入|数据源))|都是用|均用/;
 
     function declared_protocol_token(
         text: string,
         clauseFilter: RegExp,
         clauseExclude?: RegExp,
+        clauseKeep?: RegExp,
     ): string | null {
         const clauses = text
             .split(/[，,。；;;\n]+/)
@@ -662,7 +672,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 (c) =>
                     c.length > 0 &&
                     clauseFilter.test(c) &&
-                    !(clauseExclude && clauseExclude.test(c)),
+                    !(clauseExclude && clauseExclude.test(c) && !(clauseKeep && clauseKeep.test(c))),
             );
         for (const clause of clauses) {
             const m =
@@ -819,33 +829,70 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
               ).catch(() => null)
             : null;
 
+        // 裸协议名快捷命中（2026-09-29 用例11 循环实测）：整条消息恰为支持列表中的
+        // 协议名（应答协议缺口的「asfp2」形态）——L0/L1 要求子句触发词、L2 可能被
+        // protocolRaw 关死，裸名曾落在三级漏斗之外使缺口永不闭合。精确等值判定，
+        // 含变体（Modbus RTU 等）仍交 L2 按 match_hints 裁决
+        const semanticTrim = semantic.trim().toLowerCase();
+        if (!state.recv.protocol && !state.locks.receive && semanticTrim.length > 0) {
+            const bareRecv = protocol_candidates("writer").find(
+                (p) => p.toLowerCase() === semanticTrim,
+            );
+            if (bareRecv !== undefined) {
+                state.recv.protocol = bareRecv;
+                state.recv.protocolRaw = null;
+                progress = true;
+            }
+        }
+        if (
+            state.forwardIntent &&
+            !state.fwd.protocol &&
+            !state.locks.forward &&
+            semanticTrim.length > 0
+        ) {
+            const bareFwd = protocol_candidates("reader").find(
+                (p) => p.toLowerCase() === semanticTrim,
+            );
+            if (bareFwd !== undefined) {
+                state.fwd.protocol = bareFwd;
+                state.fwd.protocolRaw = null;
+                progress = true;
+            }
+        }
+
         // 阶段2 接入协议（L0 确定性：显式声明 token 对齐支持列表 → 别名预匹配 → 提示词）
         if (!state.recv.protocol && semantic.length > 0) {
             const declared = declared_protocol_token(
                 semantic,
                 /采集|接入|接收|采用|数据源|上传|设备|协议|规约/,
                 FORWARD_CLAUSE_RE,
+                BOTH_SIDES_RE,
             );
             if (declared !== null && !supported_protocol_token(declared, registry, "writer")) {
                 state.recv.protocolRaw = declared;
                 progress = true;
             }
         }
-        if (!state.recv.protocol && !state.recv.protocolRaw && semantic.length > 0) {
+        if (!state.recv.protocol && semantic.length > 0) {
             const aliasHit = alias_match_protocol(
                 semantic,
                 "writer",
                 /采集|接入|接收|采用|数据源|上传|设备|协议/,
                 FORWARD_CLAUSE_RE,
+                BOTH_SIDES_RE,
             );
             if (aliasHit) {
                 if (!state.locks.receive || state.recv.protocol === null) {
                     state.recv.protocol = aliasHit;
+                    state.recv.protocolRaw = null;
                     progress = true;
                 }
             }
         }
-        if (!state.recv.protocol && !state.recv.protocolRaw && semantic.length > 0) {
+        // L2 门不含 protocolRaw（2026-09-29 用例11 循环实测）：raw 有值（曾报不支持
+        // 的名字）时关死 LLM 提取器，用户此后正确声明（裸「asfp2」/「接收和转发都是
+        // 用asfp2」）无法覆盖，缺口永不闭合——有效声明必须能顶掉无效 raw
+        if (!state.recv.protocol && semantic.length > 0) {
             const r = await llm_json(
                 "protocol_prompt.txt",
                 {
@@ -866,6 +913,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                         // §2.4.1 锁后变更 → 丢弃（拒绝文案在缺口/回复层）
                     } else {
                         state.recv.protocol = canonical;
+                        state.recv.protocolRaw = null;
                         progress = true;
                     }
                 } else if (match === "not_in_list") {
@@ -1009,8 +1057,9 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             state.fwd = fresh_side();
         }
 
-        // 阶段5 转发协议（L0 别名预匹配 → 提示词）
-        if (state.forwardIntent && !state.fwd.protocol && !state.fwd.protocolRaw) {
+        // 阶段5 转发协议（L0 别名预匹配 → 提示词）。门不含 protocolRaw（与阶段2 同理，
+        // 2026-09-29 用例11：有效声明必须能顶掉曾报不支持的 raw，否则缺口死锁）
+        if (state.forwardIntent && !state.fwd.protocol) {
             const declaredF = declared_protocol_token(
                 semantic,
                 /转发|入库|写入|上传|推送|发送|目标|服务器/,
@@ -1020,14 +1069,15 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 progress = true;
             }
         }
-        if (state.forwardIntent && !state.fwd.protocol && !state.fwd.protocolRaw) {
+        if (state.forwardIntent && !state.fwd.protocol) {
             const fwdAlias = alias_match_protocol(semantic, "reader", /转发|入库|写入|上传|推送|发送/);
             if (fwdAlias) {
                 state.fwd.protocol = fwdAlias;
+                state.fwd.protocolRaw = null;
                 progress = true;
             }
         }
-        if (state.forwardIntent && !state.fwd.protocol && !state.fwd.protocolRaw) {
+        if (state.forwardIntent && !state.fwd.protocol) {
             const r = await llm_json(
                 "protocol_prompt.txt",
                 {
@@ -1043,6 +1093,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 const canonical = r["canonical_name"];
                 if (match === "matched" && typeof canonical === "string") {
                     state.fwd.protocol = canonical;
+                    state.fwd.protocolRaw = null;
                     progress = true;
                 } else if (match === "not_in_list") {
                     state.fwd.protocolRaw = String(r["user_protocol"] ?? "未知协议");
@@ -1339,7 +1390,12 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
         // 校验类缺口（字段不完整/数量不符/点表问题）文案本身已具体，ask 即 text
         const ask_of = (key: string, text: string): string => {
             if (key.endsWith(".protocol")) {
-                return ask_protocol(label, protocol_candidates(role));
+                // 已捕获到不支持协议名时，ask 必须告知「X 不支持」而非通用文案——
+                // 2026-09-29 用例11 循环实测：用户答了「abc」只看到千篇一律的
+                // 「请提供接入协议」，不知错在哪，回「我已经说过了」无法收敛
+                return side.protocolRaw
+                    ? text
+                    : ask_protocol(label, protocol_candidates(role));
             }
             if (key === `${keyPrefix}.points`) {
                 const entry = entry_of_side(side, role);
