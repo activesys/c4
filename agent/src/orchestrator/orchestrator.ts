@@ -165,6 +165,18 @@ function forward_on_without_off(text: string): boolean {
     );
 }
 
+// 删除意图的点级线索检测（2026-10-01 fail-safe 重写）：设备名模式先剥除（「10号风机」
+// 的编号不是点号），其余任意 点/地址/点名/两位以上数字 均视为点级线索——设备级删除
+// 只允许零线索的纯设备表述，识别失败必须交 LLM 兜底或澄清，不得默认成整设备删除
+//（「大气压强点」「1013（大风告警点）」两连误删事故的根因即白名单漏句式后短路）
+function deletion_pointish(text: string): boolean {
+    const t = text.replace(
+        /(\d+)(?:#|号)?(风机|主变|逆变器|测风塔|机组|数据源|变压器|设备)/g,
+        "",
+    );
+    return /点|地址|点名|\d{2,7}/.test(t);
+}
+
 // catch-up 句级作用域筛选（2026-09-27 用例6）：逐轮提取只看当前消息，闸门后到的
 // 信息需对累积文本补提取——但累积文本常同时含接收表与转发表，9a/规则9 的提示词
 // 纪律压不住小模型（实测 receive 侧把「点表5000~5009」当接收表提取）。两侧各自
@@ -2081,7 +2093,6 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             }
         }
         if (!target) {
-            console.error(`[det] target 未解析 (semantic=${JSON.stringify(semantic.slice(0, 40))}, devices=${JSON.stringify(devices.map((d) => String(d["id"])))})`);
             const deleteish = /停用|删除|移除|删了|删掉/.test(semantic) &&
                 !/数据点|采集点|点位|的点|点[（(]|点名|地址\s*\d/.test(semantic);
             if (deleteish) {
@@ -2103,7 +2114,6 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
         }
         const targetId = String(target["id"]);
         const points = (target["points"] ?? []) as Array<Record<string, unknown>>;
-        console.error(`[det] target=${targetId} pts=${JSON.stringify(points)} mentions=${/数据点|采集点|点位|的点|点[（(]|点名|地址\s*\d/.test(semantic)}`);
 
         // 点参数修改："windspeed 的(寄存器)地址(从 1000)改为 1010"
         const puM = semantic.match(
@@ -2144,10 +2154,11 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             }
         }
 
-        // 整实例删除："停用 2#风机" / "删除 2#风机"（点级删除表述不在此列——
-        // 「塔筒温度点(地址1006)」「点位1006」「点名xx」等均为点级线索）
-        const mentionsPoint =
-            /数据点|采集点|点位|的点|点[（(]|点名|地址\s*\d/.test(semantic);
+        // 删除意图分类（2026-10-01 fail-safe 重写，两连整设备误删事故驱动）：
+        // 设备级删除必须零点级线索（deletion_pointish）；含线索而解析不出具体点时
+        // return null 交 LLM 兜底——识别失败不得默认成破坏性最大的解释
+        //（「大气压强点」「1013（大风告警点）」曾短路成整实例删除）
+        const mentionsPoint = deletion_pointish(semantic);
         if (/停用|删除|移除/.test(semantic) && !mentionsPoint) {
             return {
                 intent: "delete",
@@ -2162,11 +2173,84 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
         // 直接定位真实点 id，避免 change_prompt 二次翻译点名造成 id 错位
         if (/停用|删除|移除/.test(semantic) && mentionsPoint) {
             const addrM = semantic.match(/地址[（(：:]?\s*(\d{2,7})/);
-            console.error(`[det] addrM=${addrM ? addrM[1] : "null"}`);
-            if (addrM) {
-                const aid = Number(addrM[1]);
+            // 裸点号+（点名）形态（2026-10-01 事故句）：「删除1#风机的1013（大风告警点）」
+            // ——无「地址」二字、点后跟），正则白名单曾漏判
+            const parenM = addrM
+                ? null
+                : semantic.match(/(\d{2,7})\s*[（(]\s*([^（）()]{1,16}?)\s*[）)]/);
+            // 冒号形态（2026-10-01 用户裁定两种都要适配）：「1002:风向」与「风向:1002」
+            // ——数字组为地址、文本组为点名；尾部「N点」的点字可跟在任一侧。
+            // 在剥除删除动词后的文本上匹配、名字组排除 的 字——「删除1#风机的风向:1002」
+            // 的名字不得吞入设备前缀
+            const delStripped = semantic.replace(/删除|移除|停用/g, "");
+            const colonM =
+                addrM || parenM
+                    ? null
+                    : (delStripped.match(
+                          /(\d{2,7})\s*[:：]\s*([^\s，。；：（）():：]{2,16}?)\s*点?[。.？！]?\s*$/,
+                      ) ??
+                      delStripped.match(
+                          /([^\s，。；：（）():：的]{2,16}?)\s*点?\s*[:：]\s*(\d{2,7})\s*点?[。.？！]?\s*$/,
+                      ));
+            if (addrM || parenM || colonM) {
+                const aid = addrM
+                    ? Number(addrM[1])
+                    : parenM
+                      ? Number(parenM[1])
+                      : /^\d{2,7}$/.test(String(colonM![1]))
+                        ? Number(colonM![1])
+                        : Number(colonM![2]);
                 const pt = points.find((p) => Number(p["addr"]) === aid);
                 if (pt && pt["id"]) {
+                    // 点名-地址矛盾检测（2026-10-01 用户测试）：消息同时给出点名与地址、
+                    // 两者指向不同点时，不得按地址静默删错点——列出矛盾请用户裁定。
+                    // 点名来源：地址形态取「…点（地址N」紧邻段（剥删除动词），括号/冒号
+                    // 形态取括号内/冒号侧全文；尾部 点 字两侧对齐后比对
+                    const nameM = addrM
+                        ? semantic
+                              .replace(/删除|移除|停用/g, "")
+                              .match(/([^\s，。；（）()的]{2,16}?)点?\s*[（(]?\s*地址\s*[（(：:]?\s*\d/)
+                        : null;
+                    const saidName = addrM
+                        ? (nameM ? nameM[1] : "")
+                        : parenM
+                          ? String(parenM[2]).trim()
+                          : /^\d{2,7}$/.test(String(colonM![1]))
+                            ? String(colonM![2]).trim()
+                            : String(colonM![1]).trim();
+                    const stripPoint = (s: string): string => s.replace(/点$/, "");
+                    const realName = String(pt["name"] ?? "");
+                    const realId = String(pt["id"] ?? "").toLowerCase();
+                    if (
+                        saidName !== "" &&
+                        realName !== "" &&
+                        saidName !== realName &&
+                        stripPoint(saidName) !== stripPoint(realName) &&
+                        saidName.toLowerCase() !== realId &&
+                        stripPoint(saidName).toLowerCase() !== realId
+                    ) {
+                        const real = points.find(
+                            (p) => String(p["name"] ?? "") === saidName,
+                        );
+                        const table2 = points
+                            .map((p) => `${String(p["addr"])}（${String(p["name"] ?? "")}）`)
+                            .join("、");
+                        // 明确二选一指引（2026-10-01：矛盾拦截后用户面对死路，确认按钮
+                        // 点击落入「没有待执行方案」）——选项措辞与确定性解析的可行
+                        // 表述一致（删除地址N的点 / 删除X点），确保回复后能直接闭环
+                        const opts = [`· 如要删除地址 ${aid} 的点，请回复「删除地址${aid}的点」`];
+                        if (real) {
+                            opts.push(
+                                `· 如要删除「${saidName}」，请回复「删除${saidName}点」（其地址是 ${String(real["addr"])}）`,
+                            );
+                        }
+                        return {
+                            intent: "point_not_found",
+                            steps: [],
+                            display:
+                                `地址 ${aid} 对应的点「${realName}」与您提到的点名「${saidName}」不一致，未执行删除。\n${opts.join("\n")}\n或回复「取消」结束本次变更。当前点表：${table2}。`,
+                        };
+                    }
                     return {
                         intent: "delete_points",
                         target_id: targetId,
@@ -2187,6 +2271,64 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                     display: `没有找到地址 ${aid} 对应的数据点——该点不存在或已被删除。当前点表：${table}。`,
                 };
             }
+            // 无地址的点级删除（2026-10-01 大气压强事故补齐）：「删除…大气压强点」
+            // 按点名直接定位；点表中无此名 → 确定性回复「点不存在」，不交 LLM 兜底
+            //（change_prompt 曾把带「点」字样的消息误归为整实例删除）
+            const nameOnly = semantic
+                .replace(/删除|移除|停用/g, "")
+                .match(/(?:的)?([^\s，。；（）()的]{2,16}?)点[。.？！]?\s*$/);
+            if (nameOnly) {
+                const said = nameOnly[1];
+                // 纯数字「名字」（「删除…1002点」）按地址处理（2026-10-01 冒号形态
+                // 同批裁定：数字在删除表述里始终是地址不是点名）
+                if (/^\d{2,7}$/.test(said)) {
+                    const aid = Number(said);
+                    const ptA = points.find((p) => Number(p["addr"]) === aid);
+                    if (ptA && ptA["id"]) {
+                        return {
+                            intent: "delete_points",
+                            target_id: targetId,
+                            instance_fields: {},
+                            point_updates: [],
+                            points: [{ id: String(ptA["id"]) }],
+                            add_points: [],
+                        };
+                    }
+                    const tableA = points
+                        .map((p) => `${String(p["addr"])}（${String(p["name"] ?? "")}）`)
+                        .join("、");
+                    return {
+                        intent: "point_not_found",
+                        steps: [],
+                        display: `没有找到地址 ${aid} 对应的数据点——该点不存在或已被删除。当前点表：${tableA}。`,
+                    };
+                }
+                const pt = points.find(
+                    (p) =>
+                        String(p["name"] ?? "") === said ||
+                        String(p["id"] ?? "").toLowerCase() === said.toLowerCase(),
+                );
+                if (pt && pt["id"]) {
+                    return {
+                        intent: "delete_points",
+                        target_id: targetId,
+                        instance_fields: {},
+                        point_updates: [],
+                        points: [{ id: String(pt["id"]) }],
+                        add_points: [],
+                    };
+                }
+                const table3 = points
+                    .map((p) => `${String(p["addr"])}（${String(p["name"] ?? "")}）`)
+                    .join("、");
+                return {
+                    intent: "point_not_found",
+                    steps: [],
+                    display: `没有找到名为「${said}」的数据点——该点不存在或已被删除。当前点表：${table3}。`,
+                };
+            }
+            // 点级线索存在但解析不出具体点（未知句式）→ 交 LLM 兜底，不得短路成整设备
+            return null;
         }
         return null;
     }
@@ -2335,8 +2477,11 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             }
         }
 
-        // 确定性解析优先（常见表述），LLM change_prompt 兜底长尾表述
-        let r = deterministic_change_parse(semantic, devices);
+        // 确定性解析优先（常见表述），LLM change_prompt 兜底长尾表述。
+        // 确定性分支只扫当前消息（2026-10-01 删除循环实测）：catch-up 累积全文曾使
+        // 历史消息里的「地址3000」在后续每轮删除中被重新扫中，确定性短路把任何新
+        // 请求都回放成同一条「没有找到地址 3000」——历史上下文只供 LLM 兜底使用
+        let r = deterministic_change_parse(clean_user_text(user_text), devices);
         if (r === null) {
             r = await llm_json(
                 "change_prompt.txt",
@@ -2379,6 +2524,17 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             return { steps: [], display: String(r["display"] ?? "") };
         }
         if (!action) return null;
+        // fail-safe 闸（2026-10-01 两连整设备误删）：整实例删除与当前消息的点级线索
+        // 矛盾 → 不出方案改澄清。确定性分类收紧后本闸主要拦 LLM 兜底——change_prompt
+        // 也可能把点级删除误归为设备级（「大气压强点」首例）——与判断来源无关一律拦截
+        if (action === "delete" && deletion_pointish(clean_user_text(user_text))) {
+            return {
+                steps: [],
+                display:
+                    "您要删除整个设备，还是删除设备上的某个数据点？\n· 删除整个设备：请回复「删除 设备名」（如：删除 1#风机）\n· 删除某个数据点：请说明点名或地址（如：删除塔筒温度点（地址1006））",
+                ask: true,
+            };
+        }
         const targetId = String(r["target_id"] ?? "");
         // 明确编号但设备不存在（func_test_case 用例 27）→ 直接回复不存在
         if (targetId.startsWith("__missing__")) {
@@ -2434,7 +2590,21 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 } else if (action === "delete_points") {
             const pts = (r["points"] ?? []) as Array<Record<string, unknown>>;
             if (pts.length === 0) return null;
-            const delIds = pts.map((p) => String(p["id"]));
+            // id 存在性校验（2026-10-01）：LLM 兜底可能虚构不存在的点 id，直通 executor
+            // 会执行失败回滚——先过滤，全部不存在时直接回复点不存在（附当前点表）
+            const devPts = (dev["points"] ?? []) as Array<Record<string, unknown>>;
+            const delIds = pts
+                .map((p) => String(p["id"]))
+                .filter((id) => devPts.some((p) => String(p["id"] ?? "") === id));
+            if (delIds.length === 0) {
+                const table = devPts
+                    .map((p) => `${String(p["addr"])}（${String(p["name"] ?? "")}）`)
+                    .join("、");
+                return {
+                    steps: [],
+                    display: `没有找到您提到的数据点——该点不存在或已被删除。当前点表：${table}。`,
+                };
+            }
             changes.push({
                 action: "delete",
                 service_type: svcType,
@@ -2864,7 +3034,11 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                     yield { type: "done" };
                     return;
                 }
-                yield { type: "text", content: "当前没有待执行的接入方案。请先提供设备信息，我生成方案后再确认。" };
+                yield {
+                    type: "text",
+                    content:
+                        "当前没有待执行的方案。如需删除或修改数据点，请直接说明（如：删除塔筒温度点）；如需接入新设备，请提供设备信息。",
+                };
                 yield { type: "done" };
                 return;
             }
@@ -3107,14 +3281,14 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 );
                 state.userTexts.push(clean_user_text(userText));
                 const change = await build_change_plan(userText, conversation, state);
-                console.error(
-                    `[route] build_change_plan -> ${change === null ? "null" : `steps=${change.steps.length} display=${JSON.stringify(change.display.slice(0, 80))}`}`,
-                );
                 if (change !== null) {
                     if (change.steps.length === 0) {
                         // 追问类（缺点名/缺转发地址/待选设备）→ 置位等待应答；
-                        // 终态错误（设备/点不存在等）→ 复位
+                        // 终态错误（设备/点不存在等）→ 复位。
+                        // 无方案出口一律撤钮（2026-10-01）：上一方案执行/失效后前端残留
+                        // 确认按钮，用户点击落入「没有待执行方案」死路
                         state.pendingChangeAsk = change.ask === true;
+                        yield { type: "button_disarm", reason: "变更需澄清或已结束，无待执行方案" };
                         yield { type: "text", content: change.display };
                         yield { type: "done" };
                         return;
