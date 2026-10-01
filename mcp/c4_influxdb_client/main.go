@@ -162,8 +162,6 @@ func applyDefaults(instances []influxInstance) {
 	}
 }
 
-var keyRe = regexp.MustCompile("^[a-zA-Z_]+$")
-
 func isValidURL(s string) bool {
 	u, err := url.Parse(s)
 	if err != nil {
@@ -173,13 +171,14 @@ func isValidURL(s string) bool {
 }
 
 // Validation order (§5.1, §6): shm_id (SHM_ID_NOT_ASSIGNED) → instance fields
-// (INVALID_CONFIG) → point fields (INVALID_POINT).
+// (INVALID_CONFIG) → point fields (INVALID_POINT). 点级校验与 validate_points
+// 同源（validation.go validatePointSet，opts 参数化）——本函数渲染首个错误。
 func validateConfig(instances []influxInstance) error {
 	for _, inst := range instances {
 		// 1. shm_id must be assigned (non-zero)
-		for _, pt := range inst.Points {
-			if pt.ShmID == 0 {
-				return fmt.Errorf("SHM_ID_NOT_ASSIGNED: point '%s' has shm_id=0, must be assigned by c4_shm_manager first", pt.Key)
+		for _, is := range validatePointSet(inst.Points, pointValidateOpts{requireShmID: true}) {
+			if is.Code == "SHM_ID" {
+				return fmt.Errorf("SHM_ID_NOT_ASSIGNED: point '%s' has shm_id=0, must be assigned by c4_shm_manager first", is.Key)
 			}
 		}
 
@@ -206,27 +205,24 @@ func validateConfig(instances []influxInstance) error {
 			return fmt.Errorf("INVALID_CONFIG: instance '%s' has invalid flush_interval=%d (must be >= 0)", inst.Name, *inst.FlushInterval)
 		}
 
-		// 3. point-level fields (INVALID_POINT)
-		seenShmIDs := make(map[int]bool)
-		for _, pt := range inst.Points {
-			if pt.Type != "" && pt.Type != "float" && pt.Type != "int" && pt.Type != "uint" && pt.Type != "bool" {
-				return fmt.Errorf("INVALID_POINT: point '%s' has invalid type '%s'", pt.Key, pt.Type)
+		// 3. point-level fields + shm_id 查重（INVALID_POINT）
+		for _, is := range validatePointSet(inst.Points, pointValidateOpts{requireShmID: true, dupByShmID: true}) {
+			switch is.Code {
+			case "INVALID_TYPE":
+				return fmt.Errorf("INVALID_POINT: point '%s' has invalid type '%s'", is.Key, is.Type)
+			case "MEASUREMENT_EMPTY":
+				return fmt.Errorf("INVALID_POINT: point '%s' has empty measurement", is.Key)
+			case "FIELD_EMPTY":
+				// field 必填（2026-10-01 裁定：无默认值、不推导，废除空值放行与
+				// 运行期 resolveField 回退点名）
+				return fmt.Errorf("INVALID_POINT: point '%s' has empty field", is.Key)
+			case "FIELD_FORMAT":
+				return fmt.Errorf("INVALID_POINT: point '%s' has invalid field '%s'", is.Key, is.Field)
+			case "TAG_FORMAT":
+				return fmt.Errorf("INVALID_POINT: point '%s' has invalid tag key '%s'", is.Key, is.Field)
+			case "DUP_SHM":
+				return fmt.Errorf("INVALID_POINT: duplicate shm_id=%d in instance '%s'", is.ShmID, inst.Name)
 			}
-			if pt.Measurement == "" {
-				return fmt.Errorf("INVALID_POINT: point '%s' has empty measurement", pt.Key)
-			}
-			if pt.Field != "" && !keyRe.MatchString(pt.Field) {
-				return fmt.Errorf("INVALID_POINT: point '%s' has invalid field '%s'", pt.Key, pt.Field)
-			}
-			for k := range pt.Tags {
-				if !keyRe.MatchString(k) {
-					return fmt.Errorf("INVALID_POINT: point '%s' has invalid tag key '%s'", pt.Key, k)
-				}
-			}
-			if seenShmIDs[pt.ShmID] {
-				return fmt.Errorf("INVALID_POINT: duplicate shm_id=%d in instance '%s'", pt.ShmID, inst.Name)
-			}
-			seenShmIDs[pt.ShmID] = true
 		}
 	}
 	return nil
@@ -555,16 +551,6 @@ func escapeKey(s string) string {
 	return s
 }
 
-func resolveField(p influxPoint) string {
-	if p.Field != "" {
-		return p.Field
-	}
-	if idx := strings.LastIndex(p.Key, "."); idx >= 0 && idx+1 < len(p.Key) {
-		return p.Key[idx+1:]
-	}
-	return p.Key
-}
-
 func convertTimestamp(ts uint64, precision string) uint64 {
 	switch precision {
 	case "s":
@@ -843,7 +829,7 @@ func startHandler(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolR
 			pts = append(pts, pointMapping{
 				shmID:       pt.ShmID,
 				measurement: pt.Measurement,
-				field:       resolveField(pt),
+				field:       pt.Field,
 				pointType:   pt.Type,
 				tags:        pt.Tags,
 			})

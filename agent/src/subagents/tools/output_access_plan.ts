@@ -26,7 +26,7 @@ const devicePointSchema = z.object({
 
 const deviceSpecSchema = z.object({
     name: z.string().describe("设备名称"),
-    abbr: z.string().optional().describe("采集目标标识（候选，从 deviceInfo.abbr 原样复制，如 wt1；用于生成 instance.id 与记忆库一致）"),
+    prefix: z.string().optional().describe("点 key 前缀（agent.md §3.2.1.3，从设备名确定性派生，如 wt1；点 key = {prefix}_{裸id}）"),
     seq: z.number().describe("设备编号（从1开始）"),
     protocol: z.string().describe("通信协议，如 modbus, iec104"),
     connection: z.object({
@@ -38,7 +38,7 @@ const deviceSpecSchema = z.object({
 
 const forwardTargetSchema = z.object({
     name: z.string().describe("转发目标名称，如 中心侧数据库"),
-    abbr: z.string().optional().describe("转发目标标识（候选，从 deviceInfo.forward_targets 的 abbr 原样复制，如 center）"),
+    instanceId: z.string().optional().describe("实例 id（channel{N} 顺序句柄，agent.md §3.2.1.3；缺省由拆解器分配）"),
     protocol: z.string().describe("转发协议，必须由用户明确提供，禁止沿用接收侧协议或猜测"),
     connection: z.object({
         ip: z.string().optional().describe("目标 IP（asfp2 等 TCP 协议用）"),
@@ -208,7 +208,8 @@ export function createOutputAccessPlanTool(
                 "生成结构化接入方案 (AccessPlan)。" +
                 "在获得设备信息后，结合 service_catalog 选择匹配的服务类型，" +
                 "推断场站名称和缩写，组织设备清单和转发目标。" +
-                "site.abbr 用于生成 instance.id，如 hnals_wt1（hnals=场站缩写, wt1=采集目标标识）。" +
+                "实例 id 为 channel{N} 顺序句柄（用户不可见），点 key = {设备前缀}_{裸id}（如 wt1_windspeed），" +
+                "设备语义在设备身份注册表（agent.md §3.2.1.3）。" +
                 "调用时机：用户要求生成方案时。",
             schema: accessPlanArgSchema,
         },

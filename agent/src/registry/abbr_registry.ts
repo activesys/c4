@@ -1,10 +1,17 @@
-// c4/agent/src/registry/abbr_registry.ts — abbr 记忆库（id 稳定性保障）
-// 根据 agent.md §3.2.1.3a 实现。
-// 确定性文件读写模块：无 LLM、无网络。记忆库是可重建的派生数据，config.json 是权威数据源。
+// c4/agent/src/registry/abbr_registry.ts — 设备身份注册表（agent.md §3.2.1.3a）
+// 根据 agent.md §3.2.1.3/§3.2.1.3a（2026-10-01 设计修订）实现。
+// 确定性文件读写模块：无 LLM、无网络。三层命名职责单一：
+//   实例 id = channel{N} 顺序句柄（本文件维护 channelHighWatermark 高位水印，永不复用）；
+//   设备身份 = 注册表条目（设备名 → {宿主实例, 点前缀}）；
+//   点 key = {设备前缀}_{裸id}（前缀由方案层拼接，本文件存储与查重）。
+// 注册表是可重建的派生数据（config.json 为权威），唯 channelHighWatermark 不可重建——
+// 丢失时退化为现存实例最大序号（已删序号可能被复用，属可接受降级）。
 
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+
+import { zh_convert } from "../orchestrator/zh_numeral.js";
 
 import type { MCPInstanceConfig, SystemConfig } from "../types/index.js";
 
@@ -15,45 +22,29 @@ export interface AbbrSite {
     abbr: string;
 }
 
-export type AbbrRole = "writer" | "reader" | null;
-
+/** 注册表条目：设备身份 = 「设备名 → {宿主实例, 点前缀}」（§3.2.1.3a）。 */
 export interface AbbrEntry {
-    id: string;           // 稳定实例 id（主键），固化后永不改变
-    name: string;         // 设备名称（人可读）
-    abbr: string;         // 采集/转发目标标识（候选，最终以本记录为准）
-    service_type: string; // 所属服务类型（重建时从 config.json 顶层 key 反推）
-    role: AbbrRole;       // 所属角色（重建时无法从 config.json 得知，为 null，由调用方补充）
-    description: string;  // 首次接入时的原始描述（用于后续检索匹配）
+    name: string;         // 设备名称（人可读；允许重名，同名须经消歧确认）
+    prefix: string;       // 点前缀（注册表内全局唯一）——点 key = {prefix}_{裸id}
+    host: string;         // 宿主实例 id（channel{N}）；同端口并入的多台设备共享同一宿主
+    service_type: string; // 宿主所属服务类型（重建时从 config.json 顶层 key 反推）
+    description: string;  // 首次接入时的原始描述（用于同名消歧的描述匹配仲裁）
+    pointMap: Record<string, string>; // 源点名 → 生效点 key（modify/delete 按此匹配旧点）
 }
 
 export interface AbbrRegistry {
-    entries: AbbrEntry[];    // 在用设备记录（delete 物理删除，不保留历史）
+    /** 序号高位水印（max-ever-assigned）：实例删除只减存活数、不回退水印（§3.2.1.3） */
+    channelHighWatermark: number;
+    entries: AbbrEntry[]; // 在用设备条目（delete 物理删除，不保留历史）
 }
 
-export interface RetrieveCandidateParams {
-    description: string;
-    role?: "writer" | "reader";
-    intent: "add" | "modify" | "delete";
-}
-
-export interface RetrieveCandidateResult {
-    hit: boolean;
-    id?: string;
-    abbr?: string;
-}
-
-export interface AbbrConflictResult {
-    conflict: boolean;      // true = 需重新生成不同 abbr（不同设备撞车）
-    existing_id?: string;   // 撞 abbr 的已存实例 id
-}
-
-export interface AbbrEntryInput {
-    id: string;
-    name: string;
-    abbr: string;
-    service_type: string;
-    role: AbbrRole;
-    description: string;
+/** 检索结果（§3.2.1.3a id 确定流程第 2 步）：同名命中 → 描述匹配仲裁。 */
+export interface DeviceRetrieval {
+    decision: "same_device" | "name_conflict" | "no_hit";
+    /** same_device → 复用既有 {host, prefix}（修改语义） */
+    entry?: AbbrEntry;
+    /** name_conflict → 同名多条且描述无法区分，追问用户指认 */
+    candidates?: AbbrEntry[];
 }
 
 // ── 路径 ──────────────────────────────────────────────────
@@ -67,80 +58,46 @@ export function default_abbr_registry_path(): string {
 export async function load_abbr_registry(
     file_path?: string,
     config_json?: SystemConfig,
-    site: AbbrSite | null = null,
 ): Promise<AbbrRegistry> {
     const target = file_path ?? default_abbr_registry_path();
-    const site_abbr = site?.abbr ?? null;
 
-    let parsed: AbbrRegistry | null = null;
+    let parsed: AbbrRegistry | null;
     try {
         const raw = await readFile(target, "utf-8");
         parsed = _parse_registry(raw);
-    } catch (err: unknown) {
-        const error = err as NodeJS.ErrnoException;
-        if (error.code !== "ENOENT") {
-            // 其他读取失败（权限等）按「损坏」处理
-            parsed = null;
-        }
-        // ENOENT → parsed 保持 null，统一走下方重建分支
+    } catch {
+        // 读取失败（不存在/权限）按「损坏」处理，统一走重建分支
+        parsed = null;
     }
 
-    // 文件不存在 / 损坏 → entries 从 config.json 重建（site 由调用方从 agent.json 提供）
-    if (parsed === null) {
-        return _rebuilt_or_empty(config_json, site_abbr);
+    const derived_watermark = config_json ? channel_watermark_from_config(config_json) : 0;
+
+    // 文件不存在 / 损坏 / 旧格式（无 prefix 条目全被丢弃）→ 从 config.json 重建。
+    // 旧格式不兼容（agent.md §3.2.1.3 设计修订）：hnals_wt1 式条目直接废弃。
+    if (parsed === null || parsed.entries.length === 0) {
+        const entries = config_json ? rebuild_entries(config_json) : [];
+        return {
+            channelHighWatermark: Math.max(parsed?.channelHighWatermark ?? 0, derived_watermark),
+            entries,
+        };
     }
 
-    // entries 缺失/为空但 config.json 有实例 → 从 config.json 重建 entries
-    if (parsed.entries.length === 0 && config_json) {
-        const entries = rebuild_entries(config_json, site_abbr);
-        if (entries.length > 0) {
-            return { entries };
-        }
-    }
-
-    // config.json 是权威、记忆库是派生数据（失败回滚/点级删除等都可能造成失步）：
-    // 每次加载按 config 实例集合对齐——config 有而记忆无 → 补建；
-    // 记忆有而 config 无（回滚残留）→ 移除；名称/服务类型漂移 → 校正。
-    // 已存条目的 role/description 不因对齐丢失——重建条目的 role 恒为 null
-    // （config.json 推不出角色），以 null 覆盖已固化角色会破坏记忆库保真
-    //（agent.md §3.2.1.3a：固化信息跨会话稳定）。
+    // config.json 是权威、注册表是派生数据（失败回滚/点级删除等都可能造成失步）：
+    // 每次加载按 config 对齐——宿主已不存在的条目移除（回滚残留）；
+    // pointMap 从宿主点表同源重建；channelHighWatermark 取两者较大值（永不回退）。
     if (config_json) {
-        const config_entries = rebuild_entries(config_json, site_abbr);
-        if (config_entries.length > 0 || _config_has_data_sections(config_json)) {
-            const byId = new Map(parsed.entries.map((e) => [e.id, e]));
-            for (const ce of config_entries) {
-                const ex = byId.get(ce.id);
-                if (!ex) {
-                    byId.set(ce.id, ce);
-                } else {
-                    if (
-                        ex.name !== ce.name ||
-                        ex.service_type !== ce.service_type
-                    ) {
-                        Object.assign(ex, {
-                            name: ce.name,
-                            service_type: ce.service_type,
-                        });
-                    }
-                    if (ce.role !== null && ex.role !== ce.role) {
-                        ex.role = ce.role;
-                    }
-                }
+        const hosts = _collect_hosts(config_json);
+        parsed.entries = parsed.entries.filter((e) => hosts.has(e.host));
+        for (const entry of parsed.entries) {
+            const rebuilt = _rebuild_point_map(config_json, entry.host, entry.prefix);
+            if (rebuilt !== null) {
+                entry.pointMap = rebuilt;
+                entry.service_type = entry.service_type || _host_service_type(config_json, entry.host);
             }
-            if (config_entries.length === 0) {
-                byId.clear();
-            }
-            parsed.entries = [...byId.values()];
         }
     }
-
+    parsed.channelHighWatermark = Math.max(parsed.channelHighWatermark, derived_watermark);
     return parsed;
-}
-
-function _config_has_data_sections(config: SystemConfig): boolean {
-    return Object.entries(config).some(
-        ([k, v]) => k !== "c4_shm_manager" && Array.isArray(v),
-    );
 }
 
 export async function save_abbr_registry(
@@ -150,83 +107,132 @@ export async function save_abbr_registry(
     const target = file_path ?? default_abbr_registry_path();
     const dir = dirname(target);
     await mkdir(dir, { recursive: true });
-    const output = JSON.stringify({ entries: registry.entries }, null, 4) + "\n";
+    const output =
+        JSON.stringify(
+            {
+                channelHighWatermark: registry.channelHighWatermark,
+                entries: registry.entries,
+            },
+            null,
+            4,
+        ) + "\n";
     const tmp_path = target + ".tmp";
     await writeFile(tmp_path, output, "utf-8");
     await rename(tmp_path, target);
 }
 
-// ── 检索（info-gatherer 用，只读）─────────────────────────
+// ── 检索（§3.2.1.3a id 确定流程第 2 步，只读）──────────────
+// 同名命中 → 描述匹配仲裁（判定依据是「描述是否也匹配」，而非仅名字相同——
+// 现场可能有两台同名设备）。仲裁对单命中同样生效：描述完全对不上的「同名」
+// 返回 name_conflict 追问而非静默并入；描述弱信号（用户只复述设备名）视为
+// 匹配，最终判定由方案确认环节兜底（「注册表只提供候选，用户确认负责最终判定」）。
 
-export function retrieve_candidate(
+export function retrieve_device(
     registry: AbbrRegistry,
-    params: RetrieveCandidateParams,
-): RetrieveCandidateResult {
-    const { description } = params;
-    // intent 与 role 仅用于调用方做冲突判定，本函数只做只读检索：
-    // 描述匹配 → 复用历史 id/abbr（「想起来可能是谁」）。
-    for (const entry of registry.entries) {
-        if (_descriptions_match(description, entry)) {
-            return { hit: true, id: entry.id, abbr: entry.abbr };
-        }
+    name: string,
+    description?: string,
+): DeviceRetrieval {
+    const q = _normalize(name);
+    if (q.length === 0) {
+        return { decision: "no_hit" };
     }
-    return { hit: false };
+    const hits = registry.entries.filter((e) => _normalize(e.name) === q);
+    if (hits.length === 0) {
+        return { decision: "no_hit" };
+    }
+    const desc = description ?? name;
+    const matched = hits.filter((e) => _descriptions_match(desc, e));
+    if (matched.length === 1) {
+        return { decision: "same_device", entry: matched[0] };
+    }
+    return { decision: "name_conflict", candidates: hits };
 }
 
-// ── 冲突判定 ──────────────────────────────────────────────
+// ── 前缀 / 序号分配（确定性，§3.2.1.3/§3.2.1.3c）──────────
 
-export function resolve_abbr_conflict(
+/** 候选前缀撞名 → 保留前缀 + 最小未用编号顺延（wt1 已占用 → wt2；dev1 → dev2）。 */
+export function resolve_prefix_conflict(
     registry: AbbrRegistry,
-    candidate_abbr: string,
-    description: string,
-): AbbrConflictResult {
-    const existing = registry.entries.find((e) => e.abbr === candidate_abbr);
-    if (!existing) {
-        return { conflict: false };
+    base: string,
+): string {
+    const taken = new Set(registry.entries.map((e) => e.prefix));
+    if (!taken.has(base)) {
+        return base;
     }
-    if (_descriptions_match(description, existing)) {
-        // 同一设备加点：abbr 相同且描述匹配 → 复用历史 id（合并，不新建）
-        return { conflict: false, existing_id: existing.id };
+    const m = base.match(/^(.*?)(\d+)$/);
+    const stem = m ? m[1] : base;
+    let n = m ? Number(m[2]) + 1 : 2;
+    while (taken.has(`${stem}${n}`)) {
+        n += 1;
     }
-    // 不同设备撞 abbr：需重新生成不同 abbr，不得复用
-    return { conflict: true, existing_id: existing.id };
+    return `${stem}${n}`;
 }
 
-// ── 固化 / 删除 / 重建（SuperWorker 确定性代码用）──────────
+/** 完全匿名设备的自动序列（dev1、dev2…）：取最小未用编号（§3.2.1.3c）。 */
+export function next_dev_prefix(registry: AbbrRegistry): string {
+    const taken = new Set(registry.entries.map((e) => e.prefix));
+    let n = 1;
+    while (taken.has(`dev${n}`)) {
+        n += 1;
+    }
+    return `dev${n}`;
+}
+
+/** 分配下一个 channel 序号：未使用最小序号 = 水印 + 1（从未分配过，§3.2.1.3）。
+ *  注册表 API——供测试与后续直用场景；主流程在方案层以局部水印闭包批量分配。 */
+export function next_channel_id(registry: AbbrRegistry): string {
+    return `channel${registry.channelHighWatermark + 1}`;
+}
+
+/** 固化时推进高位水印（只增不减——实例删除后序号永不复用）。
+ *  注册表 API——供测试与后续直用场景；主流程由 execute_steps 写入 watermark。 */
+export function bump_channel_watermark(registry: AbbrRegistry, instance_id: string): void {
+    const m = instance_id.match(/^channel(\d+)$/);
+    if (m) {
+        registry.channelHighWatermark = Math.max(
+            registry.channelHighWatermark,
+            Number(m[1]),
+        );
+    }
+}
+
+// ── 固化 / 删除（执行层确定性代码，挂 merge + Stop-Start 成功路径之后）──
 
 export function finalize_entry(
     registry: AbbrRegistry,
-    input: AbbrEntryInput,
+    input: AbbrEntry,
 ): AbbrRegistry {
     const entries = [...registry.entries];
-    const idx = entries.findIndex((e) => e.id === input.id);
-    const entry: AbbrEntry = { ...input };
+    const idx = entries.findIndex((e) => e.prefix === input.prefix);
     if (idx >= 0) {
-        entries[idx] = entry;
+        entries[idx] = { ...input };
     } else {
-        entries.push(entry);
+        entries.push({ ...input });
     }
-    return { entries };
+    return {
+        channelHighWatermark: registry.channelHighWatermark,
+        entries,
+    };
 }
 
 export function delete_entry(
     registry: AbbrRegistry,
-    id: string,
+    prefix: string,
 ): AbbrRegistry {
     return {
-        entries: registry.entries.filter((e) => e.id !== id),
+        channelHighWatermark: registry.channelHighWatermark,
+        entries: registry.entries.filter((e) => e.prefix !== prefix),
     };
 }
 
-export function rebuild_entries(
-    config_json: SystemConfig,
-    site_abbr: string | null,
-): AbbrEntry[] {
-    const prefix = site_abbr !== null && site_abbr.length > 0
-        ? `${site_abbr}_`
-        : "";
-    const entries: AbbrEntry[] = [];
+// ── 重建（abbr_registry.json 丢失/损坏时；config.json 为权威）──
+// host 与 prefix 从点 key 前缀分组确定性重建（key 首个 `_` 之前为前缀，
+// §3.2.1.3a——裸 id 内可含 `_`，前缀自身不含 `_`，此为设计认可的确定性近似）；
+// name→prefix 对应关系丢失时按前缀枚举退化（name 退化为前缀本身）、
+// description 退化为空（不影响 key 稳定性）；pointMap 从点表 name → 点 key 同源重建。
 
+export function rebuild_entries(config_json: SystemConfig): AbbrEntry[] {
+    const entries: AbbrEntry[] = [];
     for (const [service_type, value] of Object.entries(config_json)) {
         if (!service_type.startsWith("c4_") || service_type === "c4_shm_manager") {
             continue;
@@ -236,38 +242,62 @@ export function rebuild_entries(
         }
         for (const item of value) {
             const inst = item as MCPInstanceConfig;
-            const id = typeof inst.id === "string" ? inst.id : "";
-            if (id.length === 0) {
+            const host = typeof inst.id === "string" ? inst.id : "";
+            if (host.length === 0) {
                 continue;
             }
-            const name = typeof inst.name === "string" && inst.name.length > 0
-                ? inst.name
-                : id;
-            const abbr = prefix.length > 0 && id.startsWith(prefix)
-                ? id.slice(prefix.length)
-                : id;
-            entries.push({
-                id,
-                name,
-                abbr,
-                service_type,
-                role: null,
-                description: name,
-            });
+            const groups = new Map<string, AbbrEntry>();
+            for (const pt of (inst.points ?? []) as Array<Record<string, unknown>>) {
+                const pid = typeof pt["id"] === "string" ? (pt["id"] as string) : "";
+                const us = pid.indexOf("_");
+                if (us <= 0) {
+                    continue; // 裸 id（旧配置形态）不重建——旧配置废弃，重新接入即得新形态
+                }
+                const prefix = pid.slice(0, us);
+                if (!/^[a-zA-Z][a-zA-Z0-9]*$/.test(prefix)) {
+                    continue;
+                }
+                let entry = groups.get(prefix);
+                if (!entry) {
+                    entry = {
+                        name: prefix,
+                        prefix,
+                        host,
+                        service_type,
+                        description: "",
+                        pointMap: {},
+                    };
+                    groups.set(prefix, entry);
+                }
+                const nm = typeof pt["name"] === "string" ? (pt["name"] as string) : "";
+                if (nm.length > 0) {
+                    entry.pointMap[nm] = pid;
+                }
+            }
+            entries.push(...groups.values());
         }
     }
-
     return entries;
 }
 
-// ── 内部解析 / 匹配 ───────────────────────────────────────
-
-function _rebuilt_or_empty(config_json?: SystemConfig, site_abbr?: string | null): AbbrRegistry {
-    if (!config_json) {
-        return { entries: [] };
+/** channelHighWatermark 不可重建（已删实例序号在配置中无痕）——丢失后退化为现存实例最大序号。 */
+export function channel_watermark_from_config(config_json: SystemConfig): number {
+    let max = 0;
+    for (const [st, list] of Object.entries(config_json)) {
+        if (st === "c4_shm_manager" || !Array.isArray(list)) {
+            continue;
+        }
+        for (const inst of list as Array<Record<string, unknown>>) {
+            const m = String(inst["id"] ?? "").match(/^channel(\d+)$/);
+            if (m) {
+                max = Math.max(max, Number(m[1]));
+            }
+        }
     }
-    return { entries: rebuild_entries(config_json, site_abbr ?? null) };
+    return max;
 }
+
+// ── 内部解析 / 匹配 ───────────────────────────────────────
 
 function _parse_registry(raw: string): AbbrRegistry | null {
     let parsed: unknown;
@@ -280,7 +310,11 @@ function _parse_registry(raw: string): AbbrRegistry | null {
         return null;
     }
     const obj = parsed as Record<string, unknown>;
+    const watermark = typeof obj["channelHighWatermark"] === "number"
+        ? obj["channelHighWatermark"]
+        : 0;
     return {
+        channelHighWatermark: watermark,
         entries: _parse_entries(obj["entries"]),
     };
 }
@@ -304,24 +338,89 @@ function _parse_entry(value: unknown): AbbrEntry | null {
         return null;
     }
     const obj = value as Record<string, unknown>;
-    if (typeof obj["id"] !== "string" || obj["id"].length === 0) {
+    // 旧格式条目（id/abbr、无 prefix/host）直接丢弃——不保留旧格式兼容（§3.2.1.3）
+    if (
+        typeof obj["name"] !== "string" || obj["name"].length === 0 ||
+        typeof obj["prefix"] !== "string" || obj["prefix"].length === 0 ||
+        typeof obj["host"] !== "string" || obj["host"].length === 0
+    ) {
         return null;
     }
-    const role_raw = obj["role"];
-    const role: AbbrRole =
-        role_raw === "writer" || role_raw === "reader" ? role_raw : null;
+    const pointMap: Record<string, string> = {};
+    if (typeof obj["pointMap"] === "object" && obj["pointMap"] !== null) {
+        for (const [k, v] of Object.entries(obj["pointMap"] as Record<string, unknown>)) {
+            if (typeof v === "string") {
+                pointMap[k] = v;
+            }
+        }
+    }
     return {
-        id: obj["id"],
-        name: typeof obj["name"] === "string" ? obj["name"] : obj["id"],
-        abbr: typeof obj["abbr"] === "string" ? obj["abbr"] : obj["id"],
-        service_type: typeof obj["service_type"] === "string"
-            ? obj["service_type"]
-            : "",
-        role,
-        description: typeof obj["description"] === "string"
-            ? obj["description"]
-            : "",
+        name: obj["name"],
+        prefix: obj["prefix"],
+        host: obj["host"],
+        service_type: typeof obj["service_type"] === "string" ? obj["service_type"] : "",
+        description: typeof obj["description"] === "string" ? obj["description"] : "",
+        pointMap,
     };
+}
+
+function _collect_hosts(config: SystemConfig): Set<string> {
+    const hosts = new Set<string>();
+    for (const [st, list] of Object.entries(config)) {
+        if (st === "c4_shm_manager" || !Array.isArray(list)) {
+            continue;
+        }
+        for (const inst of list as Array<Record<string, unknown>>) {
+            if (typeof inst["id"] === "string") {
+                hosts.add(inst["id"]);
+            }
+        }
+    }
+    return hosts;
+}
+
+function _host_service_type(config: SystemConfig, host: string): string {
+    for (const [st, list] of Object.entries(config)) {
+        if (st === "c4_shm_manager" || !Array.isArray(list)) {
+            continue;
+        }
+        if ((list as Array<Record<string, unknown>>).some((i) => i["id"] === host)) {
+            return st;
+        }
+    }
+    return "";
+}
+
+/** 从宿主实例点表重建 pointMap（name → 点 key，前缀过滤）。宿主不存在返回 null。 */
+function _rebuild_point_map(
+    config: SystemConfig,
+    host: string,
+    prefix: string,
+): Record<string, string> | null {
+    const prefix_ = `${prefix}_`;
+    for (const [st, list] of Object.entries(config)) {
+        if (st === "c4_shm_manager" || !Array.isArray(list)) {
+            continue;
+        }
+        for (const inst of list as Array<Record<string, unknown>>) {
+            if (inst["id"] !== host) {
+                continue;
+            }
+            const pointMap: Record<string, string> = {};
+            for (const pt of (inst["points"] ?? []) as Array<Record<string, unknown>>) {
+                const pid = typeof pt["id"] === "string" ? (pt["id"] as string) : "";
+                if (!pid.startsWith(prefix_)) {
+                    continue;
+                }
+                const nm = typeof pt["name"] === "string" ? (pt["name"] as string) : "";
+                if (nm.length > 0) {
+                    pointMap[nm] = pid;
+                }
+            }
+            return pointMap;
+        }
+    }
+    return null;
 }
 
 function _descriptions_match(description: string, entry: AbbrEntry): boolean {
@@ -339,11 +438,17 @@ function _descriptions_match(description: string, entry: AbbrEntry): boolean {
 
 function _normalize(text: string): string {
     // 设备命名分隔符归一：「1#风机」「1号风机」「1 风机」视为同一设备——
-    // 用户删除/修改时常用「号」而接入时记忆库存的是「#」（func_test_case 用例 25/26）
+    // 用户删除/修改时常用「号」而接入时注册库存的是「#」（func_test_case 用例 25/26）；
+    // 中文数字编号折算为阿拉伯数字（「三号风机」≡「3号风机」——中文数字支持是
+    // §3.2.1.3c 引入的，归一化不跟上会让同一设备重复注册、前缀顺延出第二套身份）
     return text
         .trim()
         .toLowerCase()
         .replace(/\s+/g, "")
+        .replace(/([零一二两三四五六七八九十]{1,6})号/g, (m, zh: string) => {
+            const n = zh_convert(zh);
+            return n !== null ? `${n}号` : m;
+        })
         .replace(/[＃#号]/g, "");
 }
 

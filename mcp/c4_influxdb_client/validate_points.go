@@ -1,19 +1,20 @@
 package main
 
 // validate_points 工具（C4_FUN_00090）——契约: agent.md §2.7.1；规则: c4_influxdb_client.md §validate_points。
-// 空值容忍差异：启动校验容忍 type=""/field=""（运行期推导/回退），本工具为方案期校验、
-// 不容忍空串（推导填充由方案层完成，见 agent.md §2.7.1 确定性推导）。
+// type="" 两路径均放行（校验层无路径差异）：启动期按实际值推导运行期编码，
+// 方案期由方案层推导填充保证（agent.md §2.7.1 确定性推导）。
+// field 于 2026-10-01 裁定必填、无默认值、不推导（c4_influxdb_client.md §2）——
+// 两路径均不再容忍空 field（FIELD_FORMAT 覆盖空值），运行期 resolveField 回退已废除。
+// 校验逻辑与启动校验同源（validation.go validatePointSet，opts 参数化），本文件只做
+// pointIssue → infIssue JSON 的渲染。
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"regexp"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
-
-var vKeyRe = regexp.MustCompile(`^[a-zA-Z_]+$`)
 
 type infIssue struct {
 	Code    string   `json:"code"`
@@ -23,38 +24,36 @@ type infIssue struct {
 }
 
 func validateInfluxPoints(points []influxPoint) []infIssue {
+	raw := validatePointSet(points, pointValidateOpts{dupByBusinessKey: true})
 	issues := []infIssue{}
-	seen := make(map[[2]string]string)
-	for _, pt := range points {
-		if pt.Measurement == "" {
+	for _, is := range raw {
+		switch is.Code {
+		case "MEASUREMENT_EMPTY":
 			issues = append(issues, infIssue{Code: "MEASUREMENT_EMPTY",
-				Message: fmt.Sprintf("点 %s 的 measurement 为空", pt.Key),
-				Points:  []string{pt.Key}, Field: "measurement"})
-		}
-		if pt.Type != "" && pt.Type != "float" && pt.Type != "int" && pt.Type != "uint" && pt.Type != "bool" {
+				Message: fmt.Sprintf("点 %s 的 measurement 为空", is.Key),
+				Points:  []string{is.Key}, Field: "measurement"})
+		case "INVALID_TYPE":
 			issues = append(issues, infIssue{Code: "INVALID_TYPE",
-				Message: fmt.Sprintf("点 %s 的 type='%s' 非法（float/int/uint/bool）", pt.Key, pt.Type),
-				Points:  []string{pt.Key}, Field: "type"})
-		}
-		if pt.Field != "" && !vKeyRe.MatchString(pt.Field) {
+				Message: fmt.Sprintf("点 %s 的 type='%s' 非法（float/int/uint/bool）", is.Key, is.Type),
+				Points:  []string{is.Key}, Field: "type"})
+		case "FIELD_EMPTY":
 			issues = append(issues, infIssue{Code: "FIELD_FORMAT",
-				Message: fmt.Sprintf("点 %s 的 field='%s' 含非法字符（仅字母与下划线）", pt.Key, pt.Field),
-				Points:  []string{pt.Key}, Field: "field"})
-		}
-		for k := range pt.Tags {
-			if !vKeyRe.MatchString(k) {
-				issues = append(issues, infIssue{Code: "FIELD_FORMAT",
-					Message: fmt.Sprintf("点 %s 的 tag key='%s' 含非法字符", pt.Key, k),
-					Points:  []string{pt.Key}, Field: "tags"})
-			}
-		}
-		mk := [2]string{pt.Measurement, pt.Field}
-		if prev, ok := seen[mk]; ok {
+				Message: fmt.Sprintf("点 %s 的 field 为空（必填，无默认值、不推导——由点表/用户提供）", is.Key),
+				Points:  []string{is.Key}, Field: "field"})
+		case "FIELD_FORMAT":
+			issues = append(issues, infIssue{Code: "FIELD_FORMAT",
+				Message: fmt.Sprintf("点 %s 的 field='%s' 含非法字符（仅字母与下划线）", is.Key, is.Field),
+				Points:  []string{is.Key}, Field: "field"})
+		case "TAG_FORMAT":
+			issues = append(issues, infIssue{Code: "FIELD_FORMAT",
+				Message: fmt.Sprintf("点 %s 的 tag key='%s' 含非法字符", is.Key, is.Field),
+				Points:  []string{is.Key}, Field: "tags"})
+		case "POINT_DUP":
 			issues = append(issues, infIssue{Code: "POINT_DUP",
-				Message: fmt.Sprintf("点 %s 与 %s 的 (measurement=%s, field=%s) 组合重复", prev, pt.Key, pt.Measurement, pt.Field),
-				Points:  []string{prev, pt.Key}, Field: "measurement"})
+				Message: fmt.Sprintf("点 %s 与 %s 的 (measurement=%s, field=%s) 组合重复",
+					is.PrevKey, is.Key, is.Measurement, is.Field),
+				Points: []string{is.PrevKey, is.Key}, Field: "measurement"})
 		}
-		seen[mk] = pt.Key
 	}
 	return issues
 }

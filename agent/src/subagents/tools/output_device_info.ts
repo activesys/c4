@@ -39,7 +39,7 @@ export function createOutputDeviceInfoTool(
 
             // 转发协议逐侧必供闸门（agent.md §3.2 协议）：存在转发目标时用户必须已显式
             // 声明转发协议——接收侧协议声明不算数，禁止沿用接收协议或按目标描述推断。
-            // 拒绝即进入问答握手（pending）：super_worker 依据用户对下一轮提问的答复
+            // 拒绝即进入问答握手（pending）：编排器依据用户对下一轮提问的答复
             // 完成声明，任意措辞可收敛，不会死锁
             const declaredFwd = config?.declared_forward_protocol;
             const fwd = input.forward_targets ?? [];

@@ -1,6 +1,8 @@
-// c4/agent/src/subagents/tools/query_abbr_registry.ts — abbr 记忆库检索工具
-// info-gatherer 用：判断目标设备是否已接入（同一设备加点 / 目标不存在）。
+// c4/agent/src/subagents/tools/query_abbr_registry.ts — 设备身份注册表检索工具
+// 用途：判断目标设备是否已接入（同一设备加点 / 目标不存在 / 同名消歧）。
 // 根据 agent.md §3.2.1.3a「id 确定流程」step 2 实现——确定性检索，无 LLM、无网络。
+// 2026-10-01 设计修订：注册表条目为「设备名 → {宿主实例, 点前缀}」（channel{N}
+// 顺序句柄为实例 id，用户不可见；设备语义在注册表与点 key 前缀）。
 
 import { tool } from "langchain";
 import { z } from "zod";
@@ -9,9 +11,8 @@ import * as path from "node:path";
 
 import {
     load_abbr_registry,
-    retrieve_candidate,
+    retrieve_device,
     type AbbrRegistry,
-    type RetrieveCandidateResult,
 } from "../../registry/abbr_registry.js";
 import type { SystemConfig } from "../../types/index.js";
 
@@ -23,6 +24,7 @@ export type AbbrDecision =
     | "hit_modify"
     | "hit_delete"
     | "no_hit_modify_delete_not_exist"
+    | "name_conflict"
     | "site_mismatch"
     | "site_ambiguous";
 
@@ -112,13 +114,14 @@ function check_site_attribution(
 
 function compute_decision(
     intent: "add" | "modify" | "delete",
-    hit: boolean,
+    decision: "same_device" | "name_conflict" | "no_hit",
 ): AbbrDecision {
-    if (hit) {
-        if (intent === "add") {
-            return "hit_add_merge";
-        }
+    if (decision === "same_device") {
+        if (intent === "add") return "hit_add_merge";
         return intent === "modify" ? "hit_modify" : "hit_delete";
+    }
+    if (decision === "name_conflict") {
+        return "name_conflict";
     }
     if (intent === "add") {
         return "no_hit_add_new";
@@ -126,20 +129,26 @@ function compute_decision(
     return "no_hit_modify_delete_not_exist";
 }
 
-function decision_hint(decision: AbbrDecision, match: RetrieveCandidateResult): string {
+function decision_hint(
+    decision: AbbrDecision,
+    match: ReturnType<typeof retrieve_device>,
+): string {
     switch (decision) {
         case "hit_add_merge":
-            return `同一设备已接入（实例 id=${match.id}）。你必须原样询问用户「是否在 ${match.id} 上加点？」——` +
-                "这句话必须包含「加点」二字和实例 id，不得改成「新增数据点」等其他说法。加点合并到已有实例，不新建。";
+            return `同一设备已接入（宿主实例 ${match.entry?.host ?? ""}，点 key 前缀 ${match.entry?.prefix ?? ""}_）。` +
+                "加点合并到已有设备（宿主实例），不新建——方案确认时用户会对设备身份做最终确认。";
         case "no_hit_add_new":
-            return "记忆库中无此设备，视为新设备接入，使用候选 abbr（如 1#风机→wt1）。";
+            return "注册表中无此设备，视为新设备接入：点 key 前缀由设备名确定性派生，经方案确认后固化。";
         case "hit_modify":
-            return `目标已接入（实例 id=${match.id}）。请复述修改内容（可提及该实例 id），询问是否确认修改。`;
+            return `目标已接入（宿主实例 ${match.entry?.host ?? ""}，前缀 ${match.entry?.prefix ?? ""}_）。请复述修改内容，询问是否确认修改。`;
         case "hit_delete":
-            return `目标已接入（实例 id=${match.id}）。请复述删除目标（可提及该实例 id），询问是否确认删除。`;
+            return `目标已接入（宿主实例 ${match.entry?.host ?? ""}，前缀 ${match.entry?.prefix ?? ""}_）。请复述删除目标，询问是否确认删除。`;
+        case "name_conflict":
+            return "注册表中存在多条同名设备（现场可能有两台同名设备）——必须追问用户区分：" +
+                "请用户提供新设备的名称/编号，或以点 key 前缀/设备描述指认目标。禁止猜测。";
         case "no_hit_modify_delete_not_exist":
-            return "查询未命中——记忆库中无此设备。你必须原样回复「目标不存在，可能已删除或从未接入」这一句话。" +
-                "禁止提及记忆库中的其他设备，禁止询问用户任何问题，禁止生成方案，禁止调用任何其他工具。";
+            return "查询未命中——注册表中无此设备。你必须原样回复「目标不存在，可能已删除或从未接入」这一句话。" +
+                "禁止提及注册表中的其他设备，禁止询问用户任何问题，禁止生成方案，禁止调用任何其他工具。";
         case "site_mismatch":
             return "该资料不属于当前场站。你必须原样回复「该资料不属于当前场站」这一句话——必须包含「不属于」三个字。" +
                 "禁止调用任何其他工具，禁止生成方案，禁止继续接入流程。";
@@ -200,29 +209,47 @@ export function createQueryAbbrRegistryTool(opts: {
             const registry: AbbrRegistry = await load_abbr_registry(
                 registry_path,
                 config_json,
-                site,
             );
             if (intent === "add") {
                 const attribution = check_site_attribution(description, site);
                 if (attribution !== "ok") {
-                    const decision = attribution === "mismatch" ? "site_mismatch" : "site_ambiguous";
+                    const decision: AbbrDecision =
+                        attribution === "mismatch" ? "site_mismatch" : "site_ambiguous";
                     return JSON.stringify({
                         success: true,
                         entries: registry.entries,
-                        match: { hit: false },
+                        match: { decision: "no_hit" },
                         decision,
-                        hint: decision_hint(decision, { hit: false }),
+                        hint: decision_hint(decision, { decision: "no_hit" }),
                     });
                 }
             }
-            const match = retrieve_candidate(registry, { description, intent });
-            const decision = compute_decision(intent, match.hit);
+            const match = retrieve_device(registry, description, description);
+            const decision = compute_decision(intent, match.decision);
             const hint = decision_hint(decision, match);
 
             return JSON.stringify({
                 success: true,
                 entries: registry.entries,
-                match,
+                match: {
+                    decision: match.decision,
+                    ...(match.entry
+                        ? {
+                              name: match.entry.name,
+                              prefix: match.entry.prefix,
+                              host: match.entry.host,
+                          }
+                        : {}),
+                    ...(match.candidates
+                        ? {
+                              candidates: match.candidates.map((c) => ({
+                                  name: c.name,
+                                  prefix: c.prefix,
+                                  host: c.host,
+                              })),
+                          }
+                        : {}),
+                },
                 decision,
                 hint,
             });
@@ -230,12 +257,12 @@ export function createQueryAbbrRegistryTool(opts: {
         {
             name: "query_abbr_registry",
             description:
-                "检索 abbr 记忆库，判断目标设备是否已接入。返回已接入设备列表（entries）、" +
-                "描述匹配结果（match）、判定标签（decision）和应执行的行动提示（hint）。" +
+                "检索设备身份注册表，判断目标设备是否已接入。返回已接入设备列表（entries：设备名/宿主实例/点 key 前缀）、" +
+                "匹配结果（match）、判定标签（decision）和应执行的行动提示（hint）。" +
                 "add/modify/delete 操作前必须调用本工具。" +
-                "参数 description 为目标设备名称/描述（如「1#风机」），intent 为操作意图。",
+                "参数 description 为目标设备名称/描述（如「1号风机」），intent 为操作意图。",
             schema: z.object({
-                description: z.string().describe("目标设备名称或描述，如「1#风机」"),
+                description: z.string().describe("目标设备名称或描述，如「1号风机」"),
                 intent: z
                     .enum(["add", "modify", "delete"])
                     .describe("操作意图：add 接入 / modify 修改 / delete 删除"),

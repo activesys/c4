@@ -620,6 +620,13 @@ async function handle_add(
 
 // ── handle_modify ─────────────────────────────────────────
 
+// 监听型 Writer 服务（agent.md §3.2.1.6/§3.3 端口冻结范围）：port 是本机监听
+// 端口，modify 时不参与覆盖——已接入实例的监听端口保持原值。连接型服务
+//（modbus/iec104 设备端口、asfp2_client 服务器端口、influxdb 无 port）的 port
+// 是对端连接端口，可随覆盖变更。单一事实源：编排器（同端口并入判定、变更
+// 文案）与执行器（端口冻结）共享本集合，防两处定义漂移
+export const LISTENER_SERVICES = new Set(["c4_asfp2_server"]);
+
 function handle_modify(
     step: ServiceStep,
     instances: MCPInstanceConfig[],
@@ -646,10 +653,12 @@ function handle_modify(
     }
 
     // 浅合并 instance 字段（除 id, name, points 外）
-    // 例外：port 不参与覆盖——已接入实例的端口保持原值（监听端口的必填约束，agent.md §3.3）
+    // 例外：监听型服务的 port 不参与覆盖——已接入实例的监听端口保持原值
+    //（监听端口的必填约束，agent.md §3.3）；连接型服务端口可随覆盖变更
+    const portFrozen = LISTENER_SERVICES.has(step.service_type);
     for (const [key, value] of Object.entries(step.instance)) {
         if (key === "host") continue; // 归一化后 host 不入配置
-        if (key !== "id" && key !== "name" && key !== "points" && key !== "port") {
+        if (key !== "id" && key !== "name" && key !== "points" && !(key === "port" && portFrozen)) {
             (target as Record<string, unknown>)[key] = value;
         }
     }
@@ -682,10 +691,15 @@ function handle_modify(
             // 撞名裁定（func_test_case 用例 10/18，与 handle_add 同语义）：携带的
             // 新点 id 与既有点相同、但业务地址不同 → 新点改名（windspeed_2）并
             // 传播 reader key；地址也相同 → 视为更新该点。新点地址被其他 id 的
-            // 既有点占用 → 可读拒绝，禁止覆盖（覆盖会改写既有点地址造成数据损坏）
+            // 既有点占用 → 可读拒绝，禁止覆盖（覆盖会改写既有点地址造成数据损坏）。
+            // 例外：rec["_update"] 标记（变更流 point_updates——用户明确表述
+            // 「点 X 的地址改为 N」的更新语义）跳过裁定——match_key 命中既有点
+            // 按「同名更新」处理，addr 覆盖即用户所要（同 id 不同 addr 在
+            // 「更新地址」与「新增撞名」上不可区分，区分点在步骤来源语义）
             if (
                 typeof id === "string" && id.length > 0 &&
-                typeof rec["addr"] === "number"
+                typeof rec["addr"] === "number" &&
+                rec["_update"] !== true
             ) {
                 const id_clash = target.points.find(
                     (p) =>
@@ -722,6 +736,8 @@ function handle_modify(
                     );
                 }
             }
+            // _update 是更新语义的过程标记（供撞名裁定识别），不写入配置
+            delete rec["_update"];
             const match_key = point_match_key(step_pt);
             const existing_idx = target.points.findIndex(
                 (p) => point_match_key(p) === match_key,

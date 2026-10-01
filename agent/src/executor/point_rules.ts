@@ -192,7 +192,7 @@ export function check_fun_codes(points: PointLike[]): string[] {
 
 /**
  * 从站号来源校验（agent.md「必填项用户提供原则」）：
- * declaredUids = 从用户消息确定性捕获的从站号集合（super_worker 捕获，同 userPort 机制）。
+ * declaredUids = 从用户消息确定性捕获的从站号集合（提取层确定性捕获，同 userPort 机制）。
  * - 集合为空且点带 uid → uid 必为 LLM 编造 → 可读错误要求向用户询问；
  * - 集合非空且点的 uid ∉ 集合 → 与用户声明不符 → 可读错误要求澄清；
  * - uid 字段缺失跳过（由必填字段校验拦截）。

@@ -6,6 +6,7 @@
 // 会话仅存内存：Agent 重启即中止，不持久化（C4_RS_00131 数据不落地）。
 
 import { readFileSync } from "node:fs";
+import * as path_module from "node:path";
 
 import type { C4McpManager } from "../mcp/client.js";
 import { readPoints, type ReadEntry } from "./shm_client.js";
@@ -133,6 +134,7 @@ export class DisplayService {
         addr: number;
         shm_id: number;
         instance: string;
+        device: string;
     }> {
         let config: Record<string, unknown>;
         try {
@@ -147,7 +149,45 @@ export class DisplayService {
             return [];
         }
 
-        const entries: Array<{ key: string; addr: number; shm_id: number; instance: string }> = [];
+        // 设备归属（agent.md §3.2.1.3a）：经注册表点前缀合成——独占形态与实例等价，
+        // 共用形态（多台设备同住一个宿主实例）按点 key 前缀归属到虚拟设备视图；
+        // 注册表丢失/条目未覆盖时回退宿主实例 id（监控面板展示完整 key 属豁免场景）
+        const prefixOwner = new Map<string, string>();
+        try {
+            const regPath = path_module.join(
+                path_module.dirname(this.configPath),
+                "abbr_registry.json",
+            );
+            const reg = JSON.parse(readFileSync(regPath, "utf-8")) as {
+                entries?: Array<{ name?: unknown; prefix?: unknown; host?: unknown }>;
+            };
+            for (const e of reg.entries ?? []) {
+                if (
+                    typeof e.prefix === "string" && e.prefix !== "" &&
+                    typeof e.name === "string" && e.name !== ""
+                ) {
+                    prefixOwner.set(e.prefix, e.name);
+                }
+            }
+        } catch {
+            // 注册表不可读 → 回退实例 id
+        }
+        const device_of = (instanceId: string, pointKey: string): string => {
+            const us = pointKey.indexOf("_");
+            if (us > 0) {
+                const owner = prefixOwner.get(pointKey.slice(0, us));
+                if (owner !== undefined) return owner;
+            }
+            return instanceId;
+        };
+
+        const entries: Array<{
+            key: string;
+            addr: number;
+            shm_id: number;
+            instance: string;
+            device: string;
+        }> = [];
         for (const svcType of shmCfg.writer) {
             const section = config[svcType] as
                 | Array<Record<string, unknown>>
@@ -166,6 +206,7 @@ export class DisplayService {
                         addr: typeof p.addr === "number" ? p.addr : 0,
                         shm_id: typeof p.shm_id === "number" ? p.shm_id : 0,
                         instance: instanceId,
+                        device: device_of(instanceId, String(p.id ?? "")),
                     });
                 }
             }
@@ -174,7 +215,10 @@ export class DisplayService {
         if (filter && filter.length > 0) {
             const f = filter.toLowerCase();
             return entries.filter(
-                (e) => e.key.toLowerCase().includes(f) || e.instance.toLowerCase().includes(f),
+                (e) =>
+                    e.key.toLowerCase().includes(f) ||
+                    e.instance.toLowerCase().includes(f) ||
+                    e.device.toLowerCase().includes(f),
             );
         }
         return entries;

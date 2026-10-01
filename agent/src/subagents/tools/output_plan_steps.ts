@@ -7,13 +7,13 @@ import { readFileSync } from "node:fs";
 import { tool } from "langchain";
 import { z } from "zod";
 import type { McpServiceRegistry } from "../../registry/registry.js";
+import { device_prefix_candidate } from "../../registry/device_prefix.js";
 import {
     IDENTIFIER_RE,
     MAX_IDENTIFIER_LENGTH,
     identifier_error,
     identity_field_key,
     point_duplicate_error,
-    sanitize_identifier,
 } from "../../executor/executor.js";
 import { derive_point_id } from "../../executor/point_rules.js";
 import type {
@@ -26,25 +26,33 @@ import type {
 // ── Schema（LLM 提供的输入，宽松骨架）─────────────────────
 // 实例 plan 字段（ip/port/url/token 等）与点业务字段（addr/uid/fun/type/swap 等）
 // 一律 .passthrough() 放行，具体字段名由 registry 的 config_schema/point_schema.fields 声明。
+// 身份字段（agent.md §3.2.1.3，2026-10-01）：prefix（点 key 前缀）、instanceId
+//（channel{N} 顺序句柄）、action（add/modify——同端口并入时为 modify）由方案层装配产出；
+// 缺失时本工具确定性推导/分配（prefix 从设备名派生，instanceId 按 channelStart 递增）。
 
 const devicePointInputSchema = z.object({
     name: z.string().describe("数据点点名（用户原点名，可为中文，原样传入；必填，缺省即拦截）"),
     id: z.string().optional().describe(
-        "英文标识（agent.md §3.2.1.3b）：合规英文点名传原文，中文名传提取层翻译的 snake_case；" +
-        "未命名传空串。系统不自动生成",
+        "裸英文标识（agent.md §3.2.1.3b）：合规英文点名传原文，中文名传提取层翻译的 snake_case；" +
+        "未命名传空串。最终点 key = {prefix}_{裸id}，系统不自动生成",
     ),
 }).passthrough();
 
 const deviceInputSchema = z.object({
     name: z.string().describe("设备名称"),
-    abbr: z.string().describe("采集目标标识（候选，info-gatherer 提取）"),
+    prefix: z.string().optional().describe("点 key 前缀（§3.2.1.3，缺省时从设备名确定性派生）"),
+    instanceId: z.string().optional().describe("实例 id（channel{N} 顺序句柄，缺省时自动分配）"),
+    action: z.enum(["add", "modify"]).optional().describe("操作类型（同端口并入等宿主复用场景为 modify，缺省 add）"),
+    abbr: z.string().optional().describe("已废弃（2026-10-01 旧命名格式）——以 prefix/instanceId 为准"),
     protocol: z.string().describe("通信协议，如 modbus"),
     points: z.array(devicePointInputSchema).min(1).describe("数据点列表（至少一个点）"),
 }).passthrough();
 
 const forwardTargetInputSchema = z.object({
     name: z.string().describe("转发目标名称"),
-    abbr: z.string().describe("转发目标标识（候选，info-gatherer 提取）"),
+    instanceId: z.string().optional().describe("实例 id（channel{N} 顺序句柄，缺省时自动分配）"),
+    action: z.enum(["add", "modify"]).optional().describe("操作类型（沿用既有链路成对追加时为 modify）"),
+    abbr: z.string().optional().describe("已废弃（2026-10-01 旧命名格式）——以 instanceId 为准"),
     protocol: z.string().describe("转发协议，必须由用户明确提供，禁止沿用接收侧协议或猜测"),
     points: z.array(devicePointInputSchema).optional().describe(
         "转发点业务字段（必要项）：按采集点顺序与采集点一一对应；" +
@@ -132,6 +140,46 @@ function pickPlanFields(
 }
 
 // ── 映射逻辑 ──────────────────────────────────────────────
+// 身份规则（agent.md §3.2.1.3，2026-10-01 设计修订）：实例 id = channel{N} 顺序句柄
+//（未使用最小序号 = channelStart 起递增；全服务类型共享同一序号空间）；点 key =
+// {设备前缀}_{裸id} 无条件前缀；转发点 key = {writer实例id}.{点key}。旧
+// {site_abbr}_{target_abbr} 命名已废弃（不保留兼容）。
+
+/** plan 透传字段的剥离清单：身份/元字段不进实例配置。 */
+const PLAN_META_FIELDS = [
+    "name",
+    "prefix",
+    "action",
+    "instanceId",
+    "abbr",
+    "protocol",
+    "points",
+];
+
+/** 解析设备/转发目标的显式身份（prefix/instanceId/action，缺省时确定性推导）。 */
+function resolve_plan_identity(
+    item: Record<string, unknown>,
+): { prefix: string; instanceId: string | null; action: "add" | "modify" } {
+    const name = String(item["name"] ?? "");
+    let prefix = typeof item["prefix"] === "string" ? item["prefix"].trim() : "";
+    // 前缀不含下划线（§3.2.1.3c）：注册表重建/设备归属按点 key 首个 `_` 切分，
+    // 前缀带 `_` 会破坏该假设——非法字符直接剔除而非转成 `_`
+    if (prefix !== "" && !/^[a-zA-Z][a-zA-Z0-9]*$/.test(prefix)) {
+        prefix = prefix.replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+    }
+    if (prefix === "") {
+        prefix = device_prefix_candidate(name);
+        if (!/^[a-zA-Z][a-zA-Z0-9]*$/.test(prefix)) {
+            prefix = prefix.replace(/[^a-zA-Z0-9]/g, "").toLowerCase() || "dev";
+        }
+    }
+    const instanceId =
+        typeof item["instanceId"] === "string" && item["instanceId"] !== ""
+            ? item["instanceId"]
+            : null;
+    const action = item["action"] === "modify" ? "modify" : "add";
+    return { prefix, instanceId, action };
+}
 
 export function normalize_protocol(protocol: string): string {
     return protocol.replace(/_tcp$/, "").replace(/^tcp_/, "");
@@ -210,11 +258,14 @@ function fill_default_fields(
 export function generate_steps(
     input: z.infer<typeof planStepsInputSchema>,
     registry: McpServiceRegistry,
-    fallback_site_abbr: string,
+    opts?: { channelStart?: number },
 ): { steps: ServiceStep[]; warnings: string[]; fatal: string | null } {
     const steps: ServiceStep[] = [];
     const warnings: string[] = [];
-    const site_abbr = input.site?.abbr || fallback_site_abbr || "";
+    // channel 序号分配（§3.2.1.3）：channelStart = 现存最大序号（高位水印），
+    // 本批次内递增——writer/reader 相邻序号（一次接入产生的实例对天然相邻）
+    let channelSeq = Math.max(0, opts?.channelStart ?? 0);
+    const alloc_channel_id = (): string => `channel${++channelSeq}`;
 
     for (const dev of input.devices ?? []) {
         const protocol = normalize_protocol(dev.protocol);
@@ -228,15 +279,17 @@ export function generate_steps(
         const writer_entry = registry.queryRegistry(svc_type);
         const identity_fields = writer_entry?.point_schema.identity_fields ?? [];
 
-        const target_abbr = dev.abbr || sanitize_identifier(dev.name);
-        const instance_id = site_abbr
-            ? `${site_abbr}_${target_abbr}`
-            : target_abbr;
+        const dev_raw = dev as unknown as Record<string, unknown>;
+        const identity = resolve_plan_identity(dev_raw);
+        const instance_id = identity.instanceId ?? alloc_channel_id();
+        const prefix = identity.prefix;
 
-        // 点名三态 + 硬约束（§3.2.1.3b）：空字符串视为无点名 → 从身份字段生成；
-        // 格式不符 → 从身份字段重新生成；超长 → 报错；
+        // 点名三态 + 硬约束（§3.2.1.3b）：格式不符/超长 → 报错；系统不自动生成。
+        // 点 key = {prefix}_{裸id} 无条件前缀（§3.2.1.3b）——重复（同一设备内部真重名）
+        // 在此处与 merge 层双重拦截。
         // 点重复（identity_fields 组合重复）→ 按报告口径返回，不产出任何步骤
         const seen_identity = new Map<string, string>();
+        const seen_keys = new Set<string>();
         const points: ServicePoint[] = [];
 
         for (const p of dev.points) {
@@ -254,8 +307,8 @@ export function generate_steps(
                 };
             }
 
-            // 点名→id（agent.md §3.2.1.3b，2026-09-23 裁定）：id 来自提取层翻译或
-            // 用户合规英文原文——系统不自动生成，格式不符报告用户，不自动替换
+            // 裸 id → 点 key（agent.md §3.2.1.3b，2026-09-23 裁定 + 2026-10-01 前缀修订）：
+            // id 来自提取层翻译或用户合规英文原文——系统不自动生成，格式不符报告用户
             const raw_id = typeof raw["id"] === "string" ? (raw["id"] as string) : "";
             const derived = derive_point_id(
                 raw_id,
@@ -270,15 +323,37 @@ export function generate_steps(
                     fatal: `设备 "${dev.name}" 的点「${name_raw}」${derived.error}——请向用户提供合规英文点名（字母开头，仅字母/数字/下划线，1K 以内）后重试`,
                 };
             }
-            const id = derived.id;
-            const id_err = identifier_error(id, "point.id");
+            let bare_id = derived.id;
+            // 幂等防重（P0 修复）：方案层装配可能已携带完整 key（含 pointMap 沿用的
+            // 既有 key）——已带本设备前缀的 id 先剥前缀再拼接，杜绝 wt1_wt1_windspeed
+            // 双重前缀（落盘 key 与用户确认的方案不一致）
+            if (bare_id.startsWith(`${prefix}_`)) {
+                bare_id = bare_id.slice(prefix.length + 1);
+            }
+            if (bare_id === "") {
+                return {
+                    steps,
+                    warnings,
+                    fatal: `设备 "${dev.name}" 存在点的英文标识为空前缀（"${String(raw["id"])}"）——请提供有效的英文标识`,
+                };
+            }
+            const id_err = identifier_error(bare_id, "point.id");
             if (id_err !== null) {
                 return {
                     steps,
                     warnings,
-                    fatal: `设备 "${dev.name}" 的点「${name_raw}」的英文标识 "${id}" ${id_err}——请修正后重试，系统不自动替换`,
+                    fatal: `设备 "${dev.name}" 的点「${name_raw}」的英文标识 "${bare_id}" ${id_err}——请修正后重试，系统不自动替换`,
                 };
             }
+            const key = `${prefix}_${bare_id}`;
+            if (seen_keys.has(key)) {
+                return {
+                    steps,
+                    warnings,
+                    fatal: `设备 "${dev.name}" 的点 key "${key}" 重复（同一设备内部真重名）——请为重复的点名提供不同的英文标识`,
+                };
+            }
+            seen_keys.add(key);
 
             if (identity_fields.length > 0) {
                 const ikey = identity_field_key(raw, identity_fields);
@@ -292,40 +367,39 @@ export function generate_steps(
                                 `设备 "${dev.name}"`,
                                 [
                                     { identity: ikey, id: prev_id },
-                                    { identity: ikey, id },
+                                    { identity: ikey, id: bare_id },
                                 ],
                             ),
                         };
                     }
-                    seen_identity.set(ikey, id);
+                    seen_identity.set(ikey, bare_id);
                 }
             }
 
-            const pt: Record<string, unknown> = { id, shm_id: 0 };
+            const pt: Record<string, unknown> = { id: key, shm_id: 0 };
             // 点名随点持久化（2026-09-17 裁定）：config.json 保存用户原始描述，
             // 作为跨会话描述查重与对点展示的依据；Go 侧 json.Unmarshal 忽略该字段
             pt["name"] = name_raw;
             for (const [k, v] of Object.entries(raw)) {
-                // id 已由 derive_point_id 定案、name 已原样保留——raw 的同名字段不回填
+                // id 已由 derive_point_id + 前缀定案、name 已原样保留——raw 的同名字段不回填
                 if (k !== "name" && k !== "id") pt[k] = v;
             }
             points.push(pt as unknown as ServicePoint);
         }
 
-        const dev_raw = dev as unknown as Record<string, unknown>;
         const instance: Record<string, unknown> = {
             id: instance_id,
             name: dev.name,
         };
         Object.assign(
             instance,
-            flatten_plan_fields(dev_raw, ["name", "abbr", "protocol", "points"]),
+            flatten_plan_fields(dev_raw, PLAN_META_FIELDS),
         );
 
         fill_default_fields(instance, registry.queryRegistry(svc_type));
 
         steps.push({
-            action: "add",
+            action: identity.action,
             service_type: svc_type,
             instance,
             points,
@@ -342,10 +416,9 @@ export function generate_steps(
                 continue;
             }
 
-            const target_abbr = ft.abbr || sanitize_identifier(ft.name);
-            const forward_instance_id = site_abbr
-                ? `${site_abbr}_${target_abbr}`
-                : target_abbr;
+            const ft_raw = ft as unknown as Record<string, unknown>;
+            const ft_identity = resolve_plan_identity(ft_raw);
+            const forward_instance_id = ft_identity.instanceId ?? alloc_channel_id();
 
             const reader_entry = registry.queryRegistry(svc_type);
             const system_fields = new Set(["key", "shm_id", "id", "name"]);
@@ -353,7 +426,6 @@ export function generate_steps(
                 .map((f) => f.name)
                 .filter((f) => !system_fields.has(f));
 
-            const ft_raw = ft as unknown as Record<string, unknown>;
             const ft_points_raw = Array.isArray(ft_raw["points"])
                 ? (ft_raw["points"] as unknown[]).map(
                       (p) => p as Record<string, unknown>,
@@ -417,13 +489,13 @@ export function generate_steps(
             };
             Object.assign(
                 instance,
-                flatten_plan_fields(ft_raw, ["name", "abbr", "protocol"]),
+                flatten_plan_fields(ft_raw, PLAN_META_FIELDS),
             );
 
             fill_default_fields(instance, registry.queryRegistry(svc_type));
 
             steps.push({
-                action: "add",
+                action: ft_identity.action,
                 service_type: svc_type,
                 instance,
                 points: reader_points,
@@ -720,43 +792,78 @@ function validate_step_invariants(
     return null;
 }
 
-function inheritExistingFields(
-    input: z.infer<typeof planStepsInputSchema>,
-    registry: McpServiceRegistry,
-    site_abbr: string,
-    config: Record<string, unknown> | null,
-): void {
-    if (!config) return;
-    const byId = new Map<string, { inst: Record<string, unknown>; st: string }>();
-    const byName = new Map<string, { inst: Record<string, unknown>; st: string }>();
+/** 现存实例的最大 channel 序号（高位水印近似——已删序号无痕，§3.2.1.3）。 */
+export function channel_watermark_of(config: Record<string, unknown>): number {
+    let max = 0;
     for (const [st, list] of Object.entries(config)) {
         if (st === "c4_shm_manager" || !Array.isArray(list)) continue;
         for (const inst of list as Record<string, unknown>[]) {
-            const pair = { inst, st };
-            if (typeof inst["id"] === "string") byId.set(String(inst["id"]), pair);
-            if (typeof inst["name"] === "string") byName.set(String(inst["name"]), pair);
+            const m = String(inst["id"] ?? "").match(/^channel(\d+)$/);
+            if (m) max = Math.max(max, Number(m[1]));
+        }
+    }
+    return max;
+}
+
+function inheritExistingFields(
+    input: z.infer<typeof planStepsInputSchema>,
+    _registry: McpServiceRegistry,
+    config: Record<string, unknown> | null,
+): void {
+    if (!config) return;
+    const byId = new Map<string, Record<string, unknown>>();
+    const byName = new Map<string, Record<string, unknown>>();
+    // 点前缀 → 实例（writer 点 key 首个 `_` 之前的分组，§3.2.1.3a 前缀归属）
+    const byPrefix = new Map<string, Record<string, unknown>>();
+    for (const [st, list] of Object.entries(config)) {
+        if (st === "c4_shm_manager" || !Array.isArray(list)) continue;
+        for (const inst of list as Record<string, unknown>[]) {
+            if (typeof inst["id"] === "string") byId.set(String(inst["id"]), inst);
+            if (typeof inst["name"] === "string") byName.set(String(inst["name"]), inst);
+            for (const p of (inst["points"] as Record<string, unknown>[] | undefined) ?? []) {
+                const pid = String(p["id"] ?? p["key"] ?? "");
+                const us = pid.indexOf("_");
+                if (us > 0 && !byPrefix.has(pid.slice(0, us))) {
+                    byPrefix.set(pid.slice(0, us), inst);
+                }
+            }
         }
     }
     const inherit = (item: Record<string, unknown>) => {
-        // 匹配优先级：推导 id（{site_abbr}_{abbr}）→ 实例 name 精确匹配（增量轮 LLM 常缺 abbr）
-        const abbr = (item["abbr"] as string) || sanitize_identifier(String(item["name"] ?? ""));
-        const id = abbr ? (site_abbr ? `${site_abbr}_${abbr}` : abbr) : "";
+        // 匹配优先级：显式 instanceId → 点前缀归属 → 实例 name 精确匹配
+        const name = String(item["name"] ?? "");
+        let prefix = typeof item["prefix"] === "string" ? item["prefix"] : "";
+        if (prefix === "") prefix = device_prefix_candidate(name);
         const hit =
-            (id && byId.get(id)) ||
-            (item["name"] !== undefined ? byName.get(String(item["name"])) : undefined);
+            (typeof item["instanceId"] === "string" && item["instanceId"] !== ""
+                ? byId.get(String(item["instanceId"]))
+                : undefined) ??
+            byPrefix.get(prefix) ??
+            (name !== "" ? byName.get(name) : undefined);
         if (!hit) return;
-        const ex = hit.inst;
         // 协议以实例所属服务为准强制覆盖——实例的服务类型即协议事实源，
         // LLM 记忆缺失时的协议猜测（如 modbus）不得污染增量操作
-        const entry = registry.get_entry(hit.st);
+        const entry = _registry.get_entry(
+            String(
+                Object.entries(config).find(
+                    ([, list]) =>
+                        Array.isArray(list) &&
+                        (list as Record<string, unknown>[]).includes(hit),
+                )?.[0] ?? "",
+            ),
+        );
         const proto = entry?.protocols?.[0]?.protocol;
         if (proto) item["protocol"] = normalize_protocol(proto);
-        for (const [k, v] of Object.entries(ex)) {
+        if (typeof item["instanceId"] !== "string" || item["instanceId"] === "") {
+            item["instanceId"] = String(hit["id"] ?? "");
+            item["action"] = "modify";
+        }
+        for (const [k, v] of Object.entries(hit)) {
             if (k === "id" || k === "name" || k === "points") continue;
             if (item[k] === undefined && v !== undefined) item[k] = v;
         }
         const have = new Set(
-            (Array.isArray(ex["points"]) ? (ex["points"] as Record<string, unknown>[]) : [])
+            (Array.isArray(hit["points"]) ? (hit["points"] as Record<string, unknown>[]) : [])
                 .map((p) => p["addr"]),
         );
         if (Array.isArray(item["points"]) && (item["points"] as unknown[]).length > 0) {
@@ -775,10 +882,8 @@ function inheritExistingFields(
 
 export function createOutputPlanStepsTool(
     registry: McpServiceRegistry,
-    site?: { name: string; abbr: string } | null,
     configPath?: string,
 ) {
-    const fallback_site_abbr = site?.abbr ?? "";
     return tool(
         async (input: z.infer<typeof planStepsInputSchema>) => {
             // 形状归一化：兼容 connection 嵌套（output_access_plan 形状）与平铺两种写法。
@@ -812,7 +917,6 @@ export function createOutputPlanStepsTool(
             inheritExistingFields(
                 input,
                 registry,
-                input.site?.abbr || fallback_site_abbr || "",
                 current_config,
             );
 
@@ -976,11 +1080,29 @@ export function createOutputPlanStepsTool(
                 return validation_error;
             }
 
-            const { steps, warnings, fatal } = generate_steps(
-                input,
-                registry,
-                fallback_site_abbr,
-            );
+            // channelStart 取 config 现存最大序号与注册表水印的较大值（防已删序号复用）
+            let registry_watermark = 0;
+            if (configPath) {
+                try {
+                    const reg = JSON.parse(
+                        readFileSync(
+                            configPath.replace(/[^/\\]*$/, "") + "abbr_registry.json",
+                            "utf-8",
+                        ),
+                    ) as { channelHighWatermark?: unknown };
+                    if (typeof reg.channelHighWatermark === "number") {
+                        registry_watermark = reg.channelHighWatermark;
+                    }
+                } catch {
+                    registry_watermark = 0;
+                }
+            }
+            const { steps, warnings, fatal } = generate_steps(input, registry, {
+                channelStart: Math.max(
+                    current_config ? channel_watermark_of(current_config) : 0,
+                    registry_watermark,
+                ),
+            });
 
             if (fatal) {
                 return JSON.stringify({
@@ -992,16 +1114,15 @@ export function createOutputPlanStepsTool(
 
             if (steps.length === 0) {
                 // 步骤级不变式：转发配对 / 描述查重 / 转发归属（双路径统一）
-            const step_invariants_error = validate_step_invariants(
-                steps,
-                current_config,
-                registry,
-            );
-            if (step_invariants_error) {
-                return JSON.stringify({ success: false, error: step_invariants_error });
-            }
-
-            return JSON.stringify({
+                const step_invariants_error = validate_step_invariants(
+                    steps,
+                    current_config,
+                    registry,
+                );
+                if (step_invariants_error) {
+                    return JSON.stringify({ success: false, error: step_invariants_error });
+                }
+                return JSON.stringify({
                     success: false,
                     error: "未能生成任何操作步骤——请检查设备协议是否匹配 Registry 中的服务",
                     warnings,
@@ -1029,12 +1150,13 @@ export function createOutputPlanStepsTool(
             name: "output_plan_steps",
             description:
                 "将接入方案/变更请求转化为增量 MCP 服务配置步骤。" +
-                "新增接入：输入 devices（info-gatherer 产出，含 abbr/协议/平铺的实例字段）、可选的 site 和 forward_targets。" +
+                "新增接入：输入 devices（含 prefix 点 key 前缀 / instanceId 实例句柄 / action / 协议 / 平铺实例字段）与 forward_targets。" +
                 "修改/删除：输入 changes（action=modify/delete + 目标实例 id + 变更字段）。" +
                 "增量语义：对已接入设备/转发目标再次 output devices/forward_targets 时，自动继承现有配置" +
                 "（端口等无需重复提供）并仅合并新增点；changes 中 action=delete 且带 points → 仅删除这些点" +
                 "（实例保留，转发侧级联删除）；delete 不带 points → 删除整个实例（含其全部转发点）。" +
-                "内部自动完成：协议→服务类型映射、instance.id 生成（{site_abbr}_{abbr}）、默认字段填充、运行时强校验、转发目标映射。" +
+                "内部自动完成：协议→服务类型映射、实例 id 分配（channel{N} 顺序句柄）、" +
+                "点 key 生成（{prefix}_{裸id}）、默认字段填充、运行时强校验、转发目标映射。" +
                 "调用时机：用户确认方案后。",
             schema: planStepsInputSchema,
         },

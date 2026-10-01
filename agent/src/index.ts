@@ -634,8 +634,10 @@ async function main(): Promise<void> {
     // 在服务器监听之后执行——收敛期间 Agent 仍可响应（C4_RS_00241）
     await runStartupWaterfall(config, mcpManager, registry, logger, stateTracker);
 
-    // ── Step 11: Load / rebuild abbr registry ──
-    // 记忆库是可重建派生数据：丢失/损坏/entries 为空时从 config.json 重建（agent.md §3.2.1.3a）
+    // ── Step 11: Load / rebuild device identity registry ──
+    // 注册表是可重建派生数据：丢失/损坏/entries 为空时从 config.json 按点 key 前缀
+    // 分组重建（agent.md §3.2.1.3a）；channelHighWatermark 不可重建，丢失时退化为
+    // 现存实例最大序号——备份时 abbr_registry.json 须随 config.json 一并保留
     const abbr_registry_path = path.join(
         path.dirname(config.shm_manager.config_path),
         "abbr_registry.json",
@@ -650,18 +652,16 @@ async function main(): Promise<void> {
                 data_config = undefined;
             }
         }
-        const abbr = await load_abbr_registry(
-            abbr_registry_path,
-            data_config,
-            config.site ?? null,
-        );
+        const abbr = await load_abbr_registry(abbr_registry_path, data_config);
         if (abbr.entries.length > 0 || existsSync(abbr_registry_path)) {
             await save_abbr_registry(abbr, abbr_registry_path);
         }
-        logger.info(`abbr 记忆库已加载（entries: ${abbr.entries.length}）`);
+        logger.info(
+            `设备身份注册表已加载（entries: ${abbr.entries.length}，channelHighWatermark: ${abbr.channelHighWatermark}）`,
+        );
     } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
-        logger.warn(`abbr 记忆库加载失败: ${msg}`);
+        logger.warn(`设备身份注册表加载失败: ${msg}`);
     }
 
     logger.info("C4 Agent 就绪");

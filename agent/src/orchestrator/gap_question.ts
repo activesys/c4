@@ -7,6 +7,8 @@
 //   - 裸值兜底绑定：提问后用户以纯值片段（端口/IP/地址范围）作答时，
 //     绑定给 pending 缺口——仅接受"整条消息就是一个值"的形态，宁可放过不可错绑。
 
+import { zh_convert } from "./zh_numeral.js";
+
 /** 结构化缺口：key 供 pending 绑定与日志使用，text 复述/收摊，ask 确切提问 */
 export interface Gap {
     key: string;
@@ -208,6 +210,62 @@ export function bind_bare(key: string, bare: BareValue, pointCount: number | nul
         }
     }
     return null;
+}
+
+// ── 设备缺口应答绑定（recv.device，agent.md §3.2.1.3c）──────
+// 设备名称/编号必答缺口（依赖序：场站后、接入协议前）的追问应答确定性落位：
+//   - 全名（「2号风机」「升压站」「3#主变」）→ 原样接受；
+//   - 裸数字/中文数字（「2」「三号」）→ 仅当累积文本存在设备类型词时绑定
+//     （"2" → 2号风机），类型词缺失 → 不猜，返回 null 追问全名（宁可放过不可错绑）。
+//     裸数字限 1~2 位——3 位以上数字（端口/地址量级）不作设备编号解释。
+
+const DEVICE_TYPE_WORD_RE =
+    /(风机|风电机组|升压站|测风塔|主变|变压器|逆变器|机组|光伏|储能|数据源)/;
+
+export function bind_device_answer(
+    message: string,
+    accumulated: string[],
+): string | null {
+    const t = message.trim().replace(/[。.！!？?，,]\s*$/, "");
+    if (t.length === 0 || t.length > 24) {
+        return null;
+    }
+    // 裸编号形态（「2」「3号」「三号」「3#」）→ 受类型词守卫约束（§3.2.1.3c：类型词
+    // 缺失 → 不猜，追问全名）。纯「N号」不是名称——无类型词可依附时宁可放过
+    const bareAr = t.match(/^(\d{1,4})\s*[#号]?$/);
+    const bareZh = /^[零一二两三四五六七八九十]{1,6}号?$/.test(t) ? t : null;
+    if (!bareAr && !bareZh) {
+        // 端口/地址/IP 量级的数字串（「9001」「192.168.1.5」）不是设备名——放过，
+        // 走正常缺口追问（宁可放过不可错绑）
+        if (/^[\d.]+$/.test(t)) {
+            return null;
+        }
+        // 全名（含设备类型词或显式命名）→ 原样接受
+        return t;
+    }
+    // 裸数字/中文数字 → 需累积文本存在设备类型词
+    const ctx = accumulated.join("");
+    const typeM = ctx.match(DEVICE_TYPE_WORD_RE);
+    if (!typeM) {
+        return null;
+    }
+    let num: number;
+    if (bareAr) {
+        num = Number(bareAr[1]);
+        if (num >= 100) {
+            return null; // 端口/地址量级的数字不猜成设备编号
+        }
+    } else {
+        const n = zh_convert(bareZh!.replace(/号$/, ""));
+        if (n === null) {
+            return null;
+        }
+        num = n;
+    }
+    if (num <= 0) {
+        return null;
+    }
+    return `${num}号${typeM[1]}`;
 }
 
 // ── 接收端口确定性捕获（2026-09-28 用例7：监听9001端口）──────

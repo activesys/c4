@@ -245,7 +245,8 @@ cd agent/frontend && npm ci && npm run build   # tsc --noEmit && vite build → 
 ├── config.json                      # MCP 全量配置（数据路径权威数据源）
 ├── config.json.prev.1~.3            # config.json 滚动历史（保留最近 3 版，回滚用）
 ├── pending_change.json              # 配置事务标记（变更期间存在，完成即删除）
-├── abbr_registry.json               # 场站缩写记忆库（可重建派生数据）
+├── abbr_registry.json               # 设备身份注册表：设备名→宿主实例+点前缀+pointMap
+│                                    #   （pointMap/前缀可重建；channelHighWatermark 不可重建，agent.md §3.2.1.3a）
 ├── state/                           # 状态（当前内存态，重启重建；filesystem 持久化待实现，见 §10）
 └── logs/                            # 预留目录，当前未使用（运行日志见 /var/log/c4/agent 与 agent.md §5.2）
 
@@ -512,7 +513,7 @@ sudo systemctl reset-failed c4-asfp2-client
 | `config.json` | 首次接入创建，跨重启永久 | MCP 全量配置，数据路径权威数据源（agent.md §3.2） |
 | `config.json.prev.1~.3` | 随 config.json 更新（滚动 3 版） | 变更事务回滚源（c4_architecture.md §3.1.2）；恢复前先校验 parse + schema |
 | `pending_change.json` | 变更事务期间 | 事务标记（变更描述、涉及服务、回滚源路径），成功或回滚后删除 |
-| `abbr_registry.json` | 可重建派生数据 | 场站缩写记忆库；丢失/损坏可从 config.json 重建 |
+| `abbr_registry.json` | 可重建派生数据（**channelHighWatermark 除外——不可重建，须随 config.json 一并备份**） | 设备身份注册表（设备名→宿主实例、点前缀、pointMap）；丢失/损坏可从 config.json 按点 key 前缀分组重建 |
 | `state/` | 运行期 | 当前内存态（AgentStateTracker，重启重建）；filesystem 持久化待实现（见 §10） |
 | `logs/` | 运行期 | 预留，当前未使用；运行日志由双层日志承担（console 摘要 → journald + NDJSON 流水 → `/var/log/c4/agent`，见 agent.md §5.2） |
 | `/run/c4/` | 运行期（tmpfs） | MCP 服务 Unix socket（`<service>.sock`，0660 c4:c4），由单元 `RuntimeDirectory=c4` 提供 |

@@ -94,28 +94,28 @@ ASFP2 Server 监听实例。
     "c4_asfp2_server": [
         {
             "name": "接收I区风机数据服务",
-            "id": "hnals_I_windturbine_receiver",
+            "id": "channel1",
             "port": 9000,
             "t1": 0,
             "t2": 0,
             "forward_kack": 255,
             "inverse_keep": 0,
             "points": [
-                {"id": "windturbine1_windspeed", "name": "1#风机风速", "addr": 1000, "shm_id": 0},
-                {"id": "windturbine1_winddirection", "name": "1#风机风向", "addr": 1001, "shm_id": 0}
+                {"id": "wt1_windspeed", "name": "1#风机风速", "addr": 1000, "shm_id": 0},
+                {"id": "wt1_winddirection", "name": "1#风机风向", "addr": 1001, "shm_id": 0}
             ]
         },
         {
             "name": "接收I区升压站数据服务",
-            "id": "hnals_I_transformer_receiver",
+            "id": "channel2",
             "port": 9001,
             "t1": 0,
             "t2": 0,
             "forward_kack": 255,
             "inverse_keep": 0,
             "points": [
-                {"id": "uab", "name": "UAB 线电压", "addr": 2000, "shm_id": 0},
-                {"id": "uac", "name": "UAC 线电压", "addr": 2001, "shm_id": 0}
+                {"id": "syz_uab", "name": "UAB 线电压", "addr": 2000, "shm_id": 0},
+                {"id": "syz_uac", "name": "UAC 线电压", "addr": 2001, "shm_id": 0}
             ]
         }
     ]
@@ -127,7 +127,7 @@ ASFP2 Server 监听实例。
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `name` | string | — | 实例名称，用于日志和监控标识 |
-| `id` | string | — | 实例标识符，全局唯一。与 point.id 组合形成 `{service_id}.{point_id}` 的全局 key |
+| `id` | string | — | 实例标识符，全局唯一（接入分配的顺序句柄 channel{N}，用户不可见，agent.md §3.2.1.3）。与 point id 组合形成 `{service_id}.{point_id}` 的全局 key |
 | `port` | int | 必填，无默认值 | ASFP2 服务端监听端口，每个实例必须唯一。**端口必须由用户显式指定**（见 agent.md「监听端口的必填约束」）：用户未提供端口时 Agent 必须先询问，禁止自动选择或使用默认值；用户指定的端口被占用时原样写入，由 Start 阶段报错上报（PORT_BIND_FAILED）。**已接入实例的端口永不变更**——在其上加点/修改时端口保持原值 |
 | `t1` | int | `0` | 反向 KeepAlive 发送间隔（秒）。`0` 表示关闭 T1 定时器（不发送心跳），此时 `t2` 无效 |
 | `t2` | int | `0` | 反向 KeepAlive 应答超时（秒）。仅在 `t1 > 0` 时有效。`0` 表示关闭 T2 应答等待（不检测对端存活性），约束 `t2 < t1` |
@@ -660,7 +660,7 @@ socket，stdout/stderr 无协议负载，均可用于日志输出。本服务是
 - **统一默认 logger**：`main()` 起始读 env 初始化 handler 并 `slog.SetDefault`——go-sdk
   v1.6.1 内部经 slog 输出的日志随之走同一 handler（同级别、同前缀），info 级别下无噪声；
 - 公共封装置于 `c4/mcp/internal/logger`（新建），供全部 MCP 复用（modbus/iec104/influxdb 后续接入）；
-- 属性规范：每条日志必带 `svc`（服务名）与 `inst`（instance_id，如 hnals_wt1），业务字段随事件附带；
+- 属性规范：每条日志必带 `svc`（服务名）与 `inst`（instance_id，如 channel1），业务字段随事件附带；
 - 现有 panic 恢复的 `log.Printf` 迁移为 slog err 级；`log.Fatal` 保留。
 
 ### 9.4 开关（环境变量）
@@ -716,7 +716,7 @@ socket，stdout/stderr 无协议负载，均可用于日志输出。本服务是
 2. **限频**：`parse_error`（任一原因共享一条额度）、`key_not_mapped`、`shm_write_failed`
    首条立即输出，其后不再重复——数量与分布见每周期 `stats_periodic`；
 3. **禁止记录**：点位业务值、完整报文 hex（debug 下 raw 摘要 ≤32 字节）；
-4. **验收**：单实例接入全生命周期可仅凭 `journalctl -u c4-asfp2-server | grep hnals_wt1` 还原；
+4. **验收**：单实例接入全生命周期可仅凭 `journalctl -u c4-asfp2-server | grep channel1` 还原；
    `journalctl -u c4-asfp2-server -p warning` 即可看到全部异常（crit/err/warning，PRIORITY 原生过滤）；
    稳态 info 级别下每实例每分钟 ≤2 行（stats 1 行 + 事件 0~1 行）。
 

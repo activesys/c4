@@ -11,6 +11,7 @@ import {
     ask_protocol,
     bind_bare,
     bind_change_answer,
+    bind_device_answer,
     is_forward_mirror_answer,
     parse_bare_value,
     parse_receive_port,
@@ -329,5 +330,40 @@ describe("parse_receive_port（接收端口确定性捕获，2026-09-28 用例7�
     it("无端口表述 → null", () => {
         expect(parse_receive_port("接入1号风机的数据")).toBeNull();
         expect(parse_receive_port("")).toBeNull();
+    });
+});
+
+// ── 设备缺口应答绑定（recv.device，agent.md §3.2.1.3c）──────
+
+describe("bind_device_answer（§3.2.1.3c 三层识别 L0+追问应答）", () => {
+    it("全名原样接受", () => {
+        expect(bind_device_answer("2号风机", [])).toBe("2号风机");
+        expect(bind_device_answer("升压站", [])).toBe("升压站");
+        expect(bind_device_answer("3#主变", [])).toBe("3#主变");
+    });
+
+    it("裸数字仅在累积文本存在设备类型词时绑定", () => {
+        expect(bind_device_answer("2", ["接入1号风机"])).toBe("2号风机");
+        expect(bind_device_answer("2", ["升压站数据接入"])).toBe("2号升压站");
+    });
+
+    it("类型词缺失 → 不猜，返回 null 追问全名（宁可放过不可错绑）", () => {
+        expect(bind_device_answer("2", ["你好"])).toBeNull();
+        expect(bind_device_answer("2", [])).toBeNull();
+    });
+
+    it("中文数字应答（三号）→ 3号X", () => {
+        expect(bind_device_answer("三号", ["风机的数据"])).toBe("3号风机");
+    });
+
+    it("裸「N号」「N#」形态受类型词守卫约束（不是名称）", () => {
+        expect(bind_device_answer("3号", ["接入风机的数据"])).toBe("3号风机");
+        expect(bind_device_answer("3号", ["你好"])).toBeNull();
+        expect(bind_device_answer("3#", ["升压站数据"])).toBe("3号升压站");
+    });
+
+    it("端口/地址量级数字（100 以上）不作设备编号解释", () => {
+        expect(bind_device_answer("9001", ["风机的数据"])).toBeNull();
+        expect(bind_device_answer("100", ["风机的数据"])).toBeNull();
     });
 });

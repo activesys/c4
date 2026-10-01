@@ -516,7 +516,7 @@ Agent 生成的配置文件中，各 MCP Server 的 `points` 数组中 `shm_id`
 > 或文件内容为空 JSON，c4_shm_manager 创建默认 10 万点共享内存空间（max_points = 100000, point_count = 0），
 > 不涉及 shm_id 分配和配置回填。
 
-Writer 端通过 `{service_id}.{point_id}` 组合形成全局唯一 key（如 `hnals_1_scada.windspeed`），
+Writer 端通过 `{service_id}.{point_id}` 组合形成全局唯一 key（如 `channel1.wt1_windspeed`），
 Reader 端通过 `key` 字段引用同一 key。`c4_shm_manager` 据此为同一 data flow 的双方分配相同 shm_id。
 
 ```
@@ -535,10 +535,10 @@ Reader 端通过 `key` 字段引用同一 key。`c4_shm_manager` 据此为同一
    for each Writer 实例：
      for each entry in points：
        pid = next_id++
-       key = "{service_id}.{point_id}"   // point_id 为 point 的 id 字段，如 "windspeed"
+       key = "{service_id}.{point_id}"   // point_id 为 point 的点 key，如 "wt1_windspeed"（§3.2.1.3）
        ┌ 若 key 已存在 → 报错（key 冲突，存在重复的 service_id 或 point_id），拒绝创建
        └ 若 key 唯一 → 记录 key → pid 映射
-   → 如 `hnals_1_scada.windspeed → 1`, `hnals_1_scada.temperature → 2`, ...
+   → 如 `channel1.wt1_windspeed → 1`, `channel1.wt1_temperature → 2`, ...
 6. 回填 Reader 的 shm_id：
    遍历 reader 中列出的每个 MCP Server 类型，对每个 point entry：
      根据 entry.key 查找步骤 5 记录的 key → pid 映射
@@ -558,12 +558,12 @@ sequenceDiagram
     A->>S: create_shm({instance_id, config_path})
 
     S->>CFG: 读取配置文件
-    Note over S: 遍历 Writer：<br/>modbus#1: [{id:windspeed},{id:temperature}]<br/>modbus#2: [{id:windspeed},{id:temperature}]<br/>iec104#1: [{id:uab},{id:ubc},{id:uac}]<br/>iec104#2: [{id:alarm1},{id:alarm2},{id:alarm3}]<br/>writer_points=10
+    Note over S: 遍历 Writer：<br/>channel1: [{id:wt1_windspeed},{id:wt1_temperature}]<br/>channel2: [{id:wt2_windspeed},{id:wt2_temperature}]<br/>channel3: [{id:zy1_uab},{id:zy1_ubc},{id:zy1_uac}]<br/>channel4: [{id:zy2_alarm1},{id:zy2_alarm2},{id:zy2_alarm3}]<br/>writer_points=10
 
     S->>S: max_points = 10×2 = 20<br/>shm_open + ftruncate + mmap
-    Note over S: 分配 shm_id 并记录 key 映射：<br/>hnals_1_scada.windspeed → 1<br/>hnals_1_scada.temperature → 2<br/>...<br/>hnals_2_transformer.alarm3 → 10
+    Note over S: 分配 shm_id 并记录 key 映射：<br/>channel1.wt1_windspeed → 1<br/>channel1.wt1_temperature → 2<br/>...<br/>channel4.zy2_alarm3 → 10
 
-    Note over S: 回填 Reader：<br/>asfp2_client[0]: key=hnals_1_scada.windspeed → shm_id=1<br/>asfp2_client[1]: key=hnals_2_scada.temperature → shm_id=4<br/>...<br/>同一 key 的多个 Reader 填入相同 shm_id
+    Note over S: 回填 Reader：<br/>asfp2_client[0]: key=channel1.wt1_windspeed → shm_id=1<br/>asfp2_client[1]: key=channel2.wt2_temperature → shm_id=4<br/>...<br/>同一 key 的多个 Reader 填入相同 shm_id
 
     S-->>A: 分配结果 (point_count=10, max_points=20, 配置文件)
 ```
@@ -702,7 +702,7 @@ shm 段已存在且 magic/版本校验通过时，附加该段并返回 success�
 
 // ========== 业务错误：Writer 端 key 冲突 ==========
 // <-- 应答
-{"jsonrpc": "2.0", "id": 1, "result": {"content": [{"type": "text", "text": "DUPLICATE_KEY: key 'hnals_1_scada.windspeed' already assigned to shm_id=1, duplicate found in c4_modbus_client[1]"}], "isError": true}}
+{"jsonrpc": "2.0", "id": 1, "result": {"content": [{"type": "text", "text": "DUPLICATE_KEY: key 'channel1.wt1_windspeed' already assigned to shm_id=1, duplicate found in c4_modbus_client[1]"}], "isError": true}}
 
 // ========== 业务错误：Reader key 不存在 ==========
 // <-- 应答
@@ -829,7 +829,7 @@ shm 段已存在且 magic/版本校验通过时，附加该段并返回 success�
 
 // ========== 业务错误：key 冲突 ==========
 // <-- 应答
-{"jsonrpc": "2.0", "id": 2, "result": {"content": [{"type": "text", "text": "DUPLICATE_KEY: key 'hnals_1_scada.windspeed' already assigned to shm_id=1, duplicate found in c4_modbus_client[1]"}], "isError": true}}
+{"jsonrpc": "2.0", "id": 2, "result": {"content": [{"type": "text", "text": "DUPLICATE_KEY: key 'channel1.wt1_windspeed' already assigned to shm_id=1, duplicate found in c4_modbus_client[1]"}], "isError": true}}
 
 // ========== 业务错误：Reader key 不存在 ==========
 // <-- 应答

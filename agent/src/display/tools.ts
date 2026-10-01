@@ -33,7 +33,7 @@ export function createDisplayTools(options: DisplayToolsOptions): StructuredTool
             filter: z
                 .string()
                 .optional()
-                .describe("可选筛选关键词：匹配设备名（实例 id）或点位名"),
+                .describe("可选筛选关键词：匹配设备名（注册表设备，按点 key 前缀归属）、实例 id 或点位名"),
         });
 
         async _call(input: { filter?: string }): Promise<string> {
@@ -47,7 +47,7 @@ export function createDisplayTools(options: DisplayToolsOptions): StructuredTool
                     pointKey: p.key,
                     addr: p.addr,
                     shm_id: p.shm_id,
-                    device: p.instance,
+                    device: p.device,
                 })),
             });
         }

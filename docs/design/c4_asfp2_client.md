@@ -98,7 +98,7 @@ ASFP2 发送实例。
 {
     "c4_asfp2_client": [
         {
-            "id": "hnals_center",
+            "id": "channel1",
             "name": "转发到中心测数据库服务器",
             "ip": "172.16.109.11",
             "port": 9999,
@@ -110,12 +110,12 @@ ASFP2 发送实例。
             "inverse_keep": 0,
             "timer": 100,
             "points": [
-                {"key": "hnals_1_scada.windspeed", "addr": 1000, "shm_id": 1},
-                {"key": "hnals_1_scada.temperature", "addr": 1001, "shm_id": 2}
+                {"key": "channel1.wt1_windspeed", "addr": 1000, "shm_id": 1},
+                {"key": "channel1.wt1_temperature", "addr": 1001, "shm_id": 2}
             ]
         },
         {
-            "id": "hnals_third_party",
+            "id": "channel2",
             "name": "转发到第三方数据服务器",
             "ip": "172.16.109.13",
             "port": 9999,
@@ -127,8 +127,8 @@ ASFP2 发送实例。
             "inverse_keep": 0,
             "timer": 100,
             "points": [
-                {"key": "hnals_2_scada.windspeed", "addr": 8002, "shm_id": 3},
-                {"key": "hnals_2_scada.temperature", "addr": 8003, "shm_id": 4}
+                {"key": "channel2.wt2_windspeed", "addr": 8002, "shm_id": 3},
+                {"key": "channel2.wt2_temperature", "addr": 8003, "shm_id": 4}
             ]
         }
     ]
@@ -139,7 +139,7 @@ ASFP2 发送实例。
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `id` | string | — | 实例标识（如 `hnals_center`），作为日志 `inst` 属性；缺省时回退 `name`，建议显式配置 |
+| `id` | string | — | 实例标识（如 `channel1`，顺序句柄，agent.md §3.2.1.3），作为日志 `inst` 属性；缺省时回退 `name`，建议显式配置 |
 | `name` | string | — | 实例名称，用于日志和监控标识 |
 | `ip` | string | — | 目标服务器 IP 地址 |
 | `port` | int | — | ASFP2 服务端口 |
@@ -157,7 +157,7 @@ ASFP2 发送实例。
 
 | 字段 | 类型 | 含义 |
 |------|------|------|
-| `key` | string | 引用的 Writer 采集点标识，格式为 `{service_id}.{point_id}`（如 `hnals_1_scada.windspeed`）。`c4_shm_manager` 根据此 key 填入与 Writer 端相同的 shm_id |
+| `key` | string | 引用的 Writer 采集点标识，格式为 `{service_id}.{point_id}`（如 `channel1.wt1_windspeed`）。`c4_shm_manager` 根据此 key 填入与 Writer 端相同的 shm_id |
 | `addr` | integer | ASFP2 协议中的 key（地址），编码到数据包的 Data 部分。取值范围 0 ~ 16777215 |
 | `shm_id` | integer | 全局 shm_id，默认 0（未分配），由 `c4_shm_manager` 分配后回填 |
 
@@ -624,7 +624,7 @@ var index map[uint32]*PointMapping
 
 // ========== 业务错误：shm_id 未分配 ==========
 // <-- 应答
-{"jsonrpc": "2.0", "id": 1, "result": {"content": [{"type": "text", "text": "SHM_ID_NOT_ASSIGNED: point hnals_1_scada.windspeed has shm_id=0"}], "isError": true}}
+{"jsonrpc": "2.0", "id": 1, "result": {"content": [{"type": "text", "text": "SHM_ID_NOT_ASSIGNED: point channel1.wt1_windspeed has shm_id=0"}], "isError": true}}
 ```
 
 ---
@@ -760,7 +760,7 @@ socket，stdout/stderr 无协议负载，均可用于日志输出。本服务是
 - **统一默认 logger**：`main()` 起始读 env 初始化 handler 并 `slog.SetDefault`——go-sdk
   v1.6.1 内部经 slog 输出的日志随之走同一 handler（同级别、同前缀），info 级别下无噪声；
 - 公共封装置于 `c4/mcp/internal/logger`（新建），供全部 MCP 复用（modbus/iec104/influxdb 后续接入）；
-- 属性规范：每条日志必带 `svc`（服务名）与 `inst`（instance_id，如 hnals_center），业务字段随事件附带；
+- 属性规范：每条日志必带 `svc`（服务名）与 `inst`（instance_id，如 channel1），业务字段随事件附带；
 - 现有 panic 恢复的 `log.Printf` 迁移为 slog err 级；`log.Fatal` 保留。
 
 ### 9.4 开关（环境变量）
@@ -817,7 +817,7 @@ socket，stdout/stderr 无协议负载，均可用于日志输出。本服务是
 2. **限频**：`encode_skipped` 首条立即输出，其后每周期汇总一条（计数见 `stats_periodic`）；
    `connect_failed` 限频为首条 + 每 60s 一条（重连本身按 §T0 周期重试）；
 3. **禁止记录**：点位业务值、完整报文 hex（debug 下 raw 摘要 ≤32 字节）；
-4. **验收**：单实例转发全生命周期可仅凭 `journalctl -u c4-asfp2-client | grep hnals_center` 还原；
+4. **验收**：单实例转发全生命周期可仅凭 `journalctl -u c4-asfp2-client | grep channel1` 还原；
    `journalctl -u c4-asfp2-client -p warning` 即可看到全部异常（crit/err/warning，PRIORITY 原生过滤）；
    稳态 info 级别下每实例每分钟 ≤2 行（stats 1 行 + 事件 0~1 行）。
 

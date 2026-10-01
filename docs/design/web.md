@@ -48,7 +48,7 @@ Web 界面依赖的 HTTP API（当前 `src/server/app.ts` 已挂载）：
 | `/api/display` | POST | 创建显示会话 `{ pointKeys[], mode?, intervalMs?, durationMinutes?, refreshCount? }`——重新订阅按钮使用（§3.5.3） | ❌（C4_FUN_00084，§3.5） |
 | `/api/display/stop` | POST | 停止显示（整会话或指定点位，body `{ pointKeys?: string[] }`） | ❌（C4_FUN_00084，§3.5） |
 
-> **确认机制说明**：后端 `AgentStreamEvent` 类型**声明**了 `interrupt` 事件，但当前 SuperWorker
+> **确认机制说明**：后端 `AgentStreamEvent` 类型**声明**了 `interrupt` 事件，但当前编排器
 > 实现**从不产出该事件**（无任何生产者，`interruptId` 也从未生成）。接入方案确认只能通过
 > **确认按钮的结构化消息**触发（见 §3.1.3），前端设计以按钮驱动为准，**不依赖 interrupt 事件**。
 
@@ -79,7 +79,7 @@ Web 界面依赖的 HTTP API（当前 `src/server/app.ts` 已挂载）：
 └────────────────────────┬───────────────────────────────────┘
                          │
                          ▼
-                SuperWorker (C4Agent wrapper)
+                Workflow 编排器（orchestrator.ts，实现 C4Agent）
 ```
 
 ### 2.2 页面结构
@@ -168,7 +168,7 @@ SSE 响应事件（`Content-Type: text/event-stream`）：
 自动附带），否则服务端历史无法恢复、跨轮工具证据丢失。
 
 **多轮上下文**：跨轮状态由两部分互补：
-- **后端按 `conversationId` 持久化完整历史**：`super_worker` 每轮结束后把 `run.output.messages`
+- **后端按 `conversationId` 持久化完整历史**：编排器每轮结束后把 `run.output.messages`
   （含工具调用/结果）按 conversationId 存入内存 Map，后续轮优先恢复服务端历史（前端 history
   仅作服务端无记录时的兜底）；nudge 消息剔除，限长 100 条。修复跨轮工具证据丢失导致的
   推理死循环（func_test_case 用例 12）。
@@ -198,7 +198,7 @@ Agent 生成接入方案后需要用户确认。**确认的唯一有效通道是
    「取消」→ POST `{ message:"[C4_BUTTON_CANCEL] 取消，不执行", history }`。
    两者都是**新的一轮对话**，不依赖任何 interrupt/resume 机制。
 
-**后端识别**（`super_worker.ts` 确认分支）：
+**后端识别**（编排器确认分支）：
 - 确认：用户消息以 `[C4_BUTTON_CONFIRM]` 开头 → 置位「已确认」→ 注入上下文并执行方案。
 - 拒绝正则：`/取消|拒绝|放弃|停止|算了|不执行|不要执行|不确认/` → 用于反向防误判。
 - 消息前缀常量在前端 `useConfirmDetect.ts`（`CONFIRM_KEYWORD` / `CANCEL_KEYWORD`）与
@@ -226,12 +226,12 @@ Agent 生成接入方案后需要用户确认。**确认的唯一有效通道是
 |----|----|
 | 允许扩展名 | `.xlsx .csv .xls .pdf .docx .doc .png .jpg .jpeg .gif .bmp .txt` |
 | 大小上限 | 50 MB |
-| 响应 | SSE 流（`text`/`done`/`error` 事件；解析为确定性步骤，**不产出 `tool_call`/`tool_result`**——2026-09-23 起随九阶段流水线生效；`done` 事件带 `conversationId`，响应头 `X-Conversation-Id` 回传会话 ID） |
+| 响应 | SSE 流（`text`/`done`/`error` 事件；解析为确定性步骤，**不产出 `tool_call`/`tool_result`**——2026-09-23 起随阶段流水线生效；`done` 事件带 `conversationId`，响应头 `X-Conversation-Id` 回传会话 ID） |
 
 #### 3.2.2 前端处理
 
 - 选择文件后立即上传，后端将文件落盘到 `/tmp` 并把路径传给 Agent，由 Agent **确定性解析**文件内容
-  （解析文本经 `<file_data>` 注入九阶段提取流水线，不再产出解析工具的 `tool_call`/`tool_result`
+  （解析文本经 `<file_data>` 注入阶段提取流水线，不再产出解析工具的 `tool_call`/`tool_result`
   卡片事件），随后流式返回解析结果。
 - **实际可解析格式提示**：仅 `.xlsx`/`.csv`/`.txt` 有对应解析工具；`.pdf`/`.docx`/图片会被
   后端接受（multer 放行）但**无解析器**，Agent 无法提取内容。前端在文件选择器中对此类格式
@@ -341,11 +341,11 @@ LLM 调用 `display_points` 建立显示会话，ChatView 消息流**顶部**插
 ┌─ PointDisplayPanel ────────────────────────────────┐
 │ ● 显示中 · 实时值模式 · 剩余 3分12秒 / 已刷 47/∞   ✕ │
 │ ┌────────────────────────────────────────────────┐ │
-│ │ 风速  hnals_wt1.windspeed      [正常]          │ │
+│ │ 风速  channel1.wt1_windspeed      [正常]          │ │
 │ │   7.256        数据时间 14:23:05（1 秒前）      │ │
 │ │   近 60s 刷新 58 次 · 平均 1.03s               │ │
 │ ├────────────────────────────────────────────────┤ │
-│ │ 功率  hnals_wt1.power          [已停止刷新 12 分钟] │ │
+│ │ 功率  channel1.wt1_power          [已停止刷新 12 分钟] │ │
 │ │   231.7        数据时间 14:11:03（12 分钟前）   │ │
 │ │   近 60s 无刷新                                │ │
 │ └────────────────────────────────────────────────┘ │
@@ -353,7 +353,9 @@ LLM 调用 `display_points` 建立显示会话，ChatView 消息流**顶部**插
 ```
 
 - 每个点位一个区块：**点名行**（用户输入的中文点名为主、key 灰色小字为辅——中文名由
-  LLM 经 `display_points.displayNames` 传入，未提供时回退仅显 key）、**状态徽标**
+  LLM 经 `display_points.displayNames` 传入，未提供时回退仅显 key；key 含实例句柄
+  `channel{N}`，接入对话与方案文本不展示该句柄，监控面板展示属豁免场景——agent.md
+  §3.2.1.3，2026-10-01 裁定）、**状态徽标**
   （`正常` 绿 / `暂无数据` 灰 / `已停止刷新 x 分钟` 黄）、当前值（原始值，无单位、不修饰）、
   **数据时间行**（采集时间戳绝对时刻 + 相对"x 秒前"）、频率行
   （近 60s 刷新次数 · 平均间隔——来自会话 tick 统计）；

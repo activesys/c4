@@ -108,7 +108,7 @@ Modbus/TCP 设备连接实例。
     "c4_modbus_client": [
         {
             "name": "华能阿拉善1#风机SCADA服务",
-            "id": "hnals_1_scada",
+            "id": "channel1",
             "ip": "192.168.110.1",
             "port": 502,
             "t0": 30,
@@ -120,14 +120,14 @@ Modbus/TCP 设备连接实例。
             "hton_total": 0,
             "timer": 1000,
             "points": [
-                {"id": "windspeed", "name": "风速", "uid": 1, "addr": 1000, "fun": 3, "type": 10, "swap": 2, "shm_id": 1},
-                {"id": "temperature", "name": "机舱温度", "uid": 1, "addr": 1002, "fun": 3, "type": 10, "swap": 2, "shm_id": 2},
-                {"id": "run_state", "name": "运行状态", "uid": 1, "addr": 0, "fun": 1, "type": 15, "swap": 0, "shm_id": 3}
+                {"id": "wt1_windspeed", "name": "风速", "uid": 1, "addr": 1000, "fun": 3, "type": 10, "swap": 2, "shm_id": 1},
+                {"id": "wt1_temperature", "name": "机舱温度", "uid": 1, "addr": 1002, "fun": 3, "type": 10, "swap": 2, "shm_id": 2},
+                {"id": "wt1_run_state", "name": "运行状态", "uid": 1, "addr": 0, "fun": 1, "type": 15, "swap": 0, "shm_id": 3}
             ]
         },
         {
             "name": "华能阿拉善2#风机SCADA服务",
-            "id": "hnals_2_scada",
+            "id": "channel2",
             "ip": "192.168.110.2",
             "port": 502,
             "t0": 30,
@@ -139,7 +139,7 @@ Modbus/TCP 设备连接实例。
             "hton_total": 0,
             "timer": 1000,
             "points": [
-                {"id": "windspeed", "name": "风速", "uid": 1, "addr": 1000, "fun": 3, "type": 10, "swap": 2, "shm_id": 4}
+                {"id": "wt2_windspeed", "name": "风速", "uid": 1, "addr": 1000, "fun": 3, "type": 10, "swap": 2, "shm_id": 4}
             ]
         }
     ]
@@ -151,7 +151,7 @@ Modbus/TCP 设备连接实例。
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `name` | string | — | 实例名称，用于日志和监控标识 |
-| `id` | string | — | 实例标识符，全局唯一。与 point.id 组合形成 `{service_id}.{point_id}` 的全局 key |
+| `id` | string | — | 实例标识符，全局唯一（接入分配的顺序句柄 channel{N}，用户不可见，agent.md §3.2.1.3）。与 point id 组合形成 `{service_id}.{point_id}` 的全局 key |
 | `ip` | string | — | Modbus/TCP 设备 IP 地址 |
 | `port` | int | `502` | Modbus/TCP 端口，标准 502 |
 | `t0` | int | `30` | 连接超时（秒） |

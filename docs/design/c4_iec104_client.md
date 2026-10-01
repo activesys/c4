@@ -118,7 +118,7 @@ IEC 104 远动装置连接实例。
     "c4_iec104_client": [
         {
             "name": "华能阿拉善1#主变",
-            "id": "hnals_1_transformer",
+            "id": "channel3",
             "ip": "192.168.110.99",
             "port": 2404,
             "k": 12,
@@ -135,14 +135,14 @@ IEC 104 远动装置连接实例。
             "it_timer": 1000,
             "gi_timer": 1000,
             "points": [
-                {"id": "alarm1", "name": "报警信号1", "addr": 1, "shm_id": 8},
-                {"id": "uab", "name": "UAB 线电压", "addr": 16385, "shm_id": 5},
-                {"id": "energy_total", "name": "电能量总量", "addr": 25601, "shm_id": 11}
+                {"id": "zy1_alarm1", "name": "报警信号1", "addr": 1, "shm_id": 8},
+                {"id": "zy1_uab", "name": "UAB 线电压", "addr": 16385, "shm_id": 5},
+                {"id": "zy1_energy_total", "name": "电能量总量", "addr": 25601, "shm_id": 11}
             ]
         },
         {
             "name": "华能阿拉善2#主变",
-            "id": "hnals_2_transformer",
+            "id": "channel4",
             "ip": "192.168.110.199",
             "port": 2404,
             "k": 12,
@@ -159,8 +159,8 @@ IEC 104 远动装置连接实例。
             "it_timer": 1000,
             "gi_timer": 1000,
             "points": [
-                {"id": "alarm1", "name": "报警信号1", "addr": 1, "shm_id": 12},
-                {"id": "ubc", "name": "UBC 线电压", "addr": 16386, "shm_id": 13}
+                {"id": "zy2_alarm1", "name": "报警信号1", "addr": 1, "shm_id": 12},
+                {"id": "zy2_ubc", "name": "UBC 线电压", "addr": 16386, "shm_id": 13}
             ]
         }
     ]
@@ -172,7 +172,7 @@ IEC 104 远动装置连接实例。
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `name` | string | — | 实例名称，用于日志和监控标识 |
-| `id` | string | — | 实例标识符，全局唯一。与 point.id 组合形成 `{service_id}.{point_id}` 的全局 key |
+| `id` | string | — | 实例标识符，全局唯一（接入分配的顺序句柄 channel{N}，用户不可见，agent.md §3.2.1.3）。与 point id 组合形成 `{service_id}.{point_id}` 的全局 key |
 | `ip` | string | — | RTU / 远动装置 IP 地址 |
 | `port` | int | `2404` | IEC 104 TCP 端口，标准 2404 |
 | `k` | int | `12` | 发送窗口大小——未收到确认的 I 格式 APDU 最大数（协议参数 k） |

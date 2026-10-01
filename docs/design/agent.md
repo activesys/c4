@@ -41,7 +41,7 @@ Agent 系统覆盖数据接入流程中 Agent 侧的全部职能：
 | C4_FUN_00001 | 理解自然语言 | 阶段提示词（§3.2）+ 对话能力 | §3.2 | ❌（LLM 推理） |
 | C4_FUN_00002 | 收集结构化文档接入信息 | parser 工具（`<file_data>` 注入点表阶段） + 出口判据 | §3.2 | ❌（LLM 推理） |
 | C4_FUN_00003 | 收集非结构化文档接入信息 | txt_parser 工具 + 出口判据 | §3.2 | ❌（LLM 推理） |
-| C4_FUN_00004 | 生成接入方案 | 方案层：装配 + L1/L2 校验（纯代码）+ 确定性方案展示文本（逐条「地址 ↔ 点名」） | §2.2 阶段 8 | ✅ 黑盒（单缺口提问/方案展示断言） |
+| C4_FUN_00004 | 生成接入方案 | 方案层：装配 + L1/L2 校验（纯代码）+ 确定性方案展示文本（逐条「地址 ↔ 点名 → 点 key」） | §2.2 阶段 8 | ✅ 黑盒（单缺口提问/方案展示断言） |
 | C4_FUN_00044 | 分解为可执行配置 | plan_steps 确定性拆解器 + Zod 校验（确认按钮触发，非 LLM 参与） | §3.2.1 | ✅ generatePlanSteps |
 | C4_FUN_00005 | 非技术语言交互 | 阶段提示词 + 单缺口提问/总结轮（非技术语言约束） | §3.1、§2.6 | ❌（LLM 行为） |
 | C4_FUN_00006 | MCP 生命周期管理 | 执行模块：Stop-Start 协议 + 启动恢复 | §3.2, §3.2.3 | ✅ mergeConfigFromSteps |
@@ -105,10 +105,11 @@ Agent 系统覆盖数据接入流程中 Agent 侧的全部职能：
 窄提取职责（§1.4），方案层与执行层为纯代码：
 
 ```
-提取层  { 1 场站 │ 2 接入协议 │ 3 接入点表 │ 4 接入信息 │ 5 转发协议 │ 6 转发点表 │ 7 转发信息 }
-            │ 七个窄提取器（每条用户消息全部并行推进，各自只认领自己领域），产出原料写入会话状态
+提取层  { 1 场站 │ 1.5 设备 │ 2 接入协议 │ 3 接入点表 │ 4 接入信息 │ 5 转发协议 │ 6 转发点表 │ 7 转发信息 }
+            │ 七个窄提取器（每条用户消息全部并行推进，各自只认领自己领域）+ 1.5 设备
+            │ 确定性提取（正则 + zh_numeral，无提示词，§3.2.1.3c），产出原料写入会话状态
             ↓ 缺口计算器判定全部闭合
-方案层  { 8 装配（合并原料 + 缺省点名/abbr + seq 编号） → L1 结构校验 → L2 协议语义校验
+方案层  { 8 装配（合并原料 + 点 key 前缀生成 + channel 序号分配） → L1 结构校验 → L2 协议语义校验
             → AccessPlan → 展示方案摘要 → button_arm → 停等 }
             ↓ 确认按钮（全流程唯一硬交互边界）
 执行层  { 9 plan_steps 拆解 → 事务五步 → 总结轮 }
@@ -127,18 +128,19 @@ Agent 系统覆盖数据接入流程中 Agent 侧的全部职能：
 - **状态精简**：`accessPlan` 为唯一方案态；deviceInfo/deviceInfoReady 中间态、
   missing_fields 通道、nudge 补跑、递归上限、伪 user 消息全部随 ReAct 循环退役。
 
-### 2.2 九阶段定义表
+### 2.2 阶段定义表（含 1.5 设备提取，共 9 个阶段编号段）
 
 | # | 阶段 | 类型 | 激活条件 | 提示词 | 产出 |
 |---|------|------|----------|--------|------|
 | 1 | 场站信息 | 提取 | 每条消息 | `location_prompt.txt` | site{name, abbr}、归属判定 |
+| 1.5 | 设备信息 | 提取 | 每条消息 | **无（确定性：正则 + zh_numeral；LLM 兜底二期）** | 设备名/编号（recv.device 必答缺口，前缀来源，§3.2.1.3c） |
 | 2 | 接入协议 | 提取 | 每条消息 | `protocol_prompt.txt`（side=receive） | canonical_name + match |
-| 3 | 接入点表 | 提取 | 阶段2 matched | `point_prompt.txt`（side=receive） | devices[{name, abbr, points[]}] |
+| 3 | 接入点表 | 提取 | 阶段2 matched（协议后到时经 catch-up 对累积文本/已存文件补提取，用户无需重述，§3.1） | `point_prompt.txt`（side=receive） | devices[{name, points[]}]（设备前缀由 1.5 产出） |
 | 4 | 接入信息 | 提取 | 阶段2 matched | `connection_prompt.txt`（side=receive） | 按设备归档的 connection |
 | 5 | 转发协议 | 提取 | **条件**：存在转发意图（关键词快路 + `forward_intent_prompt.txt` 兜底） | `protocol_prompt.txt`（side=forward） | canonical_name + match |
 | 6 | 转发点表 | 提取 | 阶段5 matched | `point_prompt.txt`（side=forward） | forward 点表（addr 展开） |
 | 7 | 转发信息 | 提取 | 阶段5 matched | `connection_prompt.txt`（side=forward） | 目标名 + connection |
-| 8 | 方案层 | 装配+校验 | 1-7 全部闭合 | **无（纯代码）** | AccessPlan + button_arm |
+| 8 | 方案层 | 装配+校验 | 1、1.5、2-7 全部闭合 | **无（纯代码）** | AccessPlan + button_arm |
 | 9 | 执行层 | 拆解+执行 | 确认按钮 | **无（确定性拆解器）** | ServiceStep[] → 事务执行 |
 
 各阶段的参数注入、输出 JSON 形状与出口判据详见 §3.2 阶段提取器与 §3.3。
@@ -150,9 +152,11 @@ Agent 系统覆盖数据接入流程中 Agent 侧的全部职能：
   ↓
 ① 取消检测（顶层，确定性）：短取消词命中 → 清理在途态 → 「已取消」→ 终局
   ↓
-② 提取遍历：阶段 1-7 全部提取器并行处理消息（各自只认领自己领域的信息）；
-   同回合内状态合并按阶段编号拓扑序执行（1→2→3→4、5→6→7）——下游消费同回合
-   上游产物（阶段 3 依赖阶段 2 的 matched；阶段 6 的 1:1 对齐依赖阶段 3 点表列表）
+② 提取遍历：阶段 1、1.5、2-7 全部提取器并行处理消息（各自只认领自己领域的信息）；
+   同回合内状态合并按阶段编号拓扑序执行（1→1.5→2→3→4、5→6→7）——下游消费同回合
+   上游产物（阶段 3 依赖阶段 2 的 matched；阶段 6 的 1:1 对齐依赖阶段 3 点表列表；
+   **缺口依赖序：场站 → 设备(1.5) → 接入协议 → 点表 → 连接**——设备缺口先于协议，
+   点 key 前缀依赖设备身份，§3.2.1.3c）
   ↓
 ③ 状态合并：按「单调累积 + 显式改口才覆盖」规则并入会话状态；协议受逐侧锁约束
   ↓
@@ -195,7 +199,7 @@ Agent 系统覆盖数据接入流程中 Agent 侧的全部职能：
   "取消转发目标"含"取消"但与词表不全等，走提取层字段语义（见下条锁侧撤回），
   不得误触发整体清除；
 - **清理范围**：清除本次接入在途态（协议声明、点表、连接、方案、确认、端口、uid
-  集合、两把锁、按钮武装）；保留场站绑定、abbr 记忆库、对话历史（追加合成取消记录）；
+  集合、两把锁、按钮武装）；保留场站绑定、设备身份注册表、对话历史（追加合成取消记录）；
 - **executing 窗口例外**：**确认按钮被消费（`userConfirmed` 置位）起至回滚/清除完成止**
   拒绝取消——窗口覆盖 plan_steps 拆解期（此时尚未写事务标记，但确认是不可撤销的硬边界，
   且 §3.2.1.6 执行闸门只在拆解前检查确认，中途清除会造成"确认已失、执行继续"的竞态）；
@@ -233,7 +237,11 @@ Agent 系统覆盖数据接入流程中 Agent 侧的全部职能：
 - **裸值兜底绑定**：提问后用户以纯值片段作答（"9001"、"2390-2399"、"192.168.1.5:502"），
   本回合提取器无进展时，该值绑定给 pending 缺口（记 `pending_bind` 日志）。仅接受
   "整条消息就是一个值"的形态，宁可放过（走正常缺口追问）不可错绑；协议/接入点表
-  （需点名）/场站（需名称+缩写成对）不参与绑定；
+  （需点名）/场站（需名称+缩写成对）不参与绑定；**设备缺口参与绑定**——裸数字/裸名
+  应答绑定给设备缺口（2026-10-01 设备必答缺口，§3.2.1.3c），但裸数字仅在累积文本存在
+  设备类型词（风机/升压站/测风塔…）时绑定（"2" → 2号X），类型词缺失 → 不猜，追问全名；
+  **消歧特例**：同名多候选消歧语境（§3.2.1.3a）下，英文前缀 token（「wt1」）走指认
+  匹配（确定性定目标），不走设备缺口绑定——两规则以语境互斥，指认优先；
 - **方案确认句式排除**："是否确认执行"类句子走 button_arm 判定（§2.8），不触发
   提问终局；
 - **连续追问上限**：同一缺口连续两轮未收敛（用户两次答复仍无法闭合，如坚持使用
@@ -250,7 +258,7 @@ Agent 系统覆盖数据接入流程中 Agent 侧的全部职能：
 | 层 | 职责 | 执行者 |
 |----|------|--------|
 | **L0 提示词知识** | 单点字段枚举映射（"32位浮点"→type=10）、合法范围、取值语义、跨字段规则说明——**只供提取，无裁决权** | registry `prompt_hints.point_field_hints` → 阶段提示词（§3.2） |
-| **L1 通用结构检查** | 数量对账（提取数 vs declared_count）、必填字段完备、identity_fields 身份查重、点名重复、reader-key 唯一性（转发链，§2.7.1）、uid 交叉校验（提取值 ⊆ 确定性捕获声明）。**不含单点范围校验**——范围语义是协议知识，hints 中的范围为散文描述无法机读，由 L0（提取避坑）+ L2 同源（启动校验兜底）覆盖 | agent 本地确定性代码，比对键由 `point_schema.identity_fields` 声明，代码通用执行 |
+| **L1 通用结构检查** | 数量对账（提取数 vs declared_count）、必填字段完备、identity_fields 身份查重、点名重复（**实例内唯一**——跨设备同名因前缀不同不属重名，§3.2.1.3b）、reader-key 唯一性（转发链，§2.7.1）、uid 交叉校验（提取值 ⊆ 确定性捕获声明）。**不含单点范围校验**——范围语义是协议知识，hints 中的范围为散文描述无法机读，由 L0（提取避坑）+ L2 同源（启动校验兜底）覆盖 | agent 本地确定性代码，比对键由 `point_schema.identity_fields` 声明，代码通用执行 |
 | **L2 协议语义检查** | 身份重复、区间重叠（span 按 type，区间编址协议）、字段合法值/范围校验（各协议错误码见 §2.7.1 规则表；读组数量约束运行期在轮询层处理，不在配置校验/本工具范围） | **MCP validate_points 工具**（各协议 server 暴露），与运行期 INVALID_POINT 启动校验**同源** |
 
 #### 2.7.1 validate_points 接口契约
@@ -276,10 +284,11 @@ Agent 系统覆盖数据接入流程中 Agent 侧的全部职能：
 > **天然同态**（推导填充发生在 L2 之前的方案层）；实例级 default 同理在方案层装配时
 > 填充（§3.2.0.1），不出现在本工具参数中。
 >
-> **与启动校验的同源实现口径**：两者调用**同一校验函数**（如 `validatePoints(points, opts)`），
-> 以参数化子集处理 shm_id 校验差异——启动路径 `opts.requireShmID=true`（shm_id 执行期回填，
-> 恒非 0），本工具 `opts.requireShmID=false`（方案期 shm_id 恒为 0）。**若共享化后发现其他
-> 行为差异**（如 influxdb 启动校验容忍空 `type`/`field` 的运行期推导语义），以追加 opts 开关
+> **与启动校验的同源实现口径**：两者调用**同一校验函数**（influxdb 即下述 `validatePointSet(points, opts)`，其他协议同构），
+> 以参数化子集处理校验差异——influxdb 的共享函数 `validatePointSet`（validation.go）已
+> 落地三开关：启动路径 `opts.requireShmID=true`（shm_id 执行期回填恒非 0）+ `dupByShmID=true`，
+> 工具路径 `requireShmID=false` + `dupByBusinessKey=true`（业务键查重）；`field` 已于
+> 2026-10-01 裁定必填（两路径同样拦截空值）。**后续若发现其他行为差异**，以追加 opts 开关
 > 显式建模，禁止工具侧私设第二套逻辑。各服务的差异声明见其文档；新增校验规则一律在共享
 > 函数演进，两路径自动同步。
 
@@ -324,7 +333,7 @@ Agent 系统覆盖数据接入流程中 Agent 侧的全部职能：
 | c4_modbus_client | UID_OUT_OF_RANGE / ADDR_OUT_OF_RANGE（>0xFFFF）/ FUN_TYPE_MISMATCH（fun∈{1,2}→type∈{0,15}；fun∈{3,4}→8 个寄存器型）/ BAD_SWAP（合法值 {0,1,2,4}；单数据单元点必须 0；须整除字节跨度）/ POINT_DUP（uid+fun+addr）/ POINT_OVERLAP（同 uid+fun 组内，跨度=pointSpan） | ✅ 已从 validateConfig 源码确认（完整规则见该文档） |
 | c4_asfp2_client / c4_asfp2_server | POINT_DUP（addr 为 24 位 key，重复即映射静默覆盖；**dup 检测加入共享校验函数，启动校验随之修复现状缺口**）/ ADDR_OUT_OF_RANGE（> MaxAddr 0xFFFFFF）；addr 非区间编址，无重叠概念 | ✅ 已确认 |
 | c4_iec104_client | POINT_DUP（信息对象地址重复）；addr 上限归启动校验（依赖实例级 ioa_size，本工具参数不含实例字段） | ✅ 已确认 |
-| c4_influxdb_client | POINT_DUP（measurement+field 组合）/ MEASUREMENT_EMPTY / INVALID_TYPE / FIELD_FORMAT（`^[a-zA-Z_]+$`，tags 若提供则同校验）。**同 Writer key 双映射**（两个不同 measurement+field 引用同一 Writer 点 → 运行期 duplicate shm_id）由 **L1 reader-key 唯一性**在阶段 6 出口拦截（本工具参数含 key 字段可查，但职责归 L1——key 是结构引用非协议语义） | ✅ 已确认 |
+| c4_influxdb_client | POINT_DUP（measurement+field 组合）/ MEASUREMENT_EMPTY / INVALID_TYPE / FIELD_FORMAT（空值或 `^[a-zA-Z_]+$` 不符——field 必填，tags 若提供则同校验）。**同 Writer key 双映射**（两个不同 measurement+field 引用同一 Writer 点 → 运行期 duplicate shm_id）由 **L1 reader-key 唯一性**在阶段 6 出口拦截（本工具参数含 key 字段可查，但职责归 L1——key 是结构引用非协议语义） | ✅ 已确认 |
 
 价值：消除 agent（TS）与 server（Go）双源漂移，把「执行期才发现重叠 → 回滚」前移到
 方案确认之前（批次内 L2 在阶段出口；批次 × 既有点的合并比较域在方案层装配/merge 前置，
@@ -432,6 +441,9 @@ stop_start 失败**一律回滚**——起不来的配置即坏配置，滞留�
   重启收敛）+ 向用户报告「配置状态需人工核验」；
 - 回滚自身的 Stop-Start 失败 → 报告「已恢复变更前配置，但服务未完全恢复，需人工核验」+
   保留/重建事务标记。
+- **注册表不在回滚范围内**：设备身份注册表（abbr_registry.json）的固化挂在 merge +
+  Stop-Start **全部成功之后**（§3.2.1.3a 第 4 步）——回滚发生时注册表尚未写入，无幽灵
+  条目问题；取消（执行前）同样不触碰注册表。
 
 ---
 
@@ -448,8 +460,9 @@ ReAct 组装、C4Agent wrapper（确认检测/验证循环/结构化捕获）、
 ```typescript
 interface SessionState {
     site: { name: string; abbr: string } | null;        // 阶段1
-    operation: 'add' | 'modify' | 'delete' | null;      // 操作意图（记忆库检索判定）
-    abbrCandidates: string[];                            // abbr 候选（提取层产出，待记忆确认）
+    operation: 'add' | 'modify' | 'delete' | null;      // 操作意图（注册表检索判定）
+    deviceName: string | null;                          // 设备名/编号（1.5 阶段，recv.device 必答缺口，§3.2.1.3c）
+    prefixCandidates: string[];                         // 设备前缀候选（§3.2.1.3c 确定性派生，注册表确认后固化；2026-10-01 更名——abbr 一词保留给场站缩写 site.abbr）
     declaredCounts: Record<string, number>;             // 用户声明的点数（阶段3/6 出口对账）
     captured: {                                          // 确定性捕获声明（uid/端口/地址交叉校验基准，按侧划分——锁侧撤回只清转发侧）
         receive: { uids: number[]; ports: number[]; addrRanges: string[] };
@@ -469,6 +482,14 @@ interface SessionState {
     accessPlan: AccessPlan | null;                       // 阶段8 产出，唯一方案态
     gaps: Gap[];                                         // 缺口计算结果（空 = 无待补缺口）
     userConfirmed: boolean;                              // 确认按钮置位
+    pendingChangeAsk: boolean;                           // 变更流程追问中（缺点名/缺转发地址/
+                                                         //   待选设备）——应答回合走 change_prompt
+                                                         //   变更流提取（§3.2.0，不走普通缺口流水线）
+    pendingDisambig: boolean;                            // 同名多候选消歧应答语境（§3.2.1.3a id 确定
+                                                         //   流程第 2 步）——应答回合接受前缀 token 指认
+    disambigHostId: string | null;                       // 消歧锚：已确定性指认的宿主实例 id——
+                                                         //   锚定后变更解析（含 LLM 兜底）锁定该设备，
+                                                         //   防同名另一台被误选；方案产出/取消/终态时清除
 }
 ```
 
@@ -481,7 +502,7 @@ interface SessionState {
 ④ 分叉：单缺口提问终局 / 方案层装配校验 → AccessPlan → button_arm 停等
 ```
 
-**方案层（阶段 8，纯函数）**：合并原料 + 缺省点名/abbr 生成 + seq 编号 → L1 结构校验 →
+**方案层（阶段 8，纯函数）**：合并原料 + 点 key 前缀生成 + channel 序号分配 → L1 结构校验 →
 L2 `validate_points` → AccessPlan。装配失败即代码 bug；校验拒绝则错误回流追问。
 
 **执行层（阶段 9）**：确认按钮触发 → plan_steps 拆解 → 事务五步（§3.2 执行模块）→
@@ -500,16 +521,17 @@ L2 `validate_points` → AccessPlan。装配失败即代码 bug；校验拒绝�
 | 阶段 | 提示词 | 注入参数（registry 渲染） | 出口判据要点 |
 |------|--------|--------------------------|--------------|
 | 1 场站 | location_prompt.txt | known_site | 归属一致 / 首次接入提取名称+缩写 |
+| 1.5 设备 | （确定性提取：正则 + zh_numeral，无提示词；LLM 兜底二期） | — | 设备名/编号就绪、前缀可派生（recv.device 必答缺口，§3.2.1.3c） |
 | 2/5 协议 | protocol_prompt.txt | side, supported_list, match_hints | canonical ∈ 支持列表；受逐侧锁约束 |
-| 3/6 点表 | point_prompt.txt | side, protocol, point_fields, point_field_hints | 数量对账、字段完备（uid 在此闭环）、身份查重、点名唯一、L2 validate_points |
+| 3/6 点表 | point_prompt.txt | side, protocol, point_fields, point_field_hints | 数量对账、字段完备（uid 在此闭环）、身份查重、点名唯一（实例内，跨设备同名不属重名，§3.2.1.3b）、L2 validate_points |
 | 4/7 连接 | connection_prompt.txt | side, protocol, config_fields（无 default=required）, connection_hints | required 完备、格式校验；默认值话术 → ambiguous |
 
 **文件解析工具**（csv/xlsx/txt parser，确定性预处理）保留：产出 raw tabular data
 以 `<file_data>` 标签注入点表阶段，映射规则见 point_prompt.txt 提取规则。
 
-**query_abbr_registry**（agent 内部确定性检索函数，非 MCP 工具、不占 C4_FUN 编号；C4_FUN_00017 属 Registry）保留：阶段 3/6 出口判据之一
-（add 场景命中 → 升级为修改语义；modify/delete 场景无命中 → 直接回复"目标不存在"），
-也是修改/删除路径的记忆查询入口。
+**query_abbr_registry**（agent 内部确定性检索函数，非 MCP 工具、不占 C4_FUN 编号；C4_FUN_00017 属 Registry）保留：
+提取层 id 确定流程第 2 步的确定性执行入口（同名命中走描述匹配仲裁，§3.2.1.3a），
+也是修改/删除路径的注册表查询入口（modify/delete 无命中 → 直接回复"目标不存在"）。
 
 **LLM 边界**（§1.4）：提取器只做忠实提取与匹配判断；完备性裁决归出口判据（L1），
 协议语义裁决归 validate_points（L2），提问归缺口计算器（§2.6）。
@@ -521,10 +543,15 @@ L2 `validate_points` → AccessPlan。装配失败即代码 bug；校验拒绝�
 - **装配**：合并会话状态原料 → devices/forward_targets 完整视图；
 - **必填项前置校验**：registry 无 `default` 键的实例字段 + `point_schema.fields`
   全部点字段必须就绪（缺口已在提取层闭合，此处为防御性复验）；
-- **方案确认（含协议隐含确认 + 标识确认）**：展示方案时须一并展示协议与采集/转发
-  目标标识（abbr），让用户确认协议是否正确、abbr 是否绑定到正确的设备——用户点
-  确认按钮即代表对二者的最终确认。
-展示接入方案时须**逐条列出「地址 ↔ 点名」映射**供用户核对——错位（off-by-one）无法纯确定性判断，交由方案确认逐条展示。采集点点名必填（缺失即询问，仍不提供则拒绝接入）、转发点点名按序引用采集点（见下），故展示的每个点均有点名可核对，不存在无名点。
+- **方案确认（含协议隐含确认 + 设备身份确认）**：展示方案时须一并展示协议与设备名/
+  点 key 前缀（wt1_），让用户确认协议是否正确、设备身份是否正确——用户点确认按钮
+  即代表对二者的最终确认。**实例句柄 channel{N} 不出现在方案文本**（用户不可见的
+  技术句柄，§3.2.1.3）。
+展示接入方案时须**逐条列出「地址 ↔ 点名 → 点 key」映射**供用户核对——错位
+（off-by-one）无法纯确定性判断，交由方案确认逐条展示；点 key 由前缀统一规则确定性
+生成（§3.2.1.3），随方案展示明示，确认即批准。采集点点名必填（缺失即询问，仍不提供
+则拒绝接入）、转发点点名按序引用采集点（见下），故展示的每个点均有点名可核对，
+不存在无名点。
 
 **两侧点名规则与转发对应展示**：采集点**必须提供点名**（未提供即询问，仍不提供 → **拒绝接入**，见 §3.2.1.3b）；
 转发点**无自身点名**——即使转发点表自带点名也**忽略**，展示时**按序沿用对应采集点的点名**
@@ -614,7 +641,7 @@ function configFieldsToZod(configSchema: ConfigSchema): z.ZodObject<any> {
     return z.object(shape).strict();        // strict：拒绝未声明的字段（白名单）
 }
 
-// 剥离结构化键（id/name/abbr/protocol/points 等），只保留 config_schema 声明的平铺字段子集——
+// 剥离结构化键（id/name/prefix/protocol/points 等），只保留 config_schema 声明的平铺字段子集——
 // 供 configFieldsToZod 的 .strict() 白名单校验前调用，避免误伤 AccessPlan 的结构化字段
 function pickPlanFields(obj: Record<string, unknown>, configSchema: ConfigSchema): Record<string, unknown> {
     const out: Record<string, unknown> = {};
@@ -630,7 +657,7 @@ function pickPlanFields(obj: Record<string, unknown>, configSchema: ConfigSchema
 > **passthrough vs strict 的取舍**：`pointFieldsToZod` 用 `.passthrough()` 放行 point 的通用字段
 > （`id`/`key`/`shm_id`）；`configFieldsToZod` 用 `.strict()`（白名单）——instance 里除声明字段外
 > **不该有任何东西**，拼错的 `prot`、凭空加的 `foo` 都会被拒绝，防止垃圾字段流入 config.json。
-> instance 的 `id`/`name` 由 generate_steps 生成，`abbr`/`protocol`/`points` 是 AccessPlan 的结构化字段，均不经过校验。
+> instance 的 `id`/`name` 由 generate_steps 生成，`prefix`/`protocol`/`points` 是 AccessPlan 的结构化字段，均不经过校验。
 
 > **白名单作用域 = 实例平铺字段**：`configFieldsToZod` 只校验 config_schema 声明的平铺字段，结构化键不在此列。
 > 校验前用 `pickPlanFields(dev, config_schema)` 剥离结构化键，只取 plan 字段子集传入 `.strict()`，避免误伤合法字段。
@@ -721,7 +748,7 @@ interface ServiceStep {
 type ServicePoint = WriterPoint | ReaderPoint;
 
 interface WriterPoint {
-  id: string                   // Writer 点标识：采集点名（global key = {instance.id}.{point.id}）
+  id: string                   // Writer 点 key：{设备前缀}_{裸id}（如 wt1_windspeed，§3.2.1.3；全局 key = {instance.id}.{点key}）
   key?: never                  // Writer 点无 key
   shm_id: number               // 固定为 0，由 c4_shm_manager 分配后回填
   [field: string]: unknown     // 业务字段由 point_schema.fields 声明（Writer / Reader 统一）
@@ -729,7 +756,7 @@ interface WriterPoint {
 
 interface ReaderPoint {
   id?: never                   // Reader 点无 id
-  key: string                  // Reader 点标识：引用 Writer 点（值 = {writer_instance_id}.{point_id}），agent 确定性生成
+  key: string                  // Reader 点标识：引用 Writer 点（值 = {writer_instance_id}.{点key}，如 channel1.wt1_windspeed），agent 确定性生成
   shm_id: number               // 固定为 0，由 c4_shm_manager 分配后回填
   [field: string]: unknown     // 业务字段由 point_schema.fields 声明（Writer / Reader 统一）
 }
@@ -741,7 +768,7 @@ step-decomposer 遍历 `point_schema.fields`，从点表/设备信息中按字�
 
 **Reader 点字段**：Reader 与 Writer 统一使用 `point_schema.fields` 描述业务字段（如 ASFP2 的 `addr` 转发地址、
 InfluxDB 的 `measurement` 表名），**不区分 reader_point**。Reader 的 point 比 Writer 多一个 `key`
-通用字段（引用 Writer 的点，值 = `{writer_instance_id}.{point_id}`，agent 确定性生成，非业务数据）。
+通用字段（引用 Writer 的点，值 = `{writer_instance_id}.{点key}`，如 channel1.wt1_windspeed，agent 确定性生成，非业务数据）。
 
 step-decomposer 按 `{id（Writer）/ key（Reader）, shm_id:0} + point_schema.fields（用户提供）` 通用生成 point，
 **不区分具体服务类型**。点表业务字段（`point_schema.fields`）**无默认值、无自动分配**——用户未提供时由 C4_FUN_00005 引导补充。
@@ -783,7 +810,7 @@ interface AccessPlan {
   // ===== 场站信息 =====
   site: {
     name: string              // 场站名称，如 "华能阿拉善"
-    abbr: string              // 场站缩写，如 "hnals"（用于生成 instance.id）
+    abbr: string              // 场站缩写，如 "hnals"（存于 site 绑定与注册表；不进实例 id 与点 key，§3.2.1.3）
   }
 
   // ===== 采集设备列表 =====
@@ -796,7 +823,7 @@ interface AccessPlan {
 // 单个采集设备
 interface DeviceSpec {
   name: string                // 设备名称（中文显示，如 "1#升压站"）
-  abbr: string                // 采集目标标识（候选，LLM 从用户消息提取，如 "transformer1"）；须经 §3.2.1.3a 记忆确认后固化，最终 id 以记忆库为准
+  prefix: string              // 点 key 前缀（由设备名确定性派生，如 "wt1"；经 §3.2.1.3a 注册表确认后固化；点 key = {前缀}_{裸id}）。不是实例 id 的来源——实例 id 为 channel{N} 句柄，与设备前缀解耦。与注册表条目的 prefix 字段同名同义（2026-10-01 修订，原字段名 abbr 废止——abbr 一词保留给场站缩写 site.abbr）
   protocol: string            // 通信协议（必填——用户在阶段 2 提供或询问确定，方案确认时一并核对）
   points: DevicePoint[]       // 采集点列表
   [field: string]: unknown    // 实例字段直接平铺（ip/port、url/token/org/bucket 等，由 config_schema.fields 声明）
@@ -804,14 +831,13 @@ interface DeviceSpec {
 
 // 采集点（从点表提取）—— 仅保留 name 骨架，协议特有字段由 registry 的 point_schema.fields 声明
 interface DevicePoint {
-  name: string                // 点名称（对应 point.id）
+  name: string                // 点名称（用户原点名；裸 id 的翻译来源与方案展示依据，§3.2.1.3b——落盘点标识为点 key {前缀}_{裸id}）
   [field: string]: unknown    // 如 addr/uid/fun/type/swap（Modbus）、addr（IEC104）
 }
 
 // 转发目标 —— 实例 plan 字段直接平铺，目标级字段由 point_schema.fields 声明
 interface ForwardTargetSpec {
   name: string                // 目标名称（中文显示，如 "中心侧数据库"）
-  abbr: string                // 转发目标标识（候选，LLM 从用户消息提取，如 "center"）；须经 §3.2.1.3a 记忆确认后固化，最终 id 以记忆库为准
   protocol: string            // 转发协议（必填——用户在阶段 5 提供或询问确定，方案确认时一并核对）
   points?: object[]           // 转发点业务字段（必要项）：按采集点顺序与采集点一一对应，每个元素含 point_schema.fields 声明的全部业务字段（如 ASFP2 的 addr、InfluxDB 的 measurement/field/type）；业务字段用户未提供时必须询问，禁止自动编造。points[] 元素不含 name——展示时按序引用采集点点名（经 key 解析，不复制数据，见 §3.2.1.3b）
   [field: string]: unknown    // 仅实例 plan 字段（ip/port、url/token/org/bucket 等）；点级业务字段只存在于 points[] 各元素（identity_fields 已定案 measurement/field 为点级，见 registry）
@@ -829,7 +855,7 @@ interface ForwardTargetSpec {
   "devices": [
     {
       "name": "1#风机",
-      "abbr": "wt1",
+      "prefix": "wt1",
       "protocol": "modbus",
       "ip": "192.168.110.1",
       "port": 502,
@@ -842,7 +868,6 @@ interface ForwardTargetSpec {
   "forward_targets": [
     {
       "name": "中心侧数据库",
-      "abbr": "center",
       "protocol": "asfp2",
       "ip": "172.16.109.11",
       "port": 9999
@@ -853,81 +878,153 @@ interface ForwardTargetSpec {
 
 **step-decomposer 如何使用 AccessPlan**：
 
-1. `site.abbr` + `target.abbr`（采集/转发目标标识）→ 生成 `instance.id`（如 `hnals_transformer1`）
+1. 接入需新建实例时分配未用最小序号 `channel{N}` 作为 `instance.id`；同端口并入时复用宿主实例 id（§3.2.1.3）。设备前缀（prefix）→ 注册表条目 + 点 key 前缀，不生成实例 id
 2. `device` 的实例字段（平铺）→ 填入实例配置字段（字段名由 config_schema 声明，见 §3.2.1.2）
 3. `device.points[]` → 映射到 Writer 服务的 `points[]`（字段由 point_schema.fields 声明提取）
 4. `forward_targets[]` 的 plan 字段（平铺）→ 填入 Reader 服务的实例配置（字段名由 config_schema 声明）
 5. 每个采集点生成对应的 Reader point：`{key, shm_id:0} + point_schema.fields（用户提供）`（见 §3.2.1.1）
 
-**3.2.1.3 实例 id 生成规则**
+**3.2.1.3 命名体系：实例 id（句柄）/ 设备身份（注册表）/ 点 key（全局唯一）**
 
-`id` 是 config.json 中每个服务实例的唯一标识。step-decomposer 按以下规则生成：
+> **2026-10-01 设计修订**（多风机共用端口形态驱动，用户逐项裁定）。本节整体取代原
+> 「`{site_abbr}_{target_abbr}` 实例命名 + 裸点 id」规则；**不保留旧格式兼容**——旧配置
+> （hnals_wt1 式实例 id、裸点 id）废弃，重新接入即得新形态。
 
-```
-{site_abbr}_{target_abbr}
-```
+三层命名，职责单一：
 
-其中：
-- `site_abbr`：场站缩写，从 AccessPlan 提取（如 "hnals" = 华能阿拉善）
-- `target_abbr`：**采集目标标识**（Writer）/ **转发目标标识**（Reader），由 LLM 从用户消息提取，
-  是**用户提供的业务信息**。命名规则：**设备类型英文名 + 编号（多台时）**，单台直接用类型名。
-  例如："采集 1#风机" → `wt1`（wind turbine 1）；"采集 1#升压站" → `transformer1`；"采集升压站"（单台、无编号）→ `transformer`；
-  "采集华能通辽开鲁风场风功率预测数据" → `power_forecast`。
+| 层 | 形态 | 示例 | 消费方 |
+|----|------|------|--------|
+| 实例 id | 纯技术句柄，`channel{N}` 顺序分配 | channel1、channel2 | config.json 实例主键、日志 tag、转发引用键前缀 |
+| 设备身份 | 注册表条目：设备名 → {宿主实例, 点前缀} | 1号风机 → {channel1, wt1} | 变更流目标定位、按机视图合成 |
+| 点 key | `{设备前缀}_{裸id}`，**无条件统一前缀** | wt1_windspeed、wt2_windspeed | 全局 key、方案展示、数据消费 |
 
-> ⚠️ abbr 由 LLM 提取是**非确定性**操作，不能每次操作都重新提取——其跨会话稳定性由
-> §3.2.1.3a「id 稳定性保障（abbr 记忆与确认机制）」保证：首次提取后固化到记忆库，
-> 后续 modify/delete/加点操作引用已存 id，不再重新提取 abbr。
+转发侧全局引用键维持复合格式：`{实例id}.{点key}` → `channel1.wt1_windspeed`。
 
-示例：`hnals_transformer1` = 华能阿拉善 1# 升压站采集；`hnals_power_forecast` = 华能阿拉善风功率预测入库
+设计要点：
 
-> **协议与角色解耦**：id **不含协议/服务类型信息**。协议是技术维度（Modbus/IEC104/ASFP2），
-> 采集目标是业务维度（升压站/风功率预测），两者正交、非一一对应。同一采集目标无论用
-> Modbus 还是 IEC104，id 都不变。id 只反映业务维度，协议信息由 service_type（config.json 的
-> 顶层 key）承载。
+1. **实例 id 无业务语义**：设备语义全部收敛到「注册表 + 点前缀」。实例 id 是内部句柄，
+   **用户不可见**——方案文本不出现、不询问，用户无须提供或知晓；「通道」之类中间概念
+   一律不进对话（2026-10-01 用户裁定：通道是用户的额外负担且生产中不可感知）。豁免：
+   点位显示卡片/监控面板展示完整 key（含 channel{N}）不在此限——「不可见」指接入对话
+   与方案文本（web.md §3.5.1）；
+2. **点 key 无条件前缀**：不论单机独占实例还是多机共用实例，点 key 一律
+   `{设备前缀}_{裸id}`——单一规则消灭「有时前缀、有时不前缀」的拓扑分叉；设备前缀
+   （wt1）与实例 id（channel1）彻底解耦，前者是业务身份、后者是技术句柄；
+3. **场站缩写不进实例 id 与点 key**：单场站部署下无歧义（场站信息在 site 绑定与注册表）；
+   未来支持多场站时再重审；
+4. **顺序句柄而非随机**：句柄须稳定、可读、可 grep——日志（`inst=`）、config.json、执行
+   错误、转发引用键都靠它定位问题；顺序号自解释创建先后，随机串全是噪声。
 
-points 的 `id` 字段直接使用点表中的点名称（如 `windspeed`、`temperature`），
-全局 key 自动组合为 `{instance.id}.{point.id}`（如 `hnals_transformer1.windspeed`）。
-点名称需为不含 `.`/`/` 等分隔符的合法标识符，否则会破坏 global key 的 `{instance.id}.{point.id}` 解析。
-点名含中文或非规范时的翻译规则见 §3.2.1.3b；点名缺失即询问，仍不提供则拒绝接入（不自动生成）。
+**实例 id 生成规则**：接入需新建实例时，分配当前**未使用的最小序号** `channel{N}`（N 从
+1 起单调递增，writer/reader 统一编号、全服务类型共享同一序号空间——**不按角色区分**：
+角色已由 service_type 承载，统一序列保证全系统无重名、分配逻辑最简，且一次接入产生的
+采集/转发实例对天然拿到相邻序号）；实例删除后其序号**永不复用**（防陈旧引用键悬空）。
+「未使用」定义为**从未分配过**：序号高位水印（max-ever-assigned）持久化于
+`abbr_registry.json` 的 `channelHighWatermark` 字段，实例删除只减存活数、不回退水印；
+实例 id 由方案装配层确定性生成，一经固化不再改变。
 
-**3.2.1.3a id 稳定性保障（abbr 记忆与确认机制）**
+**同端口自动并入**（用户零交互；**仅适用于监听型 Writer**）：
 
-`abbr` 由 LLM 从用户自然语言描述提取，是**非确定性**操作——同一台「1#风机」在不同会话、
-不同措辞下可能被提取成 `wt1` / `windturbine1` / `fan1`。而 `id` 的硬约束是**稳定**
-（modify/delete 按 id 精确匹配、Reader key 跨重启引用）。因此 abbr **不能每次操作重新提取**，
-必须「首次提取后固化 + 后续检索确认」。
+- **适用边界**：`port` 在监听型服务（当前即 `c4_asfp2_server`）是本机监听端口，在连接型
+  服务（modbus_client/iec104_client/asfp2_client/influxdb_client）是**对端连接端口**——
+  两者语义不同。并入判定**仅针对监听型**：接入的协议与监听端口与既有监听型实例相同 →
+  **并入该实例**（点表追加，实例 id 不变）：1#、2# 风机共用端口 9001 时，wt2_* 点与
+  wt1_* 点同住一个实例，注册表中两条设备条目指向同一宿主。**连接型服务不并入**——
+  每设备一实例（同 ip:port 的两台设备 = 两个独立实例/两条独立连接）；
+- 真冲突（拒绝并说明，拦截前移到方案期）：监听端口被跨服务类型占用（绑定必然失败）、
+  同监听端口不同协议；
+- 分流完全由用户已提供的「协议 + 端口」确定性判定：**不询问、不设缺口、不引入任何
+  需用户理解或命名的中间实体**；
+- 方案文本以白话陈述事实：「2号风机将与1号风机共用端口 9001 的数据接收服务，新增点
+  （10个）：…」，逐点列出最终点 key，用户确认即批准；
+- **拆解语义**：并入场景的 ServiceStep 为 `action=modify`、`instance.id=宿主 id`、
+  `points[]=新增点`——新点借 modify 的「新 point 追加」落点（§3.2.1.6），**不得发
+  add**（add 分支的 instance.id 冲突检查会拒绝）；转发侧 reader 成对追加引用 key。
 
-**记忆库（abbr registry）**：agent 内部状态，持久化于 `~/.local/c4/abbr_registry.json`
-（非 MCP 配置，MCP 服务不读取）。**site 存于 `agent.json`（权威配置，启动必读），
-entries 存于 `abbr_registry.json`**：
+**3.2.1.3a 设备身份与注册表（原 abbr 记忆机制修订）**
+
+设备身份 = 「设备名 → {宿主实例, 点前缀}」的注册表条目，持久化于 `abbr_registry.json`
+（agent 内部状态，MCP 不读取；site 仍存于 `agent.json`，机制见后文，不变）：
 
 ```json
 {
+  "channelHighWatermark": 1,
   "entries": [
     {
-      "id": "hnals_wt1",
-      "name": "1#风机",
-      "abbr": "wt1",
-      "service_type": "c4_modbus_client",
-      "role": "writer",
-      "description": "采集 1#风机的数据",
-      "pointMap": { "windspeed": "windspeed", "温度": "temperature" }
+      "name": "1号风机",
+      "prefix": "wt1",
+      "host": "channel1",
+      "service_type": "c4_asfp2_server",
+      "description": "采集1号风机的数据",
+      "pointMap": { "风速": "wt1_windspeed", "温度": "wt1_temperature" }
+    },
+    {
+      "name": "2号风机",
+      "prefix": "wt2",
+      "host": "channel1",
+      "service_type": "c4_asfp2_server",
+      "description": "采集2号风机的数据（与1号风机共用端口9001）",
+      "pointMap": { "风速": "wt2_windspeed" }
     }
   ]
 }
 ```
 
-`agent.json` 中的 site 字段（场站单例信息）：
+- `prefix`（点前缀）：由设备名确定性派生（§3.2.1.3c）。**前缀在注册表内全局唯一 →
+  点 key 全场唯一**；设备名允许重名，但同名必须经消歧确认（见 id 确定流程第 2 步），
+  同宿主/跨宿主条目的前缀互异；候选前缀与既有条目相同 → **保留前缀 + 最小未用编号
+  顺延**（wt1 已占用 → wt2；dev1 已占用 → dev2），不得复用。顺延记号与匿名序列
+  dev{N} 同构但触发条件不同：顺延由**撞名**触发；dev{N} 专指用户明确「没有名字」的
+  匿名设备（§3.2.1.3c），用户显式名称永远经映射/拼音派生、不走 dev 序列；
+- `host`（宿主实例）：设备点表所在实例；同端口并入的多台设备共享同一宿主；
+- `pointMap`：源点名 → 生效点 key 的映射（modify/delete 按此匹配旧点，禁止仅凭重新
+  翻译的裸 id 匹配——翻译漂移会误建新点而非更新既有点，见 §3.2.1.3b 稳定性说明）。
+  源点名后续改名 → 方案确认环节重新绑定 pointMap（按 addr/key 定位旧点，登记
+  新名 → 既有 key 的映射，不建新点）。
 
-```json
-{
-  "site": { "name": "华能阿拉善", "abbr": "hnals" }
-}
-```
+**变更流目标定位**：用户说「删除2号风机」→ 注册表查得 {channel1, wt2} → 在宿主实例内
+按前缀合成该设备的**虚拟设备视图**（点集 = 点 key 前缀匹配），复用现有多点删除/修改
+路径与既有占用检查（点 key/地址冲突在方案期按 §3.2.1.3b 唯一性作用域拦截）。共用形态下「删除设备」= 前缀点组手术，方案**逐点列出待删 key**；
+独占形态下设备即实例整体，删除实例（channel 序号不回收）。**独占/共用的判定** =
+宿主上注册表条目数：删除后该宿主条目数归零 → 空实例移除（§3.2.1.6 delete 分支 1）；
+条目数 ≥1 → 实例保留。
 
-- `id`：稳定实例 id（主键），由 `{site_abbr}_{abbr}` 生成，**固化后永不改变**
-- `name` / `description`：设备名称 + 首次接入时的原始描述（用于后续检索匹配）
-- `service_type` / `role`：所属服务类型与角色（重建时从 config.json 顶层 key + Registry 反推）
+**id 确定流程**（提取层候选 + 检索注册表 → 方案层确认 → 执行层固化；「一次提取 + 确认
+固化 + 后续查表」的方法论不变）：
+
+1. **识别意图 + 取得设备名**（提取层）：先识别操作意图（add/modify/delete），设备名/编号
+   由必答缺口（§3.2.1.3c）保证就绪，派生候选前缀；
+2. **检索注册表**（提取层，`query_abbr_registry` 确定性执行）：
+   - **无同名命中** + add → 新设备，按端口规则定宿主并登记
+   - **同名命中** → 描述匹配仲裁（**判定依据是「描述是否也匹配」，而非仅名字相同**——
+     现场可能有两台同名设备）：
+     描述匹配 → 同一设备，复用既有 {host, prefix}（修改语义）
+     描述不匹配 → **追问用户区分**（「已有一台『1号风机』，请提供新设备的名称/编号」）；
+     用户坚持同名 → 前缀顺延（wt2、wt3…），注册表以 description 区分两台
+   - modify/delete 无命中 → 「目标不存在，可能已删除或从未接入」；同名多条命中且描述
+     无法区分 → 追问用户以点 key 前缀/设备描述指认目标。**指认的确定性消费**
+     （2026-10-01 补）：消歧询问置位应答语境（会话状态 pendingDisambig），应答回合
+     消息中的英文 token 与注册表前缀精确匹配、唯一命中即确定性定目标并**锚定**
+     （会话状态 disambigHostId）；锚定后本变更的后续解析锁定该设备——确定性分类
+     直接以锚为目标，LLM 兜底的设备清单只含锚、结果强制以锚为目标覆写（同名另一台
+     不可被误选，指认结果不因「加点类表述不可确定性分类」而丢失）；锚已立而意图仍
+     不可解析 → 回复「已选定 X，请说明变更」（锚保持生效，不死循环）；裸前缀回复
+     （「wt1」）同样进指认流程。指认形态由询问文案给出（「给 wt1 那台加点」
+     「wt1 删除」），前缀是用户可见的业务信息（§3.2.1.3 设计要点 2：点 key 随方案
+     展示明示）。锚在方案产出/用户取消/执行完成/终态错误时清除。**已知限制**：
+     方案产出前锚跨回合保持——期间若用户发起确定性解析失败的长尾请求，该请求会
+     锁定到锚设备（方案文本明示设备名与点 key 前缀、需用户确认方生效，确认或取消
+     即清除）；确定性可解析的请求（含点名其他设备）不受锚影响
+   - 场站归属确定性校验维持原样（见下「site 获取机制」）；
+3. **确认环节**（方案层，★ 确定性来源，不可省略 ★）：方案确认提示列出「将新建设备
+   1号风机（点 key 前缀 wt1_）」或「将在 1号风机（wt1_ 前缀，N 个点）上修改/删除/加点」，
+   与协议、逐点 key 映射、执行动作合并为**单次批准**。**实例句柄 channel{N} 不出现在
+   对话文本**——它不是业务信息，用户确认的业务对象是设备名与点 key；
+4. **固化**（执行层确定性代码）：**merge 与 Stop-Start 全部成功后**写注册表——执行失败
+   回滚 config.json 时**不写**注册表（避免幽灵条目：残留条目指向已回滚掉的不存在实例，
+   后续同名接入走修改语义必然报错。§2.10 回滚只覆盖 config.json/.prev/事务标记，故
+   固化必须挂在成功路径之后；§4 时序与此一致）。改名重绑定 pointMap 的持久化同样
+   挂在成功路径。固化与 `mergeConfigFromSteps` 同为编排器的确定性文件操作。
 
 **site 获取机制**（一个 C4 实例 = 一个场站的一台接入服务器，site 是单例，绑定后不可更换）：
 - **首次接入**：C4 只询问**场站名称**（如「场站名称：华能阿拉善」）；**缩写由 LLM 按拼音首字母自动生成**
@@ -935,69 +1032,46 @@ entries 存于 `abbr_registry.json`**：
 - **绑定唯一**：site 固化后不得询问、不得变更；用户消息无场站信息时一律默认当前场站；
   用户明确提供其他场站（如「场站名称：开鲁」而当前为华能阿拉善）→ 回复「该资料不属于当前场站」并停止
 - **后续接入的场站归属校验**（由 `query_abbr_registry` 函数在 `add` 意图下**确定性执行**（agent 内部函数，非 MCP 工具），非 LLM 判断）：
-  - 用户资料**无场站信息** → 默认就是当前场站的资料（正常检索记忆库）
+  - 用户资料**无场站信息** → 默认就是当前场站的资料（正常检索注册表）
   - 用户资料**出现场站信息且归属不明**（地名与当前场站一致但非完整场站名，如「阿拉善风电场」）→ 返回判定标签 `site_ambiguous`，提醒用户确认场站归属
   - 资料**明确不属于当前场站**（完整场站名地名不同，如「华能大青山」vs「华能阿拉善」）→ 返回判定标签 `site_mismatch`，提醒用户「该资料不属于当前场站」
 
-**id 确定流程**（提取层生成候选+检索记忆库 → 方案层确认 → 执行层固化）：
+**场地判定仲裁规则**：阶段 1 的 LLM 语义判断（location_prompt，含语义等价→一致）与
+注册表确定性校验（site_ambiguous/site_mismatch 标签）**并行执行、确定性标签优先**——
+LLM 判「一致」但注册表返回 `site_ambiguous`/`site_mismatch` 时以注册表为准（走确认/
+拒绝路径）；LLM 判「不一致/需确认」而注册表无标签时以 LLM 为准。冲突不静默吞并，
+取更保守的一方。
 
-1. **识别操作意图 + 提取候选**（提取层）：提取层收集信息时，先识别操作意图
-   （add / modify / delete），再从用户描述提取目标标识、生成候选 abbr（`wt1`），写入阶段 1 场站产物 / 操作上下文的 abbr 候选（§3.1 SessionState）——
-   此 abbr 仅是**候选**，不作最终依据。
-2. **检索记忆库**（提取层，生成算法的一部分）：生成候选时**必须查记忆库**——复用历史 + 避免冲突。
-    检索由提取层通过只读函数 `query_abbr_registry` 执行（返回 entries + 描述匹配结果 + 判定标签 `decision`）。
-    在 `add` 意图下，函数先做**场站归属确定性校验**（见上「site 获取机制」）：返回 `site_mismatch`（其他场站）或 `site_ambiguous`（归属不明）时，不再检索记忆库，直接按标签回复。
-    **场地判定仲裁规则**：阶段 1 的 LLM 语义判断（location_prompt，含语义等价→一致）与
-    记忆库确定性校验（site_ambiguous/site_mismatch 标签）**并行执行、确定性标签优先**——
-    LLM 判「一致」但记忆库返回 `site_ambiguous`/`site_mismatch` 时以记忆库为准（走确认/
-    拒绝路径）；LLM 判「不一致/需确认」而记忆库无标签时以 LLM 为准。冲突不静默吞并，
-    取更保守的一方。
-    查库结果**结合操作意图**解释：
-   - 命中 `active` 记录 → 候选 id = 已存 `id`（复用历史）
-   - 无命中 + `add` → 视为新设备，用候选 abbr
-   - 无命中 + `modify`/`delete` → 报错「目标不存在，可能已删除或从未接入」
-3. **确认环节**（方案层，★ 确定性来源，不可省略 ★）：无论命中与否，都必须向用户确认后才固化为最终 id——
-   此确认**作为方案确认提示里的一个条目**，与协议确认、执行动作合并为**单次确认**（§3.2），
-   不单独打断用户、不产生第二次询问：
-   - 命中：在方案确认提示中列出「将在 `hnals_wt1`（1#风机）上修改/删除/加点」
-   - 未命中（新增）：在方案确认提示中列出「将新建设备 `hnals_wt1`（1#风机）」
-   用户对整份方案（协议 + abbr 绑定 + 执行动作）做**一次性批准**，而非先确认 abbr 再确认方案。
-4. **固化**（执行层确定性代码）：确认后，将 `<描述, id>` 写入记忆库；delete 时从记忆库**物理删除**该记录。
-   固化与 `mergeConfigFromSteps`（写 config.json）同为编排器的确定性文件操作。
+**生命周期**：delete 设备时注册表条目**物理删除**——只保留在用设备；条目删除后其前缀
+立即空闲，可被后续新设备复用（旧设备点已清除，无冲突）。
 
-**abbr 冲突处理**（新设备候选 abbr 与已有记录相同时）：
+**注册表重建**（abbr_registry.json 丢失/损坏时）：config.json 仍为权威数据源——`host` 与
+`prefix` 可从点 key 前缀分组（`{prefix}_` 前缀匹配）**确定性重建**；name→prefix 对应关系
+丢失时按前缀枚举退化（wt1、wt2…），description 退化为空（不影响 key 稳定性）；
+`pointMap` 可从点表 `name → 点 key` 同源重建。site 存于 `agent.json`（权威配置），不随
+注册表丢失而丢失。**`channelHighWatermark` 不可从 config.json 重建**（已删实例的序号在
+配置中无痕）——丢失后退化为现存实例的最大序号，已删序号可能被复用，属可接受的降级
+（旧引用键已随删除清理）；备份时该文件须随 config.json 一并保留（c4_deployment.md）。
 
-| 场景 | 判定依据 | 处理 |
-|------|---------|------|
-| 同一设备加点 | 描述也匹配已有记录 | 询问「是否在 `hnals_wt1` 上增加点？」→ 合并（modify/add points） |
-| 不同设备撞 abbr | 描述不同（如「2#风机」也被提取成 `wt1`） | ★ 重新生成不同 abbr（`wt1_2` / `windturbine1`），不得复用 |
+> **为什么需要这套机制**：LLM 文本提取天然非确定，注册表 + 确认把「非确定的提取」变成
+> 「一次提取 + 确认固化 + 后续查表」；设备语义（名字、前缀、宿主、pointMap）的稳定锚点
+> 是注册表而非实例 id——实例 id 句柄化后，这套机制的职责从「保证实例 id 稳定」扩展为
+> 「保证设备身份与点 key 稳定」。注册表只提供**候选**，用户确认负责**最终判定**，
+> 二者缺一不可，确认是不可省略的确定性来源。
 
-> **判定依据是「描述是否也匹配」，而非仅 abbr 相同**——abbr 相同但描述不同，是两台不同设备
-> 撞车，必须重新生成不同 abbr，而不是「增加点」。
+**3.2.1.3b 点名（点 key）提供与翻译规则**
 
-**生命周期**（abbr 的删除规则）：
+点 key = `{设备前缀}_{裸id}`（如 wt1_windspeed，§3.2.1.3）——前缀由方案层确定性拼接，
+提取层与翻译只产出**裸 id**（如 windspeed），不感知前缀。标识符规则：
+`^[a-zA-Z][a-zA-Z0-9_]*$`——字母开头、仅含字母/数字/下划线（ASCII 字符集）、
+长度 ≤ 1024 字节（**数字合法**，wt1_windspeed 即含数字）。全局 key = `{实例id}.{点key}`
+（如 `channel1.wt1_windspeed`，§3.2.1.1）。
 
-- `delete` 设备时，记忆库记录**物理删除**——记忆库只保留在用设备，不保留已删除设备的历史。
-- 删除后，该 abbr 立即空闲，可被新设备复用（无冲突，因为旧设备已从 config.json 移除）。
-
-**记忆库重建**（abbr_registry.json 丢失/损坏时）：
-- `entries` 丢失 → 从 config.json 重建：`id` 取自 `instance.id`，`name` 取自 `instance.name`，
-  `abbr` 由 `id` 反推（去掉 `{site_abbr}_` 前缀，`site_abbr` 取自 `agent.json` 的 `site.abbr`），
-  `description` 退化为 `name`
-- `site` 存于 `agent.json`（权威配置），不随 abbr_registry.json 丢失/损坏而丢失，无需重建
-- 因此 abbr_registry 是可重建的派生数据，config.json 是权威数据源——id/abbr/name/service_type/role 等**接入关键字段完整恢复**；`description` 退化为 `name`（展示层信息损失，不影响 id 稳定性）；
-  `pointMap` 可从 config.json 点表的 `name → point.id` 确定性重建（同源数据）
-
-> **为什么需要这套机制**：LLM 文本提取天然非确定，记忆库 + 确认把「非确定的提取」变成
-> 「一次提取 + 确认固化 + 后续查表」，从而保证 id 跨会话稳定。记忆库只提供**候选**
-> （「想起来可能是谁」），用户确认负责**最终判定**（「确定就是谁」）——二者缺一不可，
-> 确认是不可省略的确定性来源。
-
-**3.2.1.3b 点名（point.id）提供与翻译规则**
-
-`point.id` 是数据点的稳定标识，全局 key = `{instance.id}.{point.id}`（§3.2.1.1），
-与 `instance.id` 共用同一标识符规则：匹配 `^[a-zA-Z][a-zA-Z0-9_]*$`——字母开头、
-仅含字母/数字/下划线（ASCII 字符集）、长度 ≤ 1024 字节（§3.2.1.3）。
+**唯一性作用域（2026-10-01 修订）**：点 key 与 addr 均为**实例内唯一**——同一设备内部
+真重名（wt1 两个「风速」→ wt1_windspeed 撞自身）拒绝；跨设备同名（1#、2# 都有「风速」）
+因前缀不同自然共存，**不属重名**。方案逐点明示最终 key，用户确认即批准——按机前缀属
+方案明示内容，非静默自动改名（与 2026-09-27「禁止重名」裁定的调和：该裁定禁止的是
+未经用户确认的改名；同一设备内部真重名仍然拒绝）。
 
 **背景**：工业现场用户常不提供英文点名（没有、或不愿意），LLM 在信息收集阶段会自行
 发明点名（如「点1000」），含中文等非法字符，最终在执行模块 `mergeConfigFromSteps`
@@ -1055,19 +1129,50 @@ entries 存于 `abbr_registry.json`**：
 > 点名统一使用 ASCII 英文字符（翻译后即为英文），由正则强制；因此无需处理 Unicode
 > 归一化（NFC/NFD、全角字符等）——非 ASCII 字符一律被正则拒绝。
 
-**确认环节**：翻译后的点名随「方案确认」（§3.2）一并展示，**逐条列出「地址 ↔ 点名」映射**
+**确认环节**：翻译后的点名随「方案确认」（§3.2）一并展示，**逐条列出「地址 ↔ 点名 → 点 key」映射**
 供用户核对一一对应的正确性（错位/off-by-one 无法确定性判断）；用户对整份方案
-（协议 + abbr 绑定 + 点名映射 + 执行动作）一次性批准后，才写入 config.json。
+（协议 + 设备身份 + 点 key 映射 + 执行动作）一次性批准后，才写入 config.json。
 
-> **reader key 派生**：Reader 点的 `key = {writer_instance.id}.{point.id}`
-> （§3.2.1.1），由 writer 的 `point.id` 确定性派生——因此只需保证 writer 点名合法，
-> reader key 自动合法，无需单独校验。
+> **reader key 派生**：Reader 点的 `key = {writer实例id}.{点key}`（§3.2.1.1，如
+> `channel1.wt1_windspeed`），由 writer 的点 key 确定性派生——因此只需保证 writer
+> 点 key 合法，reader key 自动合法，无需单独校验。
 
-> **稳定性说明**：instance.id 的稳定性由 abbr 记忆库保证（§3.2.1.3a）；point.id 的
+> **稳定性说明**：设备身份（宿主 + 前缀）的稳定性由注册表保证（§3.2.1.3a）；裸 id 的
 > 翻译是非确定的，同一中文点名跨会话可能译出不同英文 id。新接入（add）不受影响；
-> 后续 modify/delete 的**点级映射为记忆库正式字段**：方案确认时把「源点名 → 生效
-> point.id」写入 abbr_registry 条目（`pointMap`），modify/delete 按记忆库映射匹配旧点，
-> 禁止仅凭重新翻译的点名匹配（翻译漂移会导致误建新点而非更新既有点）。
+> 后续 modify/delete 的**点级映射为注册表正式字段**（pointMap：源点名 → 生效点 key），
+> modify/delete 按注册表映射匹配旧点，禁止仅凭重新翻译的裸 id 匹配（翻译漂移会导致
+> 误建新点而非更新既有点）。
+
+**3.2.1.3c 设备名称/编号必答缺口（recv.device）**
+
+点 key 前缀依赖设备身份 → 设备名称/编号从「机会提取」升格为**必答缺口**，依赖序位于
+场站之后、接入协议之前。问法：「这台设备叫什么？（如：2号风机、升压站）」——名称或
+编号任一即闭合（编号只是名称的常见特例；单台无编号设备用名称，见前缀派生）。
+
+三层识别（与协议提取同构）：
+
+1. **L0 确定性**：现有形态——「设备名称：X」「N号风机/N#风机」（编号直接进前缀，
+   2号风机 → wt2）、**中文数字**（三号 → 3，复用 zh_numeral 转换）、文件设备名列/文件名；
+2. **追问应答裸值绑定**：缺口问出后，纯值应答（「2」「三号」「2号风机」）确定性落位；
+   **裸数字仅在累积文本存在设备类型词（风机/升压站/测风塔…）时绑定**（"2" → 2号X），
+   类型词也没有 → 不猜，追问全名（宁可放过不可错绑）；
+3. **LLM 兜底**（可选，二期）：长尾表述（「华能一号机组的表」）。
+
+**前缀派生**（设备名 → prefix）：类型映射表（风机/风电机组→wt、主变→zy、逆变器→nb、
+测风塔→cft、光伏→gf、储能→cn、**升压站→syz**——2026-10-01 补，原表缺失此条目、
+曾落 dev 兜底）+ 名称中的编号；单台无编号 → 纯类型缩写（升压站 → syz，点 key 如
+syz_active_power）；表未命中 → 拼音首字母/ASCII；完全匿名（用户明确「没有名字」）→
+自动序列 dev1、dev2，方案明示生成 key（dev1_windspeed），确认即批准。
+**前缀不含下划线**（2026-10-01 修复裁定）：注册表重建与设备归属按点 key 首个 `_`
+切分做前缀分组，前缀含 `_` 会破坏该确定性假设——ASCII 派生时剔除 `_`
+（power_forecast → powerforecast）。
+
+**方案层最终防线**：设备前缀未解析 → 拒绝装配、不出确认按钮；方案逐点明示
+「地址 ↔ 点名 → key」，用户可回复「设备编号改成3号」整体重排。
+
+**一次接入会话针对一台设备**：多台设备（如 1号、2号风机）逐台接入、逐台并入；
+一条消息同时提到多台时，缺口逐台确认（先 1号、后 2号）——SessionState 的 deviceName
+为当前正在接入的这一台。
 
 **3.2.1.4 Writer/Reader 自动分类**
 
@@ -1085,7 +1190,7 @@ entries 存于 `abbr_registry.json`**：
 
 **示例 1：add（首次接入风机）**
 
-输入 AccessPlan：接入华能阿拉善 1# 风机（采集目标标识 `wt1`），协议 modbus，IP 192.168.110.1，数据点 windspeed(addr=1000) 和 temperature(addr=1002)；转发到中心侧（目标标识 `center`，asfp2），转发地址由用户指定从 3001 起
+输入 AccessPlan：接入华能阿拉善 1# 风机（设备前缀 `wt1`，点 key 前缀 wt1_），协议 modbus，IP 192.168.110.1，数据点 windspeed(addr=1000) 和 temperature(addr=1002)；转发到中心侧（asfp2），转发地址由用户指定从 3001 起。接入时无既有实例 → 分配 channel1（writer），转发实例分配 channel2
 
 step-decomposer 输出 AccessPlanSteps：
 
@@ -1095,28 +1200,28 @@ step-decomposer 输出 AccessPlanSteps：
     "action": "add",
     "service_type": "c4_modbus_client",
     "instance": {
-      "id": "hnals_wt1",
-      "name": "华能阿拉善1#风机采集服务",
+      "id": "channel1",
+      "name": "1号风机采集服务",
       "ip": "192.168.110.1",
       "port": 502
     },
     "points": [
-      {"id": "windspeed",  "uid": 1, "addr": 1000, "fun": 3, "type": 10, "swap": 2},
-      {"id": "temperature", "uid": 1, "addr": 1002, "fun": 3, "type": 10, "swap": 2}
+      {"id": "wt1_windspeed", "name": "风速", "uid": 1, "addr": 1000, "fun": 3, "type": 10, "swap": 2},
+      {"id": "wt1_temperature", "name": "机舱温度", "uid": 1, "addr": 1002, "fun": 3, "type": 10, "swap": 2}
     ]
   },
   {
     "action": "add",
     "service_type": "c4_asfp2_client",
     "instance": {
-      "id": "hnals_center",
+      "id": "channel2",
       "name": "转发到中心侧数据库",
       "ip": "172.16.109.11",
       "port": 9999
     },
     "points": [
-      {"key": "hnals_wt1.windspeed",  "addr": 3001},
-      {"key": "hnals_wt1.temperature", "addr": 3002}
+      {"key": "channel1.wt1_windspeed",  "addr": 3001},
+      {"key": "channel1.wt1_temperature", "addr": 3002}
     ]
   }
 ]
@@ -1131,8 +1236,8 @@ step-decomposer 输出 AccessPlanSteps：
     "reader": ["c4_asfp2_client"]
   },
   "c4_modbus_client": [{
-    "name": "华能阿拉善1#风机采集服务",
-    "id": "hnals_wt1",
+    "name": "1号风机采集服务",
+    "id": "channel1",
     "ip": "192.168.110.1",
     "port": 502,
     "hton_register": 1, "hton_total": 0,
@@ -1140,20 +1245,20 @@ step-decomposer 输出 AccessPlanSteps：
     "coils_quantity_max": 2000, "registers_quantity_max": 125,
     "timer": 1000,
     "points": [
-      {"id": "windspeed",  "uid": 1, "addr": 1000, "fun": 3, "type": 10, "swap": 2, "shm_id": 0},
-      {"id": "temperature", "uid": 1, "addr": 1002, "fun": 3, "type": 10, "swap": 2, "shm_id": 0}
+      {"id": "wt1_windspeed", "name": "风速", "uid": 1, "addr": 1000, "fun": 3, "type": 10, "swap": 2, "shm_id": 0},
+      {"id": "wt1_temperature", "name": "机舱温度", "uid": 1, "addr": 1002, "fun": 3, "type": 10, "swap": 2, "shm_id": 0}
     ]
   }],
   "c4_asfp2_client": [{
-    "id": "hnals_center",
+    "id": "channel2",
     "name": "转发到中心侧数据库",
     "ip": "172.16.109.11", "port": 9999,
     "t0": 30, "t1": 20, "t2": 10,
     "key_sequence": 1, "same_data_type": 1, "same_timestamp": 1, "smart": 1,
     "forward_kack": 255, "inverse_keep": 0, "timer": 100,
     "points": [
-      {"key": "hnals_wt1.windspeed",  "addr": 3001, "shm_id": 0},
-      {"key": "hnals_wt1.temperature", "addr": 3002, "shm_id": 0}
+      {"key": "channel1.wt1_windspeed",  "addr": 3001, "shm_id": 0},
+      {"key": "channel1.wt1_temperature", "addr": 3002, "shm_id": 0}
     ]
   }]
 }
@@ -1174,25 +1279,28 @@ step-decomposer 输出 AccessPlanSteps：
     "action": "add",
     "service_type": "c4_asfp2_client",
     "instance": {
-      "id": "hnals_third",
+      "id": "channel3",
       "name": "转发到第三方数据服务器",
       "ip": "172.16.109.13",
       "port": 9999
     },
     "points": [
-      {"key": "hnals_wt1.windspeed",  "addr": 3001},
-      {"key": "hnals_wt1.temperature", "addr": 3002}
+      {"key": "channel1.wt1_windspeed",  "addr": 3001},
+      {"key": "channel1.wt1_temperature", "addr": 3002}
     ]
   }
 ]
 ```
 
-执行模块：`c4_asfp2_client[]` 已有 1 个实例，追加第 2 个。Writer 不变。
+执行模块：`c4_asfp2_client[]` 已有 1 个实例，追加第 2 个（channel3，序号接续示例 1 的
+channel1/channel2）。Writer 不变。
 
 **示例 3：delete（停用设备）**
 
-用户请求停用华能阿拉善 2# 风机（`hnals_wt2`）。
-该设备只有一个采集服务，没有专属的转发目标。
+> 前置态：承接示例 1-2 的部署（channel1 = 1号风机 wt1 采集、channel2/channel3 = 两个转发
+> 实例），其后又接入了 2号风机——独占实例形态，注册表 {宿主 channel4, 前缀 wt2}。
+
+用户请求停用 2# 风机。
 
 step-decomposer 输出 AccessPlanSteps：
 
@@ -1201,18 +1309,50 @@ step-decomposer 输出 AccessPlanSteps：
   {
     "action": "delete",
     "service_type": "c4_modbus_client",
-    "instance": { "id": "hnals_wt2" }
+    "instance": { "id": "channel4" }
   }
 ]
 ```
 
-执行模块：删除 `c4_modbus_client[]` 中 id=`hnals_wt2` 的条目。
+执行模块：删除 `c4_modbus_client[]` 中 id=`channel4` 的条目（独占形态下设备即实例整体；
+**共用形态**下「删除设备」= 在宿主实例内按前缀删除点组——action 仍为 delete，但 instance
+不变、`points[]` 逐点列出该前缀的全部点 key，见 §3.2.1.3a/§3.2.1.6）。
 若这是 `c4_modbus_client` 的最后一个实例，同时从 `c4_shm_manager.writer[]` 中移除
-`"c4_modbus_client"`。
+`"c4_modbus_client"`；channel4 序号不回收。
 
 > **相关性检查**：删除设备时，step-decomposer 需判断该设备的采集点是否还被其他
 > Reader 引用（如 `c4_asfp2_client` 的 key）。若被引用，需同时生成对应的
-> `modify` 操作删除 Reader 中的相关 points。
+> `delete` 操作（`points[]` 非空，Reader 点逐条列出全局 key、`instance.id`=该
+> Reader 实例——走 delete 分支 1 的保实例删点路径，§3.2.1.6；**不得用 modify**，
+> modify 分支无删点语义）。
+
+**示例 4：modify（共用端口并入——2026-10-01 新形态）**
+
+独立场景：接入 1号风机（c4_asfp2_server 监听 9001，实例 channel1，点前缀 wt1_）后，
+再接入 2号风机，监听端口同为 9001 → 同端口并入判定命中，宿主 = channel1。
+
+step-decomposer 输出 AccessPlanSteps（**action=modify、instance.id=宿主**——不得发
+add，add 分支的 instance.id 冲突检查会拒绝；新点借 modify 的「新 point 追加」落点）：
+
+```json
+[
+  {
+    "action": "modify",
+    "service_type": "c4_asfp2_server",
+    "instance": { "id": "channel1", "port": 9001 },
+    "points": [
+      {"id": "wt2_windspeed", "name": "风速", "addr": 1100, "shm_id": 0},
+      {"id": "wt2_power", "name": "功率", "addr": 1101, "shm_id": 0}
+    ]
+  }
+]
+```
+
+执行模块：channel1 实例保留，wt2_* 两点追加；注册表新增条目
+{2号风机, prefix: wt2, host: channel1}；转发侧 reader 成对追加引用
+（key = `channel1.wt2_windspeed` 等，转发地址按既有链路顺延——属确定性推导，
+随方案展示标注供确认，§2.7.1，非用户默认值）。
+方案文本陈述「2号风机将与1号风机共用端口 9001 的数据接收服务」并逐点列出 key。
 
 **3.2.1.6 转换规则（mergeConfigFromSteps 确定性逻辑）**
 
@@ -1233,16 +1373,23 @@ step-decomposer 输出 AccessPlanSteps：
 
   action = "modify":
     1. 在 config.json[service_type][] 中按 instance.id 匹配
+       （同端口并入场景 instance.id 即宿主 id，§3.2.1.3）
     2. 用 AccessPlanSteps 中的字段覆盖匹配实例的对应字段（浅合并）；
        例外：**监听端口**（Writer 服务的 `port`，如 c4_asfp2_server）不参与覆盖——保持原值；
        **客户端连接端口**（connect 型服务的 `port`，如 modbus/iec104 设备端口、asfp2_client
        服务器端口）可随覆盖变更——冻结范围与 §3.3 监听端口约束一致
-    3. points 按 point.id 匹配：同名 point 更新字段，新 point 追加到末尾
+    3. points 按 point.id 匹配：同名 point 更新字段，新 point 追加到末尾。
+       **变更路径的 point.id 须经注册表 pointMap 解析为既有 key 后生成**（源点名改名
+       场景按身份字段/addr 定位，§3.2.1.3a）——禁止仅凭重新翻译的裸 id 匹配既有点
     4. id 不匹配 → 报错
 
   action = "delete":
-    1. 在 config.json[service_type][] 中按 instance.id 匹配
-    2. 从数组中移除该实例
+    1. points[] 非空（**共用形态删设备 / Reader 引用清理**，§3.2.1.3a）：instance 按 id
+       匹配后**保留**，按 points[] 逐点删除——Writer 步骤按 `point.id`（点 key，如
+       wt2_windspeed）匹配，Reader 清理步骤按 `point.key`（全局 key，如
+       channel1.wt2_windspeed）匹配（全局 key 定义见 §3.2.1.1）
+       └ 删除后实例 points 为空 → 整实例移除，转下述第 3 步分类清理
+    2. points[] 为空（**独占形态删设备**/整实例下线）：instance 按 id 匹配 → 从数组中移除该实例
     3. 若删除后 config.json[service_type] 为空：
        ┌ role=writer → 从 c4_shm_manager.writer[] 中移除 service_type
        └ role=reader → 从 c4_shm_manager.reader[] 中移除 service_type
@@ -1441,7 +1588,7 @@ Registry 内容分两层交付，避免上下文窗口膨胀：
 
 | 层 | 注入方式 | 内容 | 使用者 | 上下文位置 |
 |---|---------|------|--------|-----------|
-| **L1: 阶段参数渲染** | 阶段提示词参数（`{{ supported_list }}`/`{{ match_hints }}`/`{{ point_fields }}`/`{{ point_field_hints }}`/`{{ config_fields }}`/`{{ connection_hints }}`/`{{ known_site }}`） | 按 side/protocol 从 registry 提取：protocols、point_schema.fields + identity_fields、config_schema（区分「无 default 键=必填」/「有 default=技术默认值可选」）、prompt_hints 四节（见下文「系统提示与 MCP 解耦」） | 提取层阶段 1-7 的提示词渲染 | **始终加载（逐字节稳定 → 前缀缓存命中）** |
+| **L1: 阶段参数渲染** | 阶段提示词参数（`{{ supported_list }}`/`{{ match_hints }}`/`{{ point_fields }}`/`{{ point_field_hints }}`/`{{ config_fields }}`/`{{ connection_hints }}`/`{{ known_site }}`） | 按 side/protocol 从 registry 提取：protocols、point_schema.fields + identity_fields、config_schema（区分「无 default 键=必填」/「有 default=技术默认值可选」）、prompt_hints 四节（见下文「系统提示与 MCP 解耦」） | 提取层阶段 1、1.5、2-7 的提示词渲染 | **始终加载（逐字节稳定 → 前缀缓存命中）** |
 | **L2: 完整定义** | 函数调用 `queryRegistryTool(service_type)` | 完整 Registry JSON（含 config_schema 全量、binary_path、error_mappings） | 方案层装配（default 填充）+ 执行层拆解器生成配置 | **按需拉取** |
 
 **约束**：
@@ -1519,9 +1666,9 @@ L2 完整 JSON 保留在注册表内存中，方案层（default 填充需 confi
 >   ① 注入 point_fields 供 LLM 理解点表列；② 驱动运行时强校验（`pointFieldsToZod` 动态构建 Zod）
 > - `point_schema.identity_fields` → 能唯一标识一个点的字段子集（按字段名声明，顺序即拼接顺序，独立于
 >   `fields` 声明顺序）；Writer 与 Reader 均声明（Reader 如 asfp2_client=[addr]、
->   influxdb_client=[measurement,field]，用于批次内身份查重与 L2 查重键）；点名确定性
->   生成仅 Writer 使用——Reader 点以 key 引用 Writer 点，无点名生成
->   `point.id`（§3.2.1.3b）。**加载期校验**：role=writer 的条目必须声明非空 `identity_fields`，且每个条目
+>   influxdb_client=[measurement,field]，用于批次内身份查重与 L2 查重键）；identity_fields
+>   仅用于**查重**——点名由用户提供或翻译（自动生成机制已废止，§3.2.1.3b），Reader 点以
+>   key 引用 Writer 点、无点名生成。**加载期校验**：role=writer 的条目必须声明非空 `identity_fields`，且每个条目
 >   必须是 `fields` 中已声明的字段名；不满足则 Registry 加载报错
 > - `config_schema.fields`（除 `id`/`name`）→ 实例字段（平铺 + 校验，不做语义分类）
 >
@@ -1544,14 +1691,13 @@ L2 完整 JSON 保留在注册表内存中，方案层（default 填充需 confi
 >   Registry JSON，阶段提示词与代码零改动
 > - **加载期校验**：字段可省略；存在时必须是合法结构（Zod 校验四节类型），空对象等价于省略
 >
-> **协议与角色解耦**：id **不含协议/服务类型信息**。协议是技术维度（Modbus/IEC104/ASFP2），
-> 采集目标是业务维度（升压站/风功率预测），两者正交、非一一对应。同一采集目标无论用
-> Modbus 还是 IEC104，id 都不变。id 只反映业务维度，协议信息由 service_type（config.json 的
-> 顶层 key）承载。
+> **协议与角色解耦**：实例 id **不含协议/服务类型信息，也不含业务语义**——它是 channel{N}
+> 技术句柄（§3.2.1.3）。协议是技术维度（Modbus/IEC104/ASFP2），由 service_type（config.json
+> 的顶层 key）承载；设备语义由注册表条目与点 key 前缀承载。
 
-points 的 `id` 字段直接使用点表中的点名称（如 `windspeed`、`temperature`），
-全局 key 自动组合为 `{instance.id}.{point.id}`（如 `hnals_transformer1.windspeed`）。
-点名称需为不含 `.`/`/` 等分隔符的合法标识符，否则会破坏 global key 的 `{instance.id}.{point.id}` 解析。
+设备点 key 由「`{设备前缀}_{裸id}` 统一前缀规则」生成（§3.2.1.3/§3.2.1.3b，如
+`wt1_windspeed`），全局 key = `{实例id}.{点key}`（如 `channel1.wt1_windspeed`）。
+裸 id 须为不含 `.`/`/` 等分隔符的合法标识符，否则会破坏全局 key 解析。
 点名含中文或非规范时的翻译规则见 §3.2.1.3b；点名缺失即询问，仍不提供则拒绝接入（不自动生成）。
 
 **必填项用户提供原则（无默认值原则）**：
@@ -1838,13 +1984,14 @@ interface DisplaySession {
 
 | 工具 | 输入 | 行为 |
 |------|------|------|
-| `list_points` | `{ filter?: string }` | 读 `~/.local/c4/config.json` 中 **writer 类服务的 points**——按 config 模型的 writer/reader 分类，reader 对同 key 的引用仅作一致性校验、不产生独立条目（否则枚举必然重复）；每点含 key / addr / shm_id / 所属实例，支持按实例（设备）或 key 关键词筛选；无匹配时返回空列表由 LLM 告知 |
+| `list_points` | `{ filter?: string }` | 读 `~/.local/c4/config.json` 中 **writer 类服务的 points**——按 config 模型的 writer/reader 分类，reader 对同 key 的引用仅作一致性校验、不产生独立条目（否则枚举必然重复）；每点含 key / addr / shm_id / **所属设备（经注册表前缀归属判定——独占形态与实例等价，共用形态按前缀合成虚拟设备，§3.2.1.3a）**，支持按设备或 key 关键词筛选；无匹配时返回空列表由 LLM 告知 |
 | `display_points` | `{ pointKeys: string[], displayNames?: Record<string, string>, mode?: 'realtime'\|'cumulative', durationMinutes?: number, refreshCount?: number }` | 校验 keys 存在 → 建立会话（隐式结束旧会话）→ 返回会话摘要（模式/周期/终止条件），LLM 据此告知用户卡片位置与终止方式。`displayNames`（pointKey→点名原文）：用户用中文点名时由 LLM 传入对话中出现的中文名，卡片以中文名为主、key 为辅；未提供的点回退显示 key |
 | `stop_display` | `{ pointKeys?: string[] }` | 无参：终止整个会话；带参：仅移除指定点（清空则会话结束） |
 
 - **歧义消解**（C4_RS_00057）：用户说"风速"而多设备均有时，LLM 以 `list_points` 取候选
   列表并列出供用户选择，不擅自猜测；
-- **批量订阅**：`pointKeys` 可含整设备全部点（LLM 经 `list_points` 按实例名聚合），
+- **批量订阅**：`pointKeys` 可含整设备全部点（LLM 经 `list_points` 按设备聚合——经注册表
+  前缀归属合成，§3.2.1.3a），
   如"显示 1#风机的所有点"；
 - 呈现约束（无单位、原始值、状态标注必须随值输出）由阶段提示词硬约束
   （§3.1 追加），与 C4_FUN_00005 非技术语言原则衔接。
@@ -1913,6 +2060,7 @@ interface DisplaySession {
 ```
 [提取层] 每条消息并行推进，各自出口判据：
   1 场站        → 已绑定（华能阿拉善），消息无冲突场站 ✓
+  1.5 设备      → "1#风机" → wt1（L0 正则命中，recv.device 闭合）✓
   2 接入协议    → "modbus" → matched (canonical: modbus) ✓
   3 接入点表    → parser 解析 Excel → <file_data> → 10 点逐点提取
                   （uid=1/fun=3/type=10/swap=2 全局声明展开）→ L1+L2 ✓
@@ -1921,18 +2069,18 @@ interface DisplaySession {
   6 转发点表    → 消息声明的转发地址范围（5000~5009）展开 → 10 个转发地址 ✓
   7 转发信息    → 目标名"II区服务器"+ 地址端口 ✓
         ↓ 全部缺口闭合
-[方案层 8] 装配（devices/forward_targets + 缺省点名 p_3000… + seq）
+[方案层 8] 装配（devices/forward_targets + 点 key 前缀 wt1_… + channel 序号）
         → L1 结构校验 → L2 validate_points → AccessPlan
-        → 展示方案摘要（逐条「地址↔点名」映射）→ button_arm → 停等
+        → 展示方案摘要（逐条「地址↔点名→key」映射）→ button_arm → 停等
         ↓ 用户点击确认按钮
-[执行层 9] plan_steps 拆解 → ServiceStep[]（instance.id=hnals_wt1 记忆复用）
+[执行层 9] plan_steps 拆解 → ServiceStep[]（实例 channel1 + 点 key 前缀 wt1_，注册表记忆复用）
         → 事务五步（标记+.prev → merge → stop → adjust_shm → start）
-        → 成功：固化 abbr 记忆库 + 清标记 + 总结轮
+        → 成功：固化 设备身份注册表 + 清标记 + 总结轮
 ```
 
 ```mermaid
 flowchart TD
-    User["用户上传 Excel + 完整需求"] --> Ext["提取层 1-7<br/>（并行推进 + 出口判据）"]
+    User["用户上传 Excel + 完整需求"] --> Ext["提取层 1、1.5、2-7<br/>（并行推进 + 出口判据）"]
     Ext -->|"缺口: 单缺口提问→停等"| User
     Ext -->|"全部闭合"| Plan["方案层 8<br/>装配 + L1 + L2<br/>→ AccessPlan"]
     Plan --> Arm["button_arm<br/>展示方案摘要"]
@@ -1962,25 +2110,27 @@ c4/agent/                              # Agent 系统
 │   ├── index.ts                       # 入口: 配置加载(Zod) + Registry + DisplayService
 │   │                                  #   + 编排器装配 + Express + 四级启动瀑布(§3.2.3)
 │   ├── orchestrator/
-│   │   └── orchestrator.ts            # Workflow 编排器（§2.3 回合循环：取消检测 → 阶段提取
-│   │                                  #   1-7 → 缺口计算/单缺口顺序提问 → 方案层装配(§3.2.0.1)
+│   │   ├── orchestrator.ts            # Workflow 编排器（§2.3 回合循环：取消检测 → 阶段提取
+│   │                                  #   1、1.5、2-7 → 缺口计算/单缺口顺序提问 → 方案层装配(§3.2.0.1)
 │   │                                  #   → 确认执行/事务回滚）。阶段提取器为编排器内联的
 │   │                                  #   提示词调用 + 出口判据（未单设 stages/ 目录）
-│   ├── super_worker/
-│   │   ├── prompts/                   # 阶段提示词（§3.2 参数注入约定）
-│   │   │   ├── location_prompt.txt    # 阶段1 场站
-│   │   │   ├── forward_intent_prompt.txt # 阶段5-7 激活条件：转发意图判定（关键词未命中时兜底）
-│   │   │   ├── protocol_prompt.txt    # 阶段2/5 协议（side 参数化）
-│   │   │   ├── point_prompt.txt       # 阶段3/6 点表
-│   │   │   ├── connection_prompt.txt  # 阶段4/7 连接
-│   │   │   └── change_prompt.txt      # 修改/删除意图提取（已接入设备变更路径）
-│   │   ├── turn_rules.ts              # 回合状态机纯函数（问询句式/阶段转移表，单测覆盖）
-│   │   ├── super_worker.ts            # （退役保留）旧 ReAct 循环实现，运行时不再装配
-│   │   └── subagents.ts               # （退役保留）旧子代理装配
+│   │   ├── gap_question.ts            # 单缺口顺序提问文本 + 裸值/设备应答绑定（§2.6/§3.2.1.3c）
+│   │   ├── site_check.ts              # 场站归属判定（确定性标签 + LLM 语义仲裁，§3.2.1.3a）
+│   │   └── zh_numeral.ts              # 中文数字转换（转发起始地址/设备编号，§3.2.1.3c）
+│   ├── prompts/                       # 阶段提示词（§3.2 参数注入约定；编排器经
+│   │                                  #   render_prompt 按 import.meta.url 相对定位）
+│   │   ├── location_prompt.txt        # 阶段1 场站
+│   │   ├── forward_intent_prompt.txt  # 阶段5-7 激活条件：转发意图判定（关键词未命中时兜底）
+│   │   ├── protocol_prompt.txt        # 阶段2/5 协议（side 参数化）
+│   │   ├── point_prompt.txt           # 阶段3/6 点表
+│   │   ├── connection_prompt.txt      # 阶段4/7 连接
+│   │   ├── change_prompt.txt          # 修改/删除意图提取（已接入设备变更路径）
+│   │   └── id_translate_prompt.txt    # 变更流中文点名微翻译（英文标识补齐）
 │   ├── registry/
 │   │   ├── registry.ts               # McpServiceRegistry（单例，L1/L2 双层）
 │   │   ├── loader.ts                 # 目录扫描
-│   │   ├── abbr_registry.ts          # abbr 记忆库（§3.2.1.3a，实例 id 稳定性）
+│   │   ├── abbr_registry.ts          # 设备身份注册表（§3.2.1.3a，设备身份与点 key 稳定性）
+│   │   ├── device_prefix.ts          # 设备前缀确定性派生（§3.2.1.3c，方案层与拆解器共用）
 │   │   └── types.ts
 │   ├── mcp/
 │   │   ├── client.ts                 # C4McpManager：Unix socket 连接 + 重连收敛（§3.2.3）
@@ -2004,12 +2154,18 @@ c4/agent/                              # Agent 系统
 │   │   ├── doc_parsers.ts             # csv/xlsx/txt 确定性解析（产 <file_data>）
 │   │   ├── output_plan_steps.ts       # 执行层确定性拆解器 generate_steps（C4_FUN_00044）
 │   │   ├── query_registry.ts          # 查询 Registry
-│   │   └── query_abbr_registry.ts     # 检索 abbr 记忆库
+│   │   ├── query_abbr_registry.ts     # 检索 设备身份注册表
+│   │   └── ...                        # output_access_plan / output_device_info /
+│   │                                  #   executor 为退役保留文件（§6 决策表：
+│   │                                  #   工具已合并为方案层纯函数，运行时不装配）
 │   ├── logging/agent_logger.ts        # 结构化 NDJSON 日志（§5.2 双层日志）
 │   └── types/index.ts                 # Registry/ServiceStep/SystemConfig 等共享类型
 ├── test/                              # vitest 单元测试（npm test）
-│   ├── executor/point_rules.test.ts   # §2.7.2 覆盖矩阵
-│   └── super_worker/turn_rules.test.ts
+│   ├── executor/                      # point_rules / point_id（§2.7.2 覆盖矩阵）
+│   ├── registry/                      # 设备身份注册表 / 设备前缀派生（§3.2.1.3）
+│   ├── orchestrator/                  # gap_question / site_check / zh_numeral
+│   ├── subagents/                     # output_plan_steps 身份规则（§3.2.1.3）
+│   └── tools/                         # doc_parsers（<file_data> 解析通道）
 ├── frontend/                          # React SPA（见 web.md）
 └── config/
     ├── agent.json
@@ -2072,6 +2228,12 @@ Agent 启动时读取 `~/.local/c4/agent.json`（固定位置，`~` 为运行 C4
   // ========== Web 前端静态托管 ==========
   "frontend": {
     "dir": "/usr/local/lib/c4/frontend"
+  },
+
+  // ========== 场站绑定（§3.2.1.3a，首次接入确认后固化） ==========
+  "site": {
+    "name": "华能阿拉善",
+    "abbr": "hnals"
   }
 }
 ```
@@ -2095,6 +2257,7 @@ Agent 启动时读取 `~/.local/c4/agent.json`（固定位置，`~` 为运行 C4
 | `logging.dir` | string | 结构化运行日志（NDJSON，每日文件）输出目录；打包部署配 `/var/log/c4/agent`（需 systemd 授予运行账户写权限） |
 | `logging.agent_level` | string | 可选。结构化日志级别：`"debug"` / `"info"` / `"warn"` / `"error"`，缺省 `"debug"` |
 | `frontend.dir` | string | Web 前端静态资源目录（Express 托管，缺省则不托管） |
+| `site` | object | 场站绑定（单例）：`{name, abbr}`，首次接入确认后固化（§3.2.1.3a）；固化后不可询问、不可变更 |
 
 ### 5.2 运行时目录结构
 
@@ -2130,6 +2293,8 @@ MCP 服务二进制路径不由 agent.json 统一指定——各 MCP 服务通�
 ├── config.json                   # 数据路径 MCP 服务配置（Agent 生成/修改）
 ├── config.json.prev.1~.3          # config.json 滚动历史（保留最近 3 版，回滚用）
 ├── pending_change.json            # 配置事务标记（变更期间存在，完成即删除）
+├── abbr_registry.json             # 设备身份注册表：设备名→宿主实例+点前缀+pointMap
+│                                  #   （channelHighWatermark 不可重建，§3.2.1.3a）
 ├── state/                        # 对话状态持久化
 │   └── (LangGraph checkpoint 文件)
 └── log/                          # Agent 日志
@@ -2205,6 +2370,12 @@ Agent 启动时读取                Agent 运行时生成/修改           Agen
 | registry prompt 知识 | 自由字符串数组 / 按阶段路由的结构化对象 | 结构化对象（protocol_match/point_field_hints/connection_hints/display） | 自由文本无法路由到阶段提示词，且与结构化 schema 漂移 |
 | uid 追问时机 | access_plan provenance 拦截 / 点表阶段闭环 | 点表阶段闭环（provenance 退化为交叉校验） | 缺口不流入下游，消灭乒乓回路 |
 | device_info / access_plan | 两个 LLM 工具 + 两道闸门 / 合并为方案层纯函数 | 合并 | 无 LLM 自由度后两道闸门失去存在理由；中间产物无消费者 |
+| 点 key 命名（2026-10-01） | 裸 id / 条件前缀（仅共用实例时）/ 无条件前缀 | **无条件 `{设备前缀}_{裸id}`**（wt1_windspeed） | 单一规则消灭拓扑分叉；跨设备同名自然共存；点 key 全场唯一；与「禁止重名」裁定调和（方案明示、确认即批准） |
+| 禁止重名（2026-09-27） | 同名点自动改名去重（windspeed_2） / 直接拒绝 | **拒绝**（同名点但地址不同 → 报错要求更换点名或地址，不自动改名） | 自动改名产出用户未命名的点，违反点名必填原则；改名后的点在后续会话无法与用户对齐。2026-10-01 前缀规则下「重名」作用域收窄为实例内（跨设备同名因前缀不同自然共存，见点 key 命名行） |
+| 实例 id（2026-10-01） | {场站}_{设备} / channel 顺序句柄 / 随机 | **channel{N} 顺序句柄，用户不可见** | 设备语义已收敛到注册表+点前缀；句柄化消灭语义漂移与并入改名；随机损害排障可读性（日志/config 需稳定可 grep） |
+| 同端口多风机（2026-10-01） | 每机一实例 / 共用实例+通道概念 / 共用实例零交互 | **并入既有实例，零用户交互** | 「通道」是用户额外负担且生产不可感知（用户裁定）；分流由协议+端口确定性判定 |
+| 设备名称/编号（2026-10-01） | 机会提取 / 必答缺口 | **必答缺口 recv.device**（场站后、协议前） | 点 key 前缀依赖设备身份；裸值绑定 + 自动序列（dev{N}）兜底；类型映射补升压站→syz |
+| 旧命名格式兼容（2026-10-01） | 迁移映射 / 不兼容 | **不兼容，旧配置废弃重接** | pre-production 无包袱（用户裁定不考虑兼容性） |
 
 ---
 

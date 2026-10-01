@@ -47,7 +47,7 @@ function zh_under_wan(s: string): number | null {
 }
 
 /** 单个中文数字串求值（支持万位组合）；无法解析返回 null。 */
-function zh_convert(m: string): number | null {
+export function zh_convert(m: string): number | null {
     const wanIdx = m.indexOf("万");
     if (wanIdx < 0) return zh_under_wan(m);
     const head = zh_under_wan(m.slice(0, wanIdx));

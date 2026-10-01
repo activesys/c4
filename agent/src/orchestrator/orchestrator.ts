@@ -17,12 +17,17 @@ import type {
 import type { McpServiceRegistry } from "../registry/registry.js";
 import {
     load_abbr_registry,
-    resolve_abbr_conflict,
     save_abbr_registry,
+    retrieve_device,
+    resolve_prefix_conflict,
+    next_dev_prefix,
     finalize_entry,
+    delete_entry,
+    channel_watermark_from_config,
+    type AbbrEntry,
     type AbbrRegistry,
 } from "../registry/abbr_registry.js";
-import { validate_point_table } from "../executor/point_rules.js";
+import { validate_point_table, derive_point_id } from "../executor/point_rules.js";
 import {
     generate_steps,
     find_service_type,
@@ -30,6 +35,8 @@ import {
 } from "../subagents/tools/output_plan_steps.js";
 import {
     IDENTIFIER_RE,
+    LISTENER_SERVICES,
+    MAX_IDENTIFIER_LENGTH,
     identifier_error,
     merge_config_from_steps,
     run_runtime_stop_start,
@@ -45,12 +52,14 @@ import {
     llm_site_tag,
 } from "./site_check.js";
 import { zh_start_address } from "./zh_numeral.js";
+import { device_prefix_candidate } from "../registry/device_prefix.js";
 import {
     ask_conn,
     ask_points,
     ask_protocol,
     bind_bare,
     bind_change_answer,
+    bind_device_answer,
     is_forward_mirror_answer,
     parse_bare_value,
     parse_receive_port,
@@ -100,6 +109,14 @@ interface AccessPlan {
     input?: Record<string, unknown>;
     steps?: ServiceStep[];
     display: string;
+    /** 注册表固化载荷（§3.2.1.3a 第 4 步）：merge 与 Stop-Start 全部成功后写入——
+     *  回滚发生时注册表尚未写入，无幽灵条目问题；取消（执行前）同样不触碰注册表 */
+    registryWrites?: {
+        upserts: AbbrEntry[];
+        deletes: string[];
+        pointMapDrops: Array<{ prefix: string; keys: string[] }>;
+        channelHighWatermark: number;
+    };
 }
 
 interface SessionState {
@@ -123,6 +140,13 @@ interface SessionState {
     fileTable: string | null;
     /** 变更流程追问中（缺点名/缺转发地址/待选设备）——应答回合强制走变更分叉 */
     pendingChangeAsk: boolean;
+    /** 同名多候选消歧应答语境（§3.2.1.3a「以点 key 前缀指认目标」）——应答回合
+     *  接受裸前缀 token 指认（确定性定目标，不交 LLM 兜底） */
+    pendingDisambig: boolean;
+    /** 消歧锚（§3.2.1.3a）：已确定性指认的宿主实例 id——锚定后变更解析（含 LLM
+     *  兜底）锁定该设备（devices 只含锚），防同名另一台被误选；方案产出/取消/
+     *  终态时清除 */
+    disambigHostId: string | null;
     /** 变更流追加草稿（单调累积，addr 为键——已确认字段不被后续轮次重解析覆盖，
      *  2026-09-27 用例10：轮4 重解析曾丢已确认点名并漏绑转发地址） */
     changeAddPoints: Array<Record<string, unknown>> | null;
@@ -146,6 +170,8 @@ function fresh_state(): SessionState {
         userTexts: [],
         fileTable: null,
         pendingChangeAsk: false,
+        pendingDisambig: false,
+        disambigHostId: null,
         changeAddPoints: null,
         changeTargetId: null,
     };
@@ -227,7 +253,6 @@ function render_prompt(file: string, params: Record<string, string>): string {
         path.join(
             path.dirname(new URL(import.meta.url).pathname),
             "..",
-            "super_worker",
             "prompts",
             file,
         ),
@@ -423,28 +448,71 @@ function parse_file_table(raw: string): FileParseResult {
     return out;
 }
 
-// ── 设备 abbr 候选（确定性推导，§3.2.1.3a）──────────────────
+// ── 设备前缀派生（agent.md §3.2.1.3c，2026-10-01）──────────
+// 实现移至 src/registry/device_prefix.ts（方案层与拆解器共用）。
 
-const DEVICE_TYPE_ABBR: Array<[RegExp, string]> = [
-    [/风机|风电机组/, "wt"],
-    [/主变/, "zy"],
-    [/逆变器/, "nb"],
-    [/测风塔/, "cft"],
-    [/光伏/, "gf"],
-    [/储能/, "cn"],
-    [/中心|主站|上级/, "center"],
-    [/数据源|接收/, "src"],
-];
-
-function device_abbr_candidate(name: string): string {
-    const numMatch = name.match(/(\d+)\s*#?\s*/);
-    const num = numMatch ? numMatch[1] : "";
-    for (const [re, abbr] of DEVICE_TYPE_ABBR) {
-        if (re.test(name)) return num ? `${abbr}${num}` : abbr;
+// ── 消歧前缀指认（§3.2.1.3a「以点 key 前缀指认目标」）──────
+/**
+ * 消歧应答语境下的前缀 token 指认：消息中的英文 token 与注册表前缀精确匹配，
+ * 唯一命中 → 返回该设备条目；多命中/无命中 → null（保持消歧态，宁可放过不可错认）。
+ * 含下划线的点 key 形态（「删除 wt1_temperature 点」）取首段作前缀候选——完整
+ * key 因 `\b` 边界不产 token，首段提取让该形态仍可指认（不可解析时交 LLM 兜底）。
+ */
+export function parse_disambig_target(
+    text: string,
+    devices: Array<Record<string, unknown>>,
+): Record<string, unknown> | null {
+    const toks: string[] = text.toLowerCase().match(/\b[a-z][a-z0-9]{0,23}\b/g) ?? [];
+    for (const m of text.toLowerCase().matchAll(/\b([a-z][a-z0-9]{0,23})_[a-z0-9_]/g)) {
+        toks.push(m[1]);
     }
-    const ascii = name.replace(/[^a-zA-Z0-9_]/g, "");
-    if (ascii.length > 0) return ascii.toLowerCase();
-    return num ? `dev${num}` : "dev";
+    const hits = devices.filter((d) => {
+        const pre = String(d["prefix"] ?? "").toLowerCase();
+        return pre !== "" && toks.includes(pre);
+    });
+    return hits.length === 1 ? hits[0] : null;
+}
+
+/**
+ * 消歧锚解析（§3.2.1.3a「指认的确定性消费」状态机核心，纯函数）。
+ * 优先级：**用户新鲜指认 > 陈旧锚**——消歧再询问后用户的改选必须生效，
+ * 陈旧锚不得覆盖显式指认（同名两台下反向删除方案的根因即优先级倒置）。
+ * 返回新状态三元组：anchor（本回合解析目标）/ pending（语境是否保持）/
+ * hostId（锚落盘值；方案产出/取消/终态时由调用方清除）。
+ */
+export function resolve_disambig_anchor(
+    pending: boolean,
+    stale_host_id: string | null,
+    text: string,
+    devices: Array<Record<string, unknown>>,
+): { anchor: Record<string, unknown> | null; pending: boolean; hostId: string | null } {
+    if (pending) {
+        const hit = parse_disambig_target(text, devices);
+        if (hit !== null) {
+            return { anchor: hit, pending: false, hostId: String(hit["id"]) };
+        }
+        // 指认失败（消息无候选前缀 token）→ 回落陈旧锚（「已选定」延续语义）
+        if (stale_host_id !== null) {
+            const stale =
+                devices.find((d) => String(d["id"]) === stale_host_id) ?? null;
+            return {
+                anchor: stale,
+                pending: false,
+                hostId: stale !== null ? stale_host_id : null,
+            };
+        }
+        return { anchor: null, pending: false, hostId: null };
+    }
+    if (stale_host_id !== null) {
+        const stale =
+            devices.find((d) => String(d["id"]) === stale_host_id) ?? null;
+        if (stale === null) {
+            // 锚设备已不存在（被删/回滚）→ 锚失效
+            return { anchor: null, pending: false, hostId: null };
+        }
+        return { anchor: stale, pending: false, hostId: stale_host_id };
+    }
+    return { anchor: null, pending: false, hostId: null };
 }
 
 // ── 非技术语言的执行错误翻译（§2.10 / 断言黑名单约束）──────
@@ -1042,9 +1110,10 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             const dm2 = dm && !stop.has(dm[1].slice(0, 2)) ? dm[1] : null;
             const hm = semantic.match(/接入(?:另一个设备|华能)?[：:]?\s*([^\s，。,]*\d+#\S+)/);
             // 常见编号表述（func_test_case 用例 1 形态）：「1号风机」「1#风机」
-            // 「2号升压站」——编号 + 设备类型词，无「设备名称:」前缀
+            // 「2号升压站」——编号 + 设备类型词，无「设备名称:」前缀；中文数字
+            // （「三号风机」→ 三号）同样命中（§3.2.1.3c L0，编号转换复用 zh_numeral）
             const nm = semantic.match(
-                /(\d{1,3}\s*[#号]\s*(?:风机|主变|升压站|逆变器|测风塔|机组|变压器|数据源))/,
+                /((?:\d{1,3}|[零一二两三四五六七八九十]{1,3})\s*[#号]\s*(?:风机|主变|升压站|逆变器|测风塔|机组|变压器|数据源))/,
             );
             if (dm2) {
                 state.recv.deviceName = dm2;
@@ -1467,8 +1536,10 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
         const fields: string[] = (entry?.point_schema?.fields ?? []).map(
             (f: { name: string }) => f.name,
         );
-        // 推导字段放行（§2.7.1 确定性推导：influxdb 的 measurement/field/type、点名）
-        const derivable = new Set<string>(["name", "measurement", "field", "type"]);
+        // 推导字段放行（§2.7.1 确定性推导：influxdb 的 measurement/type、点名）。
+        // field 已于 2026-10-01 裁定必填、无默认值、不推导（c4_influxdb_client.md §2）——
+        // 缺失即走缺口追问，不再放行
+        const derivable = new Set<string>(["name", "measurement", "type"]);
         // L1 必填检查对可推导字段放行缺失（方案层填充兜底，§2.7.1）
         const missingFields = fields.filter((f) => !derivable.has(f));
         const missing: string[] = [];
@@ -1534,7 +1605,17 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
         } else {
             recap.push(`场站：${state.site.name}`);
         }
-        if (state.recv.deviceName) recap.push(`设备：${state.recv.deviceName}`);
+        // 设备名称/编号必答缺口（recv.device，§3.2.1.3c）：点 key 前缀依赖设备身份，
+        // 依赖序位于场站之后、接入协议之前——名称或编号任一即闭合
+        if (state.recv.deviceName) {
+            recap.push(`设备：${state.recv.deviceName}`);
+        } else {
+            gaps.push({
+                key: "recv.device",
+                text: "设备名称/编号（点 key 前缀由此派生）",
+                ask: "这台设备叫什么？（如：2号风机、升压站）",
+            });
+        }
 
         const rg = side_gaps("接入", state.recv, "writer");
         gaps.push(...rg.gaps);
@@ -1561,7 +1642,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
         if (
             state.recv.points !== null &&
             !state.forwardIntent &&
-            find_existing_reader_info(state) === null
+            find_existing_reader_info() === null
         ) {
             gaps.push({
                 key: "fwd.required",
@@ -1600,11 +1681,124 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
     }
 
     // ── 方案层装配（§3.2.0.1，纯代码）──────────────────────
-    // 当前 config.json 中的既有转发链路（reader 角色实例，取点数最多者）
-    function find_existing_reader_info(state: SessionState): {
+    // 监听型服务集合 LISTENER_SERVICES 自 executor 导入（单一事实源，§3.2.1.3
+    // 同端口并入判定与 §3.2.1.6 端口冻结共用同一「监听型」定义）
+
+    /** 注册表高位水印（同步读；旁路路径 channelStart 需要它防已删序号复用）。 */
+    function registry_watermark(): number {
+        try {
+            const reg = JSON.parse(readFileSync(abbrPath, "utf-8")) as {
+                channelHighWatermark?: unknown;
+            };
+            return typeof reg.channelHighWatermark === "number"
+                ? reg.channelHighWatermark
+                : 0;
+        } catch {
+            return 0;
+        }
+    }
+
+    /** 现存实例是否已占用该 id（确认时并发撞号重校验用）。 */
+    function config_has_instance(current: Record<string, unknown>, id: string): boolean {
+        for (const [, list] of Object.entries(current)) {
+            if (!Array.isArray(list)) continue;
+            if (
+                (list as Array<Record<string, unknown>>).some(
+                    (i) => String(i["id"] ?? "") === id,
+                )
+            ) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    function read_current_config(): Record<string, unknown> | null {
+        try {
+            return JSON.parse(readFileSync(cfg.configPath, "utf-8")) as Record<string, unknown>;
+        } catch {
+            return null;
+        }
+    }
+
+    /** 实例点表读取（地址占用方案期预检用）；实例不存在返回空表。 */
+    function _instance_points(
+        current: Record<string, unknown>,
+        instance_id: string,
+    ): Array<Record<string, unknown>> {
+        for (const [, list] of Object.entries(current)) {
+            if (!Array.isArray(list)) continue;
+            for (const inst of list as Array<Record<string, unknown>>) {
+                if (String(inst["id"] ?? "") === instance_id) {
+                    return (inst["points"] ?? []) as Array<Record<string, unknown>>;
+                }
+            }
+        }
+        return [];
+    }
+
+    /** 监听端口占用查找（含跨服务类型——返回占用了该端口的监听型实例）。 */
+    function find_listener_host(
+        current: Record<string, unknown>,
+        port: number,
+    ): { id: string; name: string; service_type: string } | null {
+        for (const [st, list] of Object.entries(current)) {
+            if (st === "c4_shm_manager" || !Array.isArray(list)) continue;
+            if (!LISTENER_SERVICES.has(st)) continue;
+            for (const inst of list as Array<Record<string, unknown>>) {
+                if (Number(inst["port"]) === port) {
+                    return {
+                        id: String(inst["id"] ?? ""),
+                        name: String(inst["name"] ?? ""),
+                        service_type: st,
+                    };
+                }
+            }
+        }
+        return null;
+    }
+
+    /** reader 链路信息（沿用既有转发链路时填 plan；id 为实例句柄，展示层不使用）。 */
+    function _reader_chain_info(
+        current: Record<string, unknown>,
+        readerId: string,
+        serviceTypeHint: string,
+    ): {
         id: string;
         name: string;
-        abbr: string;
+        protocol: string;
+        ip: string | null;
+        port: number | null;
+        maxAddr: number;
+    } | null {
+        for (const [st, list] of Object.entries(current)) {
+            if (st === "c4_shm_manager" || !Array.isArray(list)) continue;
+            if (serviceTypeHint !== "" && st !== serviceTypeHint) continue;
+            const entry = registry.get_entry(st);
+            if (entry?.role !== "reader") continue;
+            for (const inst of list as Array<Record<string, unknown>>) {
+                if (String(inst["id"] ?? "") !== readerId) continue;
+                const pts = (inst["points"] ?? []) as Array<Record<string, unknown>>;
+                const addrs = pts
+                    .map((p) => Number(p["addr"]))
+                    .filter((n) => !Number.isNaN(n));
+                return {
+                    id: readerId,
+                    name: String(inst["name"] ?? readerId),
+                    protocol: entry.protocols?.[0]?.protocol ?? st,
+                    ip: typeof inst["ip"] === "string" ? (inst["ip"] as string) : null,
+                    port: typeof inst["port"] === "number" ? (inst["port"] as number) : null,
+                    maxAddr: addrs.length > 0 ? Math.max(...addrs) : 0,
+                };
+            }
+        }
+        return null;
+    }
+
+    // 当前 config.json 中的既有转发链路（reader 角色实例，取点数最多者）
+    function find_existing_reader_info(): {
+        id: string;
+        name: string;
         protocol: string;
         ip: string | null;
         port: number | null;
@@ -1616,11 +1810,9 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
         } catch {
             return null;
         }
-        void current;
         let best: {
             id: string;
             name: string;
-            abbr: string;
             protocol: string;
             ip: string | null;
             port: number | null;
@@ -1638,13 +1830,10 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                     .filter((n) => !Number.isNaN(n));
                 const maxAddr = addrs.length > 0 ? Math.max(...addrs) : 0;
                 const id = String(inst["id"] ?? "");
-                const sitePrefix = state.site?.abbr ? `${state.site.abbr}_` : "";
-                const abbr = id.startsWith(sitePrefix) ? id.slice(sitePrefix.length) : id;
                 if (!best || maxAddr > best.maxAddr) {
                     best = {
                         id,
                         name: String(inst["name"] ?? id),
-                        abbr,
                         protocol: entry.protocols?.[0]?.protocol ?? st,
                         ip: typeof inst["ip"] === "string" ? (inst["ip"] as string) : null,
                         port: typeof inst["port"] === "number" ? (inst["port"] as number) : null,
@@ -1702,15 +1891,13 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
         } catch {
             // config.json 不存在或损坏 → 记忆库走空/重建分支
         }
-        return load_abbr_registry(
-            abbrPath,
-            data_config as never,
-            state.site,
-        );
+        void state;
+        return load_abbr_registry(abbrPath, data_config as never);
     }
 
     function plan_device_points(state: SessionState, dev: Record<string, unknown>): void {
-        // influxdb 确定性推导（§2.7.1：measurement/field/type 由源点映射，展示中标注）
+        // influxdb 确定性推导（§2.7.1：measurement/type 由源点映射，展示中标注）。
+        // field 不推导（2026-10-01 裁定必填，由点表/用户提供，缺失走缺口追问）
         const points = dev["points"] as Array<Record<string, unknown>> | undefined;
         if (!points || points.length === 0) return;
         const src = state.recv.points ?? [];
@@ -1728,10 +1915,6 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                     (state.fwd.conn["measurement"] as string) ?? state.site?.abbr ?? "data";
                 p["_derived"] = "measurement";
             }
-            if (p["field"] === undefined || p["field"] === "") {
-                p["field"] = String(srcPt["name"] ?? p["name"] ?? `f_${p["addr"] ?? i}`);
-                p["_derived"] = "field";
-            }
             if (p["type"] === undefined || p["type"] === "") {
                 p["type"] = TYPE_MAP[String(srcPt["type"] ?? "")] ?? "float";
                 p["_derived"] = "type";
@@ -1739,90 +1922,277 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
         }
     }
 
-    /** 展平内嵌方案 JSON 的 connection 形状 + 合成缺失的 abbr（直通通道归一化）。 */
+    /** 展平内嵌方案 JSON 的 connection 形状 + 合成缺失的点前缀（直通通道归一化）。 */
     function normalize_embedded_device(item: Record<string, unknown>): void {
         const conn = item["connection"];
         if (conn && typeof conn === "object") {
             Object.assign(item, conn as Record<string, unknown>);
             delete item["connection"];
         }
-        if (!item["abbr"]) {
-            item["abbr"] = device_abbr_candidate(String(item["name"] ?? "dev"));
-        }
-        const abbr = String(item["abbr"]);
-        if (!/^[a-zA-Z]/.test(abbr)) {
-            item["abbr"] = `d${abbr.replace(/[^a-zA-Z0-9_]/g, "")}`;
+        if (!item["prefix"]) {
+            const cand = device_prefix_candidate(String(item["name"] ?? "dev"));
+            // 直通通道（测试/高级用户）无注册表上下文：匿名设备给基名 dev1
+            item["prefix"] = cand === "dev" ? "dev1" : cand;
         }
     }
 
     async function assemble_access_plan(state: SessionState): Promise<{
         plan: Record<string, unknown>;
         display: string;
+        registryWrites?: AccessPlan["registryWrites"];
         issue?: string;
     } | null> {
         const abbr = await load_abbr(state);
-        const siteAbbr = state.site?.abbr ?? "";
-        const devName = state.recv.deviceName ?? "接入设备";
-        let devAbbr = device_abbr_candidate(devName);
-        const conflict = resolve_abbr_conflict(abbr, devAbbr, devName);
-        let devId: string;
-        if (!conflict.conflict && conflict.existing_id) {
-            devId = conflict.existing_id; // 记忆命中：同一设备 → 复用 id（修改语义）
-            devAbbr = devId.startsWith(`${siteAbbr}_`)
-                ? devId.slice(siteAbbr.length + 1)
-                : devId;
+        const devName = state.recv.deviceName ?? "";
+        if (devName === "") {
+            // 方案层最终防线（§3.2.1.3c）：设备名未就绪 → 拒绝装配、不出确认按钮
+            return {
+                plan: {},
+                display: "",
+                issue: "这台设备叫什么？（如：2号风机、升压站）——设备名称/编号是必答项。",
+            };
+        }
+
+        // ── 设备身份（§3.2.1.3a id 确定流程 1-2 步的确定性部分）──
+        // 检索注册表：同名命中 → 描述匹配仲裁；无命中 → 新设备（前缀确定性派生 +
+        // 撞名顺延 / 匿名 dev{N} 序列）；同名多条无法区分 → 追问用户
+        const retrieval = retrieve_device(abbr, devName, state.userTexts.join("\n"));
+        let prefix: string;
+        let reused: AbbrEntry | null = null;
+        if (retrieval.decision === "same_device" && retrieval.entry) {
+            reused = retrieval.entry;
+            prefix = retrieval.entry.prefix;
+        } else if (retrieval.decision === "name_conflict") {
+            const cands = (retrieval.candidates ?? [])
+                .map((c) => `点 key 前缀 ${c.prefix}_（${c.description || "无描述"}）`)
+                .join("；");
+            return {
+                plan: {},
+                display: "",
+                issue:
+                    `已有一台「${devName}」注册在案（${cands}）——现场可能存在同名设备。` +
+                    `若要接入的是另一台设备，请用可区分的名称重新说明（如「2号风机」「1号风机B」）；` +
+                    `若要操作的是已有设备，请直接说明要做的变更（如「给${devName}加点」「删除${devName}」）。`,
+            };
         } else {
-            if (conflict.conflict) {
-                let seq = 2;
-                while (abbr.entries.some((e) => e.abbr === `${devAbbr}${seq}`)) seq++;
-                devAbbr = `${devAbbr}${seq}`;
+            const cand = device_prefix_candidate(devName);
+            prefix =
+                cand === "dev"
+                    ? next_dev_prefix(abbr)
+                    : resolve_prefix_conflict(abbr, cand);
+        }
+
+        const svcType = state.recv.protocol
+            ? find_service_type(registry, normalize_protocol(state.recv.protocol), "writer")
+            : null;
+        if (!svcType) {
+            return null; // 协议缺口未闭合——缺口层已拦，此处防御
+        }
+        const current = read_current_config();
+
+        // ── channel 序号分配（§3.2.1.3）：未使用最小序号，全服务类型共享同一序号空间；
+        //  高位水印取注册表与现存实例的较大值（永不回退）──
+        let highWater = Math.max(
+            abbr.channelHighWatermark,
+            current ? channel_watermark_from_config(current as never) : 0,
+        );
+        const alloc_channel = (): string => {
+            highWater += 1;
+            return `channel${highWater}`;
+        };
+
+        // ── Writer 宿主：既有设备复用（修改语义）/ 同端口并入（仅监听型）/ 新建实例 ──
+        let writerAction: "add" | "modify" = "add";
+        let writerId: string;
+        const notes: string[] = [];
+        if (reused) {
+            // 协议一致性校验：同名设备此前经其他协议/服务类型接入时，modify 目标在
+            // 本次服务类型的数组中不存在 → 执行期必然回滚——方案期拦截并引导
+            if (reused.service_type !== "" && reused.service_type !== svcType) {
+                return {
+                    plan: {},
+                    display: "",
+                    issue:
+                        `设备「${devName}」此前通过 ${reused.service_type.replace("c4_", "")} 协议接入，` +
+                        `与本次声明的 ${state.recv.protocol} 不一致。如需更换协议，请先删除该设备后重新接入；` +
+                        `如协议表述有误，请更正协议名后重试。`,
+                };
             }
-            devId = siteAbbr ? `${siteAbbr}_${devAbbr}` : devAbbr;
+            writerAction = "modify";
+            writerId = reused.host;
+        } else if (LISTENER_SERVICES.has(svcType)) {
+            const port = Number(state.recv.conn["port"] ?? NaN);
+            const host =
+                Number.isInteger(port) && current ? find_listener_host(current, port) : null;
+            if (host && host.service_type === svcType) {
+                // 同端口并入（用户零交互）：点表追加到宿主实例，实例 id 不变
+                writerAction = "modify";
+                writerId = host.id;
+                notes.push(
+                    `${devName} 将与${host.name || "既有设备"}共用端口 ${port} 的数据接收服务`,
+                );
+            } else if (host) {
+                // 真冲突：监听端口被跨服务类型占用（绑定必然失败）——拦截前移到方案期
+                //（不暴露实例句柄 channel{N}，用户不可见，§3.2.1.3）
+                return {
+                    plan: {},
+                    display: "",
+                    issue:
+                        `监听端口 ${port} 已被其他数据接收服务（${host.service_type.replace("c4_", "")} 协议）占用，` +
+                        `无法在相同端口上再启动 ${state.recv.protocol} 数据接收服务。请更换端口后重试。`,
+                };
+            } else {
+                writerId = alloc_channel();
+            }
+        } else {
+            // 连接型服务不并入——每设备一实例
+            writerId = alloc_channel();
+        }
+
+        // ── 点 key 生成（§3.2.1.3b 无条件前缀）：{设备前缀}_{裸id}，逐点明示供确认。
+        // 复用路径（既有设备加点/重接）先查注册表 pointMap——命中则沿用既有 key
+        //（禁止仅凭重新翻译的裸 id 匹配，翻译漂移会误建新点而非更新既有点，
+        // §3.2.1.3a/§3.2.1.3b）；未命中（新点或首次接入）按前缀拼接 ──
+        const writerPoints: Array<Record<string, unknown>> = [];
+        const pointMap: Record<string, string> = {};
+        const seenKeys = new Set<string>();
+        for (const p of state.recv.points ?? []) {
+            const rawId = typeof p["id"] === "string" ? p["id"].trim() : "";
+            const nameRaw = typeof p["name"] === "string" ? p["name"].trim() : "";
+            const derived = derive_point_id(rawId, nameRaw, IDENTIFIER_RE, MAX_IDENTIFIER_LENGTH);
+            const idErr = derived.error ?? identifier_error(derived.id, "point.id");
+            if (idErr !== null) {
+                return {
+                    plan: {},
+                    display: "",
+                    issue:
+                        `点「${nameRaw || String(p["addr"] ?? "?")}」${idErr}` +
+                        `——请提供合规英文标识（字母开头，仅字母/数字/下划线）后重试。`,
+                };
+            }
+            const mapped = reused?.pointMap[nameRaw];
+            const key = typeof mapped === "string" && mapped !== ""
+                ? mapped
+                : `${prefix}_${derived.id}`;
+            if (seenKeys.has(key)) {
+                return {
+                    plan: {},
+                    display: "",
+                    issue:
+                        `点 key「${key}」在本次点表中重复（同一设备内部真重名）——` +
+                        `请为重复的点名提供不同的英文标识。`,
+                };
+            }
+            seenKeys.add(key);
+            const out: Record<string, unknown> = { ...p, id: key };
+            delete out["_derived"];
+            writerPoints.push(out);
+            if (nameRaw !== "") {
+                pointMap[nameRaw] = key;
+            }
+        }
+
+        // 地址占用方案期预检（§3.2.1.3b 唯一性作用域：addr 实例内唯一）——
+        // 复用/并入场景新点表与宿主既有点同址不同 key 属录入错误，确认前拦截
+        //（否则确认后 merge 才回滚，报错与「修改设备」意图对不上）
+        if (writerAction === "modify" && current) {
+            const hostPts = _instance_points(current, writerId);
+            for (const p of writerPoints) {
+                const occ = hostPts.find(
+                    (q) =>
+                        Number(q["addr"]) === Number(p["addr"]) &&
+                        String(q["id"] ?? q["key"] ?? "") !== String(p["id"]),
+                );
+                if (occ) {
+                    return {
+                        plan: {},
+                        display: "",
+                        issue:
+                            `地址 ${String(p["addr"])}（点 ${String(p["name"] || p["id"])}）已被宿主上既有点` +
+                            `「${String(occ["id"] ?? occ["key"] ?? "?")}」（${String(occ["name"] ?? "")}）占用——` +
+                            `两台设备/两张点表的地址重叠会让数据互相覆盖。请调整新点表的地址后重试。`,
+                    };
+                }
+                // 同 key 不同 addr →「更新点地址」与「新增撞名」不可确定性区分
+                //（executor 的新增点保护会对后者改名）——方案期消歧，不静默改名
+                //（确认即批准原则：用户确认的对象必须是执行将发生的动作）
+                const sameKey = hostPts.find(
+                    (q) => String(q["id"] ?? q["key"] ?? "") === String(p["id"]),
+                );
+                if (sameKey && Number(sameKey["addr"]) !== Number(p["addr"])) {
+                    return {
+                        plan: {},
+                        display: "",
+                        issue:
+                            `点「${String(p["name"] || String(p["id"]))}」（${String(p["id"])}）的地址与既有接入不一致` +
+                            `（现有 ${String(sameKey["addr"])}，本次提供 ${String(p["addr"])}）。请明确意图：` +
+                            `修改该点地址请回复「取消」后直接说「修改点 ${String(p["id"])} 的地址为 ${String(p["addr"])}」；` +
+                            `这是新点请更换英文标识（不得与 ${String(p["id"])} 重名）后重试。`,
+                    };
+                }
+            }
         }
 
         const devConn = { ...state.recv.conn };
         const device: Record<string, unknown> = {
             name: devName,
-            abbr: devAbbr,
+            prefix,
+            action: writerAction,
+            instanceId: writerId,
             protocol: state.recv.protocol,
             ...devConn,
-            points: state.recv.points ?? [],
+            points: writerPoints,
         };
 
         const forward_targets: Array<Record<string, unknown>> = [];
         // 裁定（func_test_case 用例语义）：新增采集点必须同时转发——既有转发链路存在时，
-        // 未声明转发意向的追加接入自动沿用该链路（转发地址顺延，方案中标注）
-        const existingReader = find_existing_reader_info(state);
-        if (!state.forwardIntent && existingReader) {
-            const basePoints = state.recv.points ?? [];
-            const mirror = basePoints.map((p, i) => ({
-                addr: existingReader.maxAddr + 1 + i,
-                _derived: "addr",
-            }));
-            forward_targets.push({
-                name: existingReader.name,
-                abbr: existingReader.abbr,
-                protocol: existingReader.protocol,
-                ...(existingReader.ip !== null ? { ip: existingReader.ip } : {}),
-                ...(existingReader.port !== null ? { port: existingReader.port } : {}),
-                points: mirror,
-            });
+        // 未声明转发意向的追加接入自动沿用该链路（转发地址顺延，方案中标注）。
+        // 链路优先取引用本宿主的 reader（并入/复用场景成对追加，§3.2.1.3 示例 4）。
+        // 例外：链路为 influxdb 时不沿用——field 已裁定必填、不推导（2026-10-01），
+        // 镜像点无法确定性补齐 field，沿用会在确认后 fatal；forward_targets 为空时
+        // 由下方「转发必答」硬约束 issue 要求用户明确转发（用户声明 influxdb 后走
+        // 正常收集，缺 field 由 points.fields 缺口追问）
+        if (!state.forwardIntent && current) {
+            const hostReader = writerId !== "" ? find_reader_for_writer(current, writerId) : null;
+            const info = hostReader
+                ? _reader_chain_info(current, hostReader.id, hostReader.service_type)
+                : (() => {
+                      const best = find_existing_reader_info();
+                      return best ? _reader_chain_info(current, best.id, "") : null;
+                  })();
+            if (info && info.protocol !== "influxdb") {
+                // 镜像点只带 addr（_derived 标注）：key 由拆解器按 writer 点 key 与
+                // reader 实例 id 确定性生成，方案载荷不携带（避免 reader id 前缀的
+                // 误导性 key 字样）
+                const mirror = writerPoints.map((p, i) => ({
+                    addr: info.maxAddr + 1 + i,
+                    _derived: "addr",
+                }));
+                forward_targets.push({
+                    name: info.name,
+                    action: "modify",
+                    instanceId: info.id,
+                    protocol: info.protocol,
+                    ...(info.ip !== null ? { ip: info.ip } : {}),
+                    ...(info.port !== null ? { port: info.port } : {}),
+                    points: mirror,
+                });
+            }
         }
         if (state.forwardIntent && state.fwd.protocol) {
             const ftName = state.fwd.deviceName ?? "转发目标";
-            let ftAbbr = device_abbr_candidate(ftName);
-            if (ftAbbr === devAbbr) ftAbbr = `${ftAbbr}fwd`;
             const ftPoints =
                 state.fwd.points && state.fwd.points.length > 0
                     ? state.fwd.points.map((p) => ({ ...p }))
                     : // 确定性推导：转发地址未提供时与采集地址一致（方案中标注，确认即批准）
-                      (state.recv.points ?? []).map((p) => ({
+                      writerPoints.map((p) => ({
                             addr: p["addr"],
                             _derived: "addr",
                       }));
             const ft: Record<string, unknown> = {
                 name: ftName,
-                abbr: ftAbbr,
+                action: "add",
+                instanceId: alloc_channel(),
                 protocol: state.fwd.protocol,
                 ...state.fwd.conn,
                 points: ftPoints,
@@ -1836,7 +2206,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
         // 平台硬约束兜底（2026-09-29 用例11）：缺转发目标的纯采集方案不得进入确认——
         // 正常路径由 compute_gaps 的 fwd.required 缺口提前追问，此处防两处判定不一致时
         // 漏拦（确认后执行才报 CONFIG_MISSING_SECTION 的体验不可接受）
-        if ((state.recv.points ?? []).length > 0 && forward_targets.length === 0) {
+        if (writerPoints.length > 0 && forward_targets.length === 0) {
             return {
                 plan: {},
                 display: "",
@@ -1852,13 +2222,12 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             const fwdPts = (ft as Record<string, unknown>)["points"] as Array<
                 Record<string, unknown>
             >;
-            const recvCount = (state.recv.points ?? []).length;
-            if (fwdPts.length !== recvCount) {
+            if (fwdPts.length !== writerPoints.length) {
                 return {
                     plan: {},
                     display: "",
                     issue:
-                        `转发点表与采集点数量不一致：采集 ${recvCount} 个，转发 ${fwdPts.length} 个` +
+                        `转发点表与采集点数量不一致：采集 ${writerPoints.length} 个，转发 ${fwdPts.length} 个` +
                         `（转发目标：${String(ft["name"])}）——转发与采集必须按序一一对应。` +
                         `请核对转发点表的数量与顺序后重新提交。`,
                 };
@@ -1871,19 +2240,42 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             forward_targets,
         };
 
-        // 展示文本（逐条「地址 ↔ 点名」；协议/端口豁免场景）
+        // 注册表固化载荷（§3.2.1.3a 第 4 步）：执行成功后才写入（execute_steps 消费）
+        const registryWrites: NonNullable<AccessPlan["registryWrites"]> = {
+            upserts: [
+                {
+                    name: devName,
+                    prefix,
+                    host: writerId,
+                    service_type: svcType,
+                    description: reused?.description || state.userTexts.join("；").slice(0, 120),
+                    pointMap,
+                },
+            ],
+            deletes: [],
+            pointMapDrops: [],
+            channelHighWatermark: highWater,
+        };
+
+        // 展示文本（逐条「地址 ↔ 点名 → 点 key」；实例句柄 channel{N} 不出现在对话文本，
+        // §3.2.1.3——用户确认的业务对象是设备名与点 key）
         const lines: string[] = ["接入方案如下："];
+        lines.push(`· 场站：${state.site?.name ?? "（未绑定）"}`);
         lines.push(
-            `· 场站：${state.site?.name ?? "（未绑定）"}`,
-            `· 将新建设备 ${devId}（${devName}）——采用 ${state.recv.protocol} 协议`,
+            writerAction === "add"
+                ? `· 将新建设备 ${devName}（点 key 前缀 ${prefix}_）——采用 ${state.recv.protocol} 协议`
+                : `· 将在已有设备 ${devName}（${prefix}_ 前缀）上追加/更新数据点`,
         );
+        for (const note of notes) lines.push(`· ${note}`);
         const c = state.recv.conn;
         const ipPart = String(c["ip"] ?? "");
         const portPart = c["port"] !== undefined ? `端口 ${String(c["port"])}` : "";
         lines.push(`· 设备连接：${[ipPart, portPart].filter(Boolean).join("，")}`);
-        lines.push(`· 采集点（${state.recv.points?.length ?? 0} 个）：`);
-        for (const p of state.recv.points ?? []) {
-            lines.push(`    - 地址 ${String(p["addr"])} ↔ ${String(p["name"] || "（未命名）")}`);
+        lines.push(`· 采集点（${writerPoints.length} 个）：`);
+        for (const p of writerPoints) {
+            lines.push(
+                `    - 地址 ${String(p["addr"])} ↔ ${String(p["name"] || "（未命名）")} → ${String(p["id"])}`,
+            );
         }
         for (const ft of forward_targets) {
             const mirrored = state.forwardIntent ? null : ft;
@@ -1899,21 +2291,20 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             // 转发对应展示（agent.md §3.2.1.3b）：转发点无自身点名，按序引用采集点
             // 点名逐条对应呈现——禁止把两侧点表作为孤立列表分别罗列
             const pts = fc["points"] as Array<Record<string, unknown>>;
-            const recvPts = state.recv.points ?? [];
             lines.push(
                 `    - 转发点（${pts.length} 个，与采集点按序一一对应）：`,
             );
             for (let i = 0; i < pts.length; i++) {
                 const fp = pts[i];
-                const sp = (recvPts[i] ?? {}) as Record<string, unknown>;
+                const sp = (writerPoints[i] ?? {}) as Record<string, unknown>;
                 const derived = fp["_derived"] ? "（自动推导）" : "";
                 lines.push(
-                    `      · 采集 ${String(sp["addr"] ?? "?")}（${String(sp["name"] ?? "") || "（未命名）"}） → 转发 ${String(fp["addr"])}${derived}`,
+                    `      · 采集 ${String(sp["addr"] ?? "?")}（${String(sp["name"] ?? "") || "（未命名）"}，${String(sp["id"] ?? "")}） → 转发 ${String(fp["addr"])}${derived}`,
                 );
             }
         }
         lines.push("是否确认执行？请点击下方「确认」按钮；如需取消请点击「取消」。");
-        return { plan, display: lines.join("\n") };
+        return { plan, display: lines.join("\n"), registryWrites };
     }
 
     // ── L2 validate_points（§2.7.1，编排器调用）────────────
@@ -1980,35 +2371,51 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                         throw new Error(rr.abort_reason ?? "服务启动失败");
                     }
                     await clear_pending_marker(cfg.configPath);
-                    // id 固化（§3.2.1.3a）：成功执行后把新增实例写入记忆库
+                    // 注册表固化（§3.2.1.3a 第 4 步）：merge 与 Stop-Start 全部成功后写入——
+                    // 执行失败回滚 config.json 时不写注册表（避免幽灵条目指向已回滚掉的
+                    // 不存在实例）；载荷由方案层/变更流装配时产出（accessPlan.registryWrites）
                     try {
-                        const abbrReg = await load_abbr(state);
-                        for (const st of steps) {
-                            if (st.action !== "add") continue;
-                            const inst = st.instance as Record<string, unknown>;
-                            const instId = String(inst["id"] ?? "");
-                            if (!instId) continue;
-                            const instName = String(inst["name"] ?? instId);
-                            const prefix = state.site?.abbr ? `${state.site.abbr}_` : "";
-                            const ab = instId.startsWith(prefix)
-                                ? instId.slice(prefix.length)
-                                : instId;
-                            const next = finalize_entry(abbrReg, {
-                                id: instId,
-                                name: instName,
-                                abbr: ab,
-                                service_type: st.service_type,
-                                role: registry.get_entry(st.service_type)?.role ?? null,
-                                description: instName,
+                        const writes = state.accessPlan?.registryWrites;
+                        if (
+                            writes &&
+                            (writes.upserts.length > 0 ||
+                                writes.deletes.length > 0 ||
+                                writes.pointMapDrops.length > 0)
+                        ) {
+                            const abbrReg = await load_abbr(state);
+                            for (const up of writes.upserts) {
+                                const next = finalize_entry(abbrReg, up);
+                                abbrReg.entries = next.entries;
+                            }
+                            for (const pre of writes.deletes) {
+                                const next = delete_entry(abbrReg, pre);
+                                abbrReg.entries = next.entries;
+                            }
+                            for (const drop of writes.pointMapDrops) {
+                                const entry = abbrReg.entries.find(
+                                    (e) => e.prefix === drop.prefix,
+                                );
+                                if (entry) {
+                                    const dropSet = new Set(drop.keys);
+                                    for (const [nm, key] of Object.entries(entry.pointMap)) {
+                                        if (dropSet.has(key)) {
+                                            delete entry.pointMap[nm];
+                                        }
+                                    }
+                                }
+                            }
+                            abbrReg.channelHighWatermark = Math.max(
+                                abbrReg.channelHighWatermark,
+                                writes.channelHighWatermark,
+                            );
+                            await save_abbr_registry(abbrReg, abbrPath);
+                            cfg.agentLogger.memory(conversation, "save_abbr_registry", {
+                                entries: abbrReg.entries.length,
+                                watermark: abbrReg.channelHighWatermark,
                             });
-                            abbrReg.entries = next.entries;
                         }
-                        await save_abbr_registry(abbrReg, abbrPath);
-                        cfg.agentLogger.memory(conversation, "save_abbr_registry", {
-                            entries: abbrReg.entries.length,
-                        });
                     } catch {
-                        /* 记忆库写入失败不阻塞接入结果 */
+                        /* 注册表写入失败不阻塞接入结果 */
                     }
                     return "接入已完成！数据点已按方案配置并启动，您可以随时查看数据，或继续追加、修改设备。";
                 } catch (err) {
@@ -2061,11 +2468,20 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
     function deterministic_change_parse(
         semantic: string,
         devices: Array<Record<string, unknown>>,
+        forcedTarget?: Record<string, unknown>,
     ): Record<string, unknown> | null {
         const norm = (t: string): string =>
             t.toLowerCase().replace(/\s+/g, "").replace(/[#号]/g, "");
         let target: Record<string, unknown> | null = null;
-        const idTok = semantic.match(/\b([a-z][a-z0-9]*(?:_[a-z0-9]+)+)\b/i);
+        // 消歧应答语境（§3.2.1.3a 前缀指认）：目标已由前缀 token 确定性定出
+        //（build_change_plan 的 parse_disambig_target），跳过按名检索——同名多条
+        // 会再次触发消歧询问造成死循环
+        if (forcedTarget) {
+            target = forcedTarget;
+        }
+        const idTok = target
+            ? null
+            : semantic.match(/\b([a-z][a-z0-9]*(?:_[a-z0-9]+)+)\b/i);
         if (idTok) {
             target =
                 devices.find(
@@ -2080,16 +2496,47 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 const cands = devices.filter((d) =>
                     norm(String(d["name"])).includes(`${mnum[1]}${mnum[2]}`),
                 );
-                if (cands.length === 1) target = cands[0];
+                if (cands.length === 1) {
+                    target = cands[0];
+                } else if (cands.length > 1) {
+                    // 同名多条（§3.2.1.3a：同名必须经消歧确认）——按名 first-match
+                    // 会静默落到第一台，列出候选前缀请用户指认。指认形态 = 前缀 +
+                    // 变更短语（parse_disambig_target 可确定性消费，不交 LLM 兜底）；
+                    // disambig 标记由调用方置位 pendingDisambig（本函数保持无状态）
+                    const candsTxt = cands
+                        .map((d) => `· ${String(d["name"])}（${String(d["prefix"] ?? "")}_ 前缀，回复时说「${String(d["prefix"] ?? "")}」）`)
+                        .join("\n");
+                    return {
+                        intent: "disambiguate",
+                        steps: [],
+                        display:
+                            `存在多台「${mnum[1]}${mnum[2]}」，请指认要操作哪一台：\n${candsTxt}\n` +
+                            `回复示例：「给 ${String(cands[0]["prefix"] ?? "")} 那台加点」「${String(cands[1] ? cands[1]["prefix"] ?? "" : cands[0]["prefix"] ?? "")} 删除」。`,
+                    };
+                }
             }
         }
         if (!target) {
+            const hits: Array<Record<string, unknown>> = [];
             for (const d of devices) {
                 const nm = norm(String(d["name"]));
                 if (nm.length >= 4 && norm(semantic).includes(nm)) {
-                    target = d;
-                    break;
+                    hits.push(d);
                 }
+            }
+            if (hits.length === 1) {
+                target = hits[0];
+            } else if (hits.length > 1) {
+                const candsTxt = hits
+                    .map((d) => `· ${String(d["name"])}（${String(d["prefix"] ?? "")}_ 前缀，回复时说「${String(d["prefix"] ?? "")}」）`)
+                    .join("\n");
+                return {
+                    intent: "disambiguate",
+                    steps: [],
+                    display:
+                        `有多个设备与您的描述匹配，请指认要操作哪一台：\n${candsTxt}\n` +
+                        `回复示例：「给 ${String(hits[0]["prefix"] ?? "")} 那台加点」「${String(hits[1] ? hits[1]["prefix"] ?? "" : hits[0]["prefix"] ?? "")} 删除」。`,
+                };
             }
         }
         if (!target) {
@@ -2342,6 +2789,8 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
         display: string;
         /** 追问类返回（缺英文标识/缺转发地址/待选设备）：用户应答后须重入本分叉 */
         ask?: boolean;
+        /** 注册表固化载荷（§3.2.1.3a 第 4 步）：挂 merge + Stop-Start 成功路径 */
+        registryWrites?: AccessPlan["registryWrites"];
     } | null> {
         // catch-up（2026-09-27 用例10）：变更追问的应答（「风速」「5010」）需要与原始
         // 请求拼接才有语义——解析输入为累积用户文本（含当前消息，由调用方先行累积）
@@ -2354,26 +2803,68 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
         }
         if (!current) return null;
 
-        // 汇总已接入设备（id/name/points）
-        const devices: Array<Record<string, unknown>> = [];
+        // 汇总已接入设备（注册表驱动，§3.2.1.3a 变更流目标定位）：
+        // 设备名 → {宿主实例, 点前缀}；点集 = 宿主点表按前缀合成的虚拟设备视图
+        //（独占形态与实例等价；共用形态多台设备同住一个宿主实例）。
+        // hostPoints 供 addr 实例内唯一性检查（同宿主设备共享地址空间）
+        const reg = await load_abbr(state);
+        const hostIndex = new Map<string, { st: string; inst: Record<string, unknown> }>();
         for (const [st, list] of Object.entries(current)) {
             if (st === "c4_shm_manager" || !Array.isArray(list)) continue;
             for (const inst of list as Array<Record<string, unknown>>) {
-                devices.push({
-                    id: inst["id"],
-                    name: inst["name"],
-                    service_type: st,
-                    points: ((inst["points"] ?? []) as Array<Record<string, unknown>>).map(
-                        (p) => ({
-                            id: p["id"] ?? p["key"],
-                            name: p["name"],
-                            addr: p["addr"],
-                        }),
-                    ),
-                });
+                hostIndex.set(String(inst["id"] ?? ""), { st, inst });
             }
         }
-        if (devices.length === 0) return null;
+        const devices: Array<Record<string, unknown>> = [];
+        for (const entry of reg.entries) {
+            const hit = hostIndex.get(entry.host);
+            if (!hit) continue;
+            const prefix_ = `${entry.prefix}_`;
+            const hostPts = (hit.inst["points"] ?? []) as Array<Record<string, unknown>>;
+            const pts = hostPts
+                .filter((p) =>
+                    String(p["id"] ?? p["key"] ?? "").startsWith(prefix_),
+                )
+                .map((p) => ({
+                    id: String(p["id"] ?? p["key"] ?? ""),
+                    name: p["name"],
+                    addr: p["addr"],
+                }));
+            devices.push({
+                id: entry.host,
+                name: entry.name,
+                prefix: entry.prefix,
+                service_type: hit.st,
+                pointMap: entry.pointMap,
+                points: pts,
+                hostPoints: hostPts.map((p) => ({
+                    id: String(p["id"] ?? p["key"] ?? ""),
+                    name: p["name"],
+                    addr: p["addr"],
+                })),
+            });
+        }
+        if (devices.length === 0) {
+            // config 有运行数据但注册表无条目（旧版命名格式，§3.2.1.3 裁定废弃）——
+            // 不得静默返回 null 跌入接入管线（用户问「删除风机」却被问「设备叫什么」）
+            const hasConfigData = Object.entries(current).some(
+                ([st, l]) =>
+                    st !== "c4_shm_manager" &&
+                    Array.isArray(l) &&
+                    (l as unknown[]).length > 0,
+            );
+            if (hasConfigData) {
+                return {
+                    steps: [],
+                    display:
+                        "检测到系统中已有运行中的服务实例，但设备身份注册表中没有对应的设备条目" +
+                        "（旧版命名格式的配置）。旧格式不再支持变更操作——请重新接入设备" +
+                        "（重新接入会以新格式登记设备身份），或回复「取消」。",
+                    ask: false,
+                };
+            }
+            return null;
+        }
 
         const embedded = extract_embedded_json(semantic);
         if (
@@ -2473,6 +2964,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                     String(bdev["service_type"]),
                     bdev,
                     current,
+                    reg,
                 );
             }
         }
@@ -2482,13 +2974,57 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
         // 历史消息里的「地址3000」在后续每轮删除中被重新扫中，确定性短路把任何新
         // 请求都回放成同一条「没有找到地址 3000」——历史上下文只供 LLM 兜底使用
         let r = deterministic_change_parse(clean_user_text(user_text), devices);
+        // 消歧锚（§3.2.1.3a 前缀指认）：同名指认是设计明令的确定性场景。锚定后
+        // （指认回合锚定，或上一回合已锚定的应答回合）本回合解析锁定该设备——
+        // forced 确定性分类、LLM 兜底的设备清单都只含锚，同名另一台不可被误选；
+        // 加点类表述不可确定性分类时经 LLM(锚) 收敛，不再回到「请说明变更」空转
+        // 消歧锚解析（resolve_disambig_anchor）：新鲜指认优先于陈旧锚——消歧
+        // 再询问后的改选（「wt2 删除」）必须生效，不得被上一轮锚（wt1）覆盖
+        const anchorRes = resolve_disambig_anchor(
+            state.pendingDisambig,
+            state.disambigHostId,
+            clean_user_text(user_text),
+            devices,
+        );
+        state.pendingDisambig = anchorRes.pending;
+        state.disambigHostId = anchorRes.hostId;
+        const anchor: Record<string, unknown> | null = anchorRes.anchor;
+        if (anchor !== null) {
+            // 锚定定向：无锚解析失败（长尾表述）或产出「空目标 delete」（deleteish
+            // 兜底不认识前缀 token——消歧后「wt1 删除」会先被误回「您想删除哪一台」）
+            // 时，以锚为目标强制重解析——锚是用户显式指认的结果，优先于无锚兜底；
+            // 无锚解析已唯一定目标（点名明确的另一台设备）则采信，不被锚覆盖
+            const needsAnchor =
+                r === null ||
+                (String(r["target_id"] ?? "") === "" &&
+                    String(r["intent"] ?? "") === "delete");
+            if (needsAnchor) {
+                const forced = deterministic_change_parse(
+                    clean_user_text(user_text),
+                    devices,
+                    anchor,
+                );
+                if (forced !== null) {
+                    r = forced;
+                }
+            }
+        }
         if (r === null) {
+            // LLM 兜底：锚存在时设备清单只含锚，并对结果强制 target 覆写——
+            // LLM 拿不到同名另一台，指认结果不被丢弃
             r = await llm_json(
                 "change_prompt.txt",
-                { devices_json: JSON.stringify(devices) },
+                {
+                    devices_json: JSON.stringify(
+                        anchor !== null ? [anchor] : devices,
+                    ),
+                },
                 semantic,
                 conversation,
             );
+            if (r !== null && anchor !== null) {
+                r["target_id"] = anchor["id"];
+            }
             if (!r) {
                 // 降级（§2.6）：草稿已有内容时按草稿评估——缺什么问什么（如点名已
                 // 确认仅缺英文标识翻译失败 → 请用户提供英文标识），草稿为空才提示
@@ -2508,8 +3044,20 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                             String(ddev["service_type"]),
                             ddev,
                             current,
+                            reg,
                         );
                     }
+                }
+                if (anchor !== null) {
+                    // 锚已确立（如用户只回了裸前缀）→ 请继续说明变更，锚保持生效
+                    return {
+                        steps: [],
+                        display:
+                            `已选定「${String(anchor["name"])}」（${String(anchor["prefix"] ?? "")}_ 前缀）。` +
+                            `请说明要做的变更，如：给${String(anchor["name"])}加点、删除${String(anchor["name"])}、` +
+                            `删除它的某个点（说明点名或地址）。`,
+                        ask: true,
+                    };
                 }
                 return {
                     steps: [],
@@ -2520,10 +3068,31 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             }
         }
         const action = String(r["intent"] ?? "");
+        if (action === "disambiguate") {
+            // 同名多候选询问（独立 intent，与终态错误显式区分）→ 置位应答语境，
+            // 应答回合经 parse_disambig_target 确定性指认并锚定
+            state.pendingDisambig = true;
+            return { steps: [], display: String(r["display"] ?? ""), ask: true };
+        }
         if (action === "point_not_found") {
+            // 点不存在等终态 → 复位语境与锚
+            state.pendingDisambig = false;
+            state.disambigHostId = null;
             return { steps: [], display: String(r["display"] ?? "") };
         }
-        if (!action) return null;
+        if (!action) {
+            // 意图不可解析：锚已确立 → 请继续说明变更（锚保留）；否则交上层路由
+            if (anchor !== null) {
+                return {
+                    steps: [],
+                    display:
+                        `已选定「${String(anchor["name"])}」（${String(anchor["prefix"] ?? "")}_ 前缀）。` +
+                        `请说明要做的变更，如：给${String(anchor["name"])}加点、删除${String(anchor["name"])}。`,
+                    ask: true,
+                };
+            }
+            return null;
+        }
         // fail-safe 闸（2026-10-01 两连整设备误删）：整实例删除与当前消息的点级线索
         // 矛盾 → 不出方案改澄清。确定性分类收紧后本闸主要拦 LLM 兜底——change_prompt
         // 也可能把点级删除误归为设备级（「大气压强点」首例）——与判断来源无关一律拦截
@@ -2536,12 +3105,21 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             };
         }
         const targetId = String(r["target_id"] ?? "");
-        // 明确编号但设备不存在（func_test_case 用例 27）→ 直接回复不存在
+        const device_label = (d: Record<string, unknown>): string => {
+            const pre = String(d["prefix"] ?? "");
+            return pre !== ""
+                ? `${String(d["name"])}（${pre}_ 前缀）`
+                : String(d["name"]);
+        };
+        // 明确编号但设备不存在（func_test_case 用例 27）→ 直接回复不存在。
+        // 注意：本终态有意不清消歧锚（与下方 point_not_found 终态不同）——
+        // 用户指认的前缀不存在时 forced 到旧锚会错删，「宁可放过」；锚的
+        // 「已选定」延续语义保持，用户换正确前缀即可继续
         if (targetId.startsWith("__missing__")) {
             return {
                 steps: [],
                 display: `没有找到您提到的设备——${targetId.replace("__missing__", "")}不存在或从未接入。当前已接入的设备有：${devices
-                    .map((d) => String(d["id"]))
+                    .map(device_label)
                     .join("、")}。`,
             };
         }
@@ -2551,7 +3129,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             return {
                 steps: [],
                 display: `您想删除哪一台设备？当前已接入：${devices
-                    .map((d) => `${String(d["id"])}（${String(d["name"])}）`)
+                    .map(device_label)
                     .join("、")}。请明确设备后再确认。`,
             };
         }
@@ -2561,7 +3139,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             return {
                 steps: [],
                 display: `没有找到您提到的设备——该设备不存在或从未接入。当前已接入的设备有：${devices
-                    .map((d) => String(d["id"]))
+                    .map(device_label)
                     .join("、")}。请确认设备名称后重试。`,
             };
         }
@@ -2569,25 +3147,55 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             return {
                 steps: [],
                 display: `您想删除哪一台设备？当前已接入：${devices
-                    .map((d) => `${String(d["id"])}（${String(d["name"])}）`)
+                    .map(device_label)
                     .join("、")}。请明确设备后再确认。`,
             };
         }
         const svcType = String(dev["service_type"]);
+        const devPrefix = String(dev["prefix"] ?? "");
+        const devDisplayName = String(dev["name"] ?? targetId);
         const changes: Array<Record<string, unknown>> = [];
         let detail: string;
+        const regDeletes: string[] = [];
+        const pointMapDrops: Array<{ prefix: string; keys: string[] }> = [];
         if (action === "delete") {
-            // 整实例删除：reader 侧成对清理由 merge 级联完成（handle_delete 删除
-            // writer 实例后，自动移除引用其 key 的 reader 转发点，reader 变空则
-            // 连实例一并删除）——方案层不得重复追加 reader 删除变更（重复会因
-            // 实例已被级联移除而"找不到目标"回滚，2026-09-24）。
-            changes.push({
-                action: "delete",
-                service_type: svcType,
-                instance: { id: targetId },
-            });
-            detail = `删除设备 ${targetId} 及其全部数据点（关联转发配置一并清理）`;
-                } else if (action === "delete_points") {
+            // 独占/共用判定（§3.2.1.3a）＝宿主上注册表条目数：删除后归零 → 空实例移除
+            //（独占形态设备即实例整体，整实例删除）；条目数 ≥1 → 实例保留，
+            //「删除设备」= 前缀点组手术（action=delete + points[] 逐点列出待删 key）
+            const hostEntries = reg.entries.filter((e) => e.host === targetId);
+            if (devPrefix !== "" && hostEntries.length > 1) {
+                const delPts = ((dev["points"] ?? []) as Array<Record<string, unknown>>).map(
+                    (p) => ({ id: String(p["id"]) }),
+                );
+                if (delPts.length === 0) {
+                    return {
+                        steps: [],
+                        display: `设备「${devDisplayName}」当前没有数据点，无需删除。`,
+                    };
+                }
+                changes.push({
+                    action: "delete",
+                    service_type: svcType,
+                    instance: { id: targetId },
+                    points: delPts,
+                });
+                detail =
+                    `删除设备「${devDisplayName}」（${devPrefix}_ 前缀的全部 ${delPts.length} 个数据点：` +
+                    `${delPts.map((p) => String(p["id"])).join("、")}；该实例与其他设备共用，实例保留）`;
+            } else {
+                // 独占形态整实例删除：reader 侧成对清理由 merge 级联完成（handle_delete
+                // 删除 writer 实例后，自动移除引用其 key 的 reader 转发点，reader 变空则
+                // 连实例一并删除）——方案层不得重复追加 reader 删除变更（重复会因
+                // 实例已被级联移除而"找不到目标"回滚，2026-09-24）。channel 序号不回收
+                changes.push({
+                    action: "delete",
+                    service_type: svcType,
+                    instance: { id: targetId },
+                });
+                detail = `删除设备「${devDisplayName}」及其全部数据点（关联转发配置一并清理）`;
+            }
+            if (devPrefix !== "") regDeletes.push(devPrefix);
+        } else if (action === "delete_points") {
             const pts = (r["points"] ?? []) as Array<Record<string, unknown>>;
             if (pts.length === 0) return null;
             // id 存在性校验（2026-10-01）：LLM 兜底可能虚构不存在的点 id，直通 executor
@@ -2611,10 +3219,13 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 instance: { id: targetId },
                 points: delIds.map((id) => ({ id })),
             });
+            if (devPrefix !== "") {
+                pointMapDrops.push({ prefix: devPrefix, keys: delIds });
+            }
             // reader 侧成对删除由 merge 级联完成（handle_delete 级联移除
             // key === writer实例id.点id 的转发点）——方案层不得重复追加
             // reader 变更（重复追加会因点已被级联移除而扑空回滚，2026-09-24）
-            detail = `从 ${targetId} 移除点：${delIds.join("、")}`;
+            detail = `从「${devDisplayName}」移除点：${delIds.join("、")}`;
         } else if (action === "modify") {
             const fields = (r["instance_fields"] ?? {}) as Record<string, unknown>;
             const pu = (r["point_updates"] ?? []) as Array<Record<string, unknown>>;
@@ -2625,16 +3236,27 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 instance: inst,
             };
             if (pu.length > 0) {
-                ch["points"] = pu.map((p) => ({ ...p }));
+                // point_updates 语义即更新既有点：打 _update 标记让 executor 撞名
+                // 裁定放行（否则同名点改地址会被误判为新增撞名而改名）
+                ch["points"] = pu.map((p) => ({ ...p, _update: true }));
             }
             changes.push(ch);
+            // 监听型服务端口冻结（LISTENER_SERVICES，§3.2.1.6）：用户要求改监听端口
+            // 时执行期保持原值——文案如实标注，不照印「port 改为 X」误导确认
+            const portFrozenHere = LISTENER_SERVICES.has(svcType);
             const ftxt = Object.entries(fields)
+                .filter(([k]) => !(k === "port" && portFrozenHere))
                 .map(([k, v]) => `${k} 改为 ${String(v)}`)
+                .concat(
+                    fields["port"] !== undefined && portFrozenHere
+                        ? ["监听端口保持原值（已接入实例的监听端口不可变更，如需更换请先删除设备重新接入）"]
+                        : [],
+                )
                 .join("，");
             const ptxt = pu
                 .map((p) => `点 ${String(p["id"])} 的参数调整为 ${JSON.stringify(p)}`)
                 .join("；");
-            detail = `在 ${targetId} 上修改：${[ftxt, ptxt].filter(Boolean).join("；")}`;
+            detail = `在「${devDisplayName}」上修改：${[ftxt, ptxt].filter(Boolean).join("；")}`;
         } else if (action === "add_points") {
             // 草稿合并（单调累积）：有 addr 按 addr 为键；无 addr（先给点名的场景，
             // 2026-09-27「反向有功」实测）按点名匹配，匹配不到以无址条目入草稿，
@@ -2671,12 +3293,15 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             state.changeAddPoints = draft;
             state.changeTargetId = targetId;
             if (draft.length === 0) return null;
-            return evaluate_change_add(state, targetId, svcType, dev, current);
+            return evaluate_change_add(state, targetId, svcType, dev, current, reg);
         } else {
             return null;
         }
 
         if (changes.length === 0) return null;
+        // 方案已产出 → 消歧语境与锚消费完毕
+        state.pendingDisambig = false;
+        state.disambigHostId = null;
         const display =
             `变更方案如下：\n· ${detail}\n是否确认执行？请点击下方「确认」按钮；如需取消请点击「取消」。`;
         return {
@@ -2687,6 +3312,12 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 points: (c["points"] ?? []) as ServiceStep["points"],
             })),
             display,
+            registryWrites: {
+                upserts: [],
+                deletes: regDeletes,
+                pointMapDrops,
+                channelHighWatermark: reg.channelHighWatermark,
+            },
         };
     }
 
@@ -2700,7 +3331,13 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
         svcType: string,
         dev: Record<string, unknown>,
         current: Record<string, unknown>,
-    ): { steps: ServiceStep[]; display: string; ask?: boolean } | null {
+        reg: AbbrRegistry,
+    ): {
+        steps: ServiceStep[];
+        display: string;
+        ask?: boolean;
+        registryWrites?: AccessPlan["registryWrites"];
+    } | null {
         const ap = state.changeAddPoints ?? [];
         if (ap.length === 0) return null;
         // ① 点名 / 英文标识（agent.md §3.2.1.3b：不自动生成，逐项问齐）
@@ -2736,6 +3373,18 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 };
             }
         }
+        // 点 key 无条件前缀（§3.2.1.3b）：裸 id → {设备前缀}_{裸id}。add_points 是
+        // 新增点（无既有点可更新），不涉及 pointMap 解析——「经 pointMap 沿用既有
+        // key」仅适用于更新既有点的复用路径（assemble_access_plan）
+        const devPrefix = String(dev["prefix"] ?? "");
+        if (devPrefix !== "") {
+            for (const p of ap) {
+                const pid = String(p["id"] ?? "");
+                if (pid !== "" && !pid.startsWith(`${devPrefix}_`)) {
+                    p["id"] = `${devPrefix}_${pid}`;
+                }
+            }
+        }
         // addr 数值化（字符串数字会绕过 merge 的地址冲突检查——2026-09-24 用例 18）
         for (const p of ap) {
             if (p["addr"] !== undefined) p["addr"] = Number(p["addr"]);
@@ -2767,11 +3416,14 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
         // ③ 地址占用预检（func_test_case 用例 18）——先于转发询问：地址已被占用的
         // 点没有必要问转发地址（2026-09-27 实测：占用晚检导致用户白答一轮转发地址）。
         // 占用拒绝保留点名/英文标识、仅作废被占地址——用户换址后草稿直接续用，
-        // 不再清空草稿丢失上下文
-        const devPts = (dev["points"] ?? []) as Array<Record<string, unknown>>;
+        // 不再清空草稿丢失上下文。地址实例内唯一（§3.2.1.3b 唯一性作用域）：
+        // 同宿主多设备共享地址空间，占用检查用宿主全量点表而非虚拟设备视图
+        const hostPts = (dev["hostPoints"] ?? dev["points"] ?? []) as Array<
+            Record<string, unknown>
+        >;
         for (const p of ap) {
             if (p["addr"] === undefined) continue;
-            const occupied = devPts.find(
+            const occupied = hostPts.find(
                 (q) => Number(q["addr"]) === Number(p["addr"]),
             );
             if (occupied) {
@@ -2859,8 +3511,10 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 points: ap as ServiceStep["points"],
             },
         ];
-        let detail = `给 ${targetId} 增加点：${ap
-            .map((p) => `${String(p["name"] ?? "")}(地址 ${String(p["addr"] ?? "?")})`)
+        let detail = `给「${String(dev["name"] ?? targetId)}」增加点：${ap
+            .map((p) =>
+                `${String(p["name"] ?? "")}(地址 ${String(p["addr"] ?? "?")}，key ${String(p["id"])})`,
+            )
             .join("、")}`;
         const fwdPts = ap.map((p) => ({
             key: `${targetId}.${String(p["id"])}`,
@@ -2874,14 +3528,32 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 instance: { id: reader.id },
                 points: fwdPts,
             });
-            detail += `；成对转发至 ${reader.id}`;
+            detail += `；成对转发`;
         }
-        // ⑥ 完成：草稿消费（方案待确认；确认/取消由 accessPlan 生命周期管理）
+        // ⑥ 完成：草稿消费（方案待确认；确认/取消由 accessPlan 生命周期管理）。
+        // pointMap 增量（源点名 → 生效点 key）随成功路径固化（§3.2.1.3a 第 4 步）
         state.changeAddPoints = null;
         state.pendingGap = null;
+        const regEntry = reg.entries.find((e) => e.prefix === devPrefix);
+        const pointMapAdds: Record<string, string> = {};
+        for (const p of ap) {
+            const nm = String(p["name"] ?? "").trim();
+            if (nm !== "") pointMapAdds[nm] = String(p["id"]);
+        }
+        const registryWrites: AccessPlan["registryWrites"] | undefined = regEntry
+            ? {
+                  upserts: [
+                      { ...regEntry, pointMap: { ...regEntry.pointMap, ...pointMapAdds } },
+                  ],
+                  deletes: [],
+                  pointMapDrops: [],
+                  channelHighWatermark: reg.channelHighWatermark,
+              }
+            : undefined;
         return {
             steps,
             display: `变更方案如下：\n· ${detail}\n是否确认执行？请点击下方「确认」按钮；如需取消请点击「取消」。`,
+            registryWrites,
         };
     }
 
@@ -2917,8 +3589,16 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 action: action as ServiceStep["action"],
                 service_type: svc,
                 instance: inst,
+                // 剥离过程标记（_update/_derived 等）——内嵌 JSON 直通不经方案层，
+                // handle_add 无逐点清理，标记会原样落盘 config.json
                 points: ((c["points"] ?? []) as Array<Record<string, unknown>>).map(
-                    (p) => ({ ...p }),
+                    (p) => {
+                        const clean: Record<string, unknown> = {};
+                        for (const [k, v] of Object.entries(p)) {
+                            if (!k.startsWith("_")) clean[k] = v;
+                        }
+                        return clean;
+                    },
                 ) as ServiceStep["points"],
             });
         }
@@ -2942,12 +3622,39 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 if (state.accessPlan.kind === "changes") {
                     steps = state.accessPlan.steps ?? [];
                 } else if (state.accessPlan.input) {
-                    lastGen = generate_steps(
-                        state.accessPlan.input as never,
-                        registry,
-                        state.site?.abbr ?? "",
-                    );
-                    if (!lastGen.fatal) steps = lastGen.steps;
+                    lastGen = generate_steps(state.accessPlan.input as never, registry, {
+                        channelStart: state.accessPlan.registryWrites?.channelHighWatermark ?? 0,
+                    });
+                    if (!lastGen.fatal) {
+                        steps = lastGen.steps;
+                        // 并发撞号重校验：方案装配与确认之间另一会话可能已占用同一
+                        // channel 序号（装配期分配、执行期单飞串行）——执行前重查，
+                        // 占用则方案失效重新装配，而非静默并入他人实例
+                        const cfgNow = read_current_config();
+                        const clash = steps.find(
+                            (sp) =>
+                                sp.action === "add" &&
+                                cfgNow !== null &&
+                                config_has_instance(
+                                    cfgNow,
+                                    String(
+                                        (sp.instance as Record<string, unknown>)["id"] ?? "",
+                                    ),
+                                ),
+                        );
+                        if (clash) {
+                            state.accessPlan = null;
+                            stateWriter.setAccessPlan(false);
+                            yield { type: "button_disarm", reason: "实例序号已被占用，方案失效" };
+                            yield {
+                                type: "text",
+                                content:
+                                    "接入方案已失效：在方案等待确认期间，系统接入了新的设备，实例序号已被占用。请重新发起接入。",
+                            };
+                            yield { type: "done" };
+                            return;
+                        }
+                    }
                 }
             }
             const embedded = steps === null ? extract_embedded_json(user_text) : null;
@@ -3003,11 +3710,19 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                         devices: embedded["devices"] as never,
                         forward_targets: (embedded["forward_targets"] ?? []) as never,
                     };
-                    const result = generate_steps(
-                        input,
-                        registry,
-                        state.site?.abbr ?? "",
-                    );
+                    // channelStart 取 config 现存最大序号与注册表水印的较大值——
+                    // 只看现存实例会让已删实例的序号被复用（违背「永不复用」水印语义）
+                    const result = generate_steps(input, registry, {
+                        channelStart: (() => {
+                            const cfgNow = read_current_config();
+                            return Math.max(
+                                cfgNow
+                                    ? channel_watermark_from_config(cfgNow as never)
+                                    : 0,
+                                registry_watermark(),
+                            );
+                        })(),
+                    });
                     if (result.fatal) {
                         yield {
                             type: "text",
@@ -3058,6 +3773,8 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 state.locks = { receive: false, forward: false };
                 state.pendingGap = null;
                 state.pendingChangeAsk = false;
+                state.pendingDisambig = false;
+                state.disambigHostId = null;
                 state.changeAddPoints = null;
                 state.userTexts = [];
                 state.fileTable = null;
@@ -3208,6 +3925,8 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 state.gapRepeat = 0;
                 state.pendingGap = null;
                 state.pendingChangeAsk = false;
+                state.pendingDisambig = false;
+                state.disambigHostId = null;
                 state.changeAddPoints = null;
                 state.userTexts = [];
                 state.fileTable = null;
@@ -3218,7 +3937,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 yield {
                     type: "text",
                     content:
-                        "好的，已取消本次接入。已确认的信息（场站、设备记忆）已保留，您可以随时重新发起接入。",
+                        "好的，已取消本次接入。已确认的信息（场站绑定、设备注册表）已保留，您可以随时重新发起接入。",
                 };
                 yield { type: "done" };
                 return;
@@ -3230,6 +3949,8 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 state.userConfirmed = false;
                 state.pendingGap = null;
                 state.pendingChangeAsk = false;
+                state.pendingDisambig = false;
+                state.disambigHostId = null;
                 state.changeAddPoints = null;
                 stateWriter.setAccessPlan(false);
                 stateWriter.setPhase("idle");
@@ -3298,6 +4019,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                         kind: "changes",
                         steps: change.steps,
                         display: change.display,
+                        registryWrites: change.registryWrites,
                     };
                     stateWriter.setAccessPlan(true);
                     stateWriter.setPhase("planning");
@@ -3418,6 +4140,19 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                         gap: "fwd.points",
                         addrs: "与接收侧一致（方案层推导）",
                     });
+                } else if (state.pendingGap === "recv.device") {
+                    // 设备缺口裸值绑定（§3.2.1.3c）：全名原样接受；裸数字/中文数字仅当
+                    // 累积文本存在设备类型词时绑定（"2" → 2号X），类型词缺失 → 不猜，
+                    // 重复追问全名（宁可放过不可错绑）
+                    const dev = bind_device_answer(userText, state.userTexts);
+                    if (dev !== null) {
+                        state.recv.deviceName = dev;
+                        extraction_progress = true;
+                        cfg.agentLogger.memory(conversation, "pending_bind", {
+                            gap: "recv.device",
+                            device: dev,
+                        });
+                    }
                 } else {
                     const bare = parse_bare_value(userText);
                     const bind = bare
@@ -3527,7 +4262,28 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 return;
             }
             if (assembled.issue) {
-                // 点表错误（如采集/转发数量不等）——询问澄清修正，不进入方案确认
+                // 点表错误/身份冲突（如采集/转发数量不等、同名消歧）——询问澄清修正，
+                // 不进入方案确认。连续两轮同一处装配失败 → 收摊（与缺口追问上限同口径，
+                // 防澄清死循环）
+                state.gapRepeat =
+                    state.lastGapSignature === "assemble.issue"
+                        ? state.gapRepeat + 1
+                        : 0;
+                state.lastGapSignature = "assemble.issue";
+                if (state.gapRepeat >= 2) {
+                    state.gapRepeat = 0;
+                    state.lastGapSignature = null;
+                    yield {
+                        type: "text",
+                        content:
+                            `这个问题我连续几轮没能确认到，先为您收个尾：
+· ${assembled.issue}
+` +
+                            `您可以回复「取消」重新开始，或换一种说法后再继续。`,
+                    };
+                    yield { type: "done" };
+                    return;
+                }
                 yield { type: "text", content: assembled.issue };
                 yield { type: "done" };
                 return;
@@ -3572,11 +4328,17 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                     }
                 }
             }
-            state.accessPlan = { kind: "add", input: assembled.plan, display: assembled.display };
+            state.accessPlan = {
+                kind: "add",
+                input: assembled.plan,
+                display: assembled.display,
+                registryWrites: assembled.registryWrites,
+            };
             stateWriter.setAccessPlan(true);
             stateWriter.setPhase("planning");
             cfg.agentLogger.phase(conversation, "planning");
-            // 方案展示含 abbr 绑定（§4.5.3 确认文本列「将新建设备 hnals_wt1」）
+            // 方案展示含设备身份（§4.5.3 确认文本列「将新建设备 1号风机（点 key 前缀 wt1_）」；
+            // 实例句柄 channel{N} 不出现在对话文本，agent.md §3.2.1.3）
             yield { type: "text", content: assembled.display };
             yield { type: "button_arm" };
             yield { type: "done" };

@@ -941,7 +941,7 @@ start 等工具被调用时，各 MCP Server 读取文件中同名顶层 key 对
 
 每个顶层 key 对应一个 MCP Server 类型，值为该类型实例的配置数组。不同实例按数组顺序启动。
 
-> **标识符命名规范**：各 MCP 服务配置中的 `id` 字段（即 `service_id`）和 points 数组中的 `id` 字段（即 `point_id`）均须匹配 `[a-zA-Z_]+`，仅允许字母和下划线，**不得包含 `.`**。`.` 被保留用作全局 key 的连接符，格式为 `{service_id}.{point_id}`（如 `hnals_1_scada.windspeed`）。Agent 在生成配置时负责校验此规则。
+> **标识符命名规范**：各 MCP 服务配置中的 `id` 字段（即 `service_id`）和 points 数组中的 `id` 字段（即 `point_id`）均须匹配 `^[a-zA-Z][a-zA-Z0-9_]*$`（字母开头，字母/数字/下划线，数字合法），**不得包含 `.`**。`.` 被保留用作全局 key 的连接符，格式为 `{service_id}.{point_id}`（如 `channel1.wt1_windspeed`）。`service_id` 为接入分配的顺序句柄 `channel{N}`（用户不可见，详见 agent.md §3.2.1.3）；`point_id` 为统一前缀形态 `{设备前缀}_{裸id}`（如 `wt1_windspeed`，跨设备同名点共存）。Agent 在生成配置时负责校验此规则。
 
 > **点名落盘规则**：Writer（采集）服务的 `points[i]` 必须含 `name`——用户提供的原点名，Agent **原样保存**（可为中文，如「风速」），用于描述查重与对点展示，Go MCP 服务不消费；同时含 `id`（英文标识，参与全局 key）。Reader（转发）服务的 `points[i]` **不含 `name`**——点名经 `key` 解析采集点即得，落盘属冗余数据；`key`（引用采集点全局 key）即是对应关系与点名的唯一来源（展示对应关系由 Agent 按序解析呈现，见 agent.md §3.2.1.3b）。`c4_asfp2_server` 与 `c4_influxdb_client` 的逐字段规格见各自设计文档（`c4_asfp2_server.md` / `c4_influxdb_client.md` §2）。
 
@@ -1034,7 +1034,7 @@ start 等工具被调用时，各 MCP Server 读取文件中同名顶层 key 对
 
 | 字段 | 类型 | 含义 |
 |------|------|------|
-| `key` | string | 引用的 Writer 采集点标识，格式为 `{service_id}.{point_id}`（如 `hnals_1_scada.windspeed`）。`c4_shm_manager` 根据此 key 填入与 Writer 端相同的 shm_id |
+| `key` | string | 引用的 Writer 采集点标识，格式为 `{service_id}.{point_id}`（如 `channel1.wt1_windspeed`）。`c4_shm_manager` 根据此 key 填入与 Writer 端相同的 shm_id |
 | `addr` | integer | ASFP2 地址（协议中的 key） |
 | `shm_id` | integer | 全局 shm_id，默认 0（未分配），由 `c4_shm_manager` 通过 key 匹配 Writer 后填入 |
 
@@ -1075,7 +1075,7 @@ IEC104 采集（2 个主变 RTU）和 ASFP2 转发（到中心侧数据库和第
     "c4_modbus_client": [
         {
             "name": "华能阿拉善1#风机SCADA服务",
-            "id": "hnals_1_scada",
+            "id": "channel1",
             "ip": "192.168.110.1",
             "port": 502,
             "hton_register": 1,
@@ -1087,13 +1087,13 @@ IEC104 采集（2 个主变 RTU）和 ASFP2 转发（到中心侧数据库和第
             "registers_quantity_max": 125,
             "timer": 1000,
             "points": [
-                {"id": "windspeed", "name": "风速", "uid": 1, "addr": 1000, "fun": 3, "type": 10, "swap": 2, "shm_id": 1},
-                {"id": "temperature", "name": "机舱温度", "uid": 1, "addr": 1002, "fun": 3, "type": 10, "swap": 2, "shm_id": 2}
+                {"id": "wt1_windspeed", "name": "风速", "uid": 1, "addr": 1000, "fun": 3, "type": 10, "swap": 2, "shm_id": 1},
+                {"id": "wt1_temperature", "name": "机舱温度", "uid": 1, "addr": 1002, "fun": 3, "type": 10, "swap": 2, "shm_id": 2}
             ]
         },
         {
             "name": "华能阿拉善2#风机SCADA服务",
-            "id": "hnals_2_scada",
+            "id": "channel2",
             "ip": "192.168.110.2",
             "port": 502,
             "hton_register": 1,
@@ -1105,15 +1105,15 @@ IEC104 采集（2 个主变 RTU）和 ASFP2 转发（到中心侧数据库和第
             "registers_quantity_max": 125,
             "timer": 1000,
             "points": [
-                {"id": "windspeed", "name": "风速", "uid": 1, "addr": 1000, "fun": 3, "type": 10, "swap": 2, "shm_id": 3},
-                {"id": "temperature", "name": "机舱温度", "uid": 1, "addr": 1002, "fun": 3, "type": 10, "swap": 2, "shm_id": 4}
+                {"id": "wt2_windspeed", "name": "风速", "uid": 1, "addr": 1000, "fun": 3, "type": 10, "swap": 2, "shm_id": 3},
+                {"id": "wt2_temperature", "name": "机舱温度", "uid": 1, "addr": 1002, "fun": 3, "type": 10, "swap": 2, "shm_id": 4}
             ]
         }
     ],
     "c4_iec104_client": [
         {
             "name": "华能阿拉善1#主变",
-            "id": "hnals_1_transformer",
+            "id": "channel3",
             "ip": "192.168.110.99",
             "port": 2404,
             "k": 12,
@@ -1129,14 +1129,14 @@ IEC104 采集（2 个主变 RTU）和 ASFP2 转发（到中心侧数据库和第
             "it_timer": 1000,
             "gi_timer": 1000,
             "points": [
-                {"id": "uab", "name": "UAB 线电压", "addr": 16385, "shm_id": 5},
-                {"id": "ubc", "name": "UBC 线电压", "addr": 16386, "shm_id": 6},
-                {"id": "uac", "name": "UAC 线电压", "addr": 25601, "shm_id": 7}
+                {"id": "zy1_uab", "name": "UAB 线电压", "addr": 16385, "shm_id": 5},
+                {"id": "zy1_ubc", "name": "UBC 线电压", "addr": 16386, "shm_id": 6},
+                {"id": "zy1_uac", "name": "UAC 线电压", "addr": 25601, "shm_id": 7}
             ]
         },
         {
             "name": "华能阿拉善2#主变",
-            "id": "hnals_2_transformer",
+            "id": "channel4",
             "ip": "192.168.110.199",
             "port": 2404,
             "k": 12,
@@ -1152,16 +1152,16 @@ IEC104 采集（2 个主变 RTU）和 ASFP2 转发（到中心侧数据库和第
             "it_timer": 1000,
             "gi_timer": 1000,
             "points": [
-                {"id": "alarm1", "name": "报警信号1", "addr": 1, "shm_id": 8},
-                {"id": "alarm2", "name": "报警信号2", "addr": 2, "shm_id": 9},
-                {"id": "alarm3", "name": "报警信号3", "addr": 3, "shm_id": 10}
+                {"id": "zy2_alarm1", "name": "报警信号1", "addr": 1, "shm_id": 8},
+                {"id": "zy2_alarm2", "name": "报警信号2", "addr": 2, "shm_id": 9},
+                {"id": "zy2_alarm3", "name": "报警信号3", "addr": 3, "shm_id": 10}
             ]
         }
     ],
     "c4_asfp2_client": [
         {
             "name": "转发到中心测数据库服务器",
-            "id": "hnals_asfp2_center",
+            "id": "channel5",
             "ip": "172.16.109.11",
             "port": 9999,
             "t0": 30,
@@ -1175,15 +1175,15 @@ IEC104 采集（2 个主变 RTU）和 ASFP2 转发（到中心侧数据库和第
             "inverse_keep": 0,
             "timer": 100,
             "points": [
-                {"key": "hnals_1_scada.windspeed", "addr": 1000, "shm_id": 1},
-                {"key": "hnals_1_scada.temperature", "addr": 1001, "shm_id": 2},
-                {"key": "hnals_2_scada.windspeed", "addr": 1002, "shm_id": 3},
-                {"key": "hnals_2_scada.temperature", "addr": 1003, "shm_id": 4}
+                {"key": "channel1.wt1_windspeed", "addr": 1000, "shm_id": 1},
+                {"key": "channel1.wt1_temperature", "addr": 1001, "shm_id": 2},
+                {"key": "channel2.wt2_windspeed", "addr": 1002, "shm_id": 3},
+                {"key": "channel2.wt2_temperature", "addr": 1003, "shm_id": 4}
             ]
         },
         {
             "name": "转发到第三方数据服务器",
-            "id": "hnals_asfp2_third",
+            "id": "channel6",
             "ip": "172.16.109.13",
             "port": 9999,
             "t0": 30,
@@ -1197,8 +1197,8 @@ IEC104 采集（2 个主变 RTU）和 ASFP2 转发（到中心侧数据库和第
             "inverse_keep": 0,
             "timer": 100,
             "points": [
-                {"key": "hnals_2_scada.windspeed", "addr": 8002, "shm_id": 3},
-                {"key": "hnals_2_scada.temperature", "addr": 8003, "shm_id": 4}
+                {"key": "channel2.wt2_windspeed", "addr": 8002, "shm_id": 3},
+                {"key": "channel2.wt2_temperature", "addr": 8003, "shm_id": 4}
             ]
         }
     ]

@@ -21,3 +21,11 @@ func TestValidateInfluxPoints(t *testing.T) {
 		t.Fatalf("合法点不应报错: %v", ok)
 	}
 }
+
+// field 必填（2026-10-01 裁定：无默认值、不推导，废除空值放行与运行期回退点名）
+func TestValidateInfluxPointsFieldRequired(t *testing.T) {
+	issues := validateInfluxPoints([]influxPoint{{Key: "k", Measurement: "m"}})
+	if len(issues) != 1 || issues[0].Code != "FIELD_FORMAT" {
+		t.Fatalf("空 field 应报 FIELD_FORMAT, got %v", issues)
+	}
+}
