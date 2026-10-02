@@ -47,6 +47,17 @@ export interface DeviceRetrieval {
     candidates?: AbbrEntry[];
 }
 
+/** 接入管线的同名仲裁增强选项（query_abbr_registry 的 site 归属校验不传、行为不变）。 */
+export interface RetrieveOpts {
+    /**
+     * 点表地址证据回调（2026-10-02 B4 修复）：同设备重入时新消息点表与既有点表
+     * addr 集一致；另一台同名设备点表不同。描述含设备名的包含判定在同名检索下
+     * 恒真（「1#风机数据」归一化含「1风机」），不能作为匹配证据——提供本回调时
+     * 改用强仲裁（名字精确等值 / 描述互含 / 地址证据），未提供保持原行为。
+     */
+    addr_evidence?: (entry: AbbrEntry) => boolean;
+}
+
 // ── 路径 ──────────────────────────────────────────────────
 
 export function default_abbr_registry_path(): string {
@@ -131,6 +142,7 @@ export function retrieve_device(
     registry: AbbrRegistry,
     name: string,
     description?: string,
+    opts?: RetrieveOpts,
 ): DeviceRetrieval {
     const q = _normalize(name);
     if (q.length === 0) {
@@ -141,7 +153,19 @@ export function retrieve_device(
         return { decision: "no_hit" };
     }
     const desc = description ?? name;
-    const matched = hits.filter((e) => _descriptions_match(desc, e));
+    const a = _normalize(desc);
+    const matched = hits.filter((e) => {
+        if (opts?.addr_evidence) {
+            // 强仲裁（接入管线）：名字精确等值复述 / 描述互含 / 点表地址证据——
+            // 名字包含不作证据（同名检索下恒真，2026-10-02 B4 实测静默并入）
+            const b_name = _normalize(e.name);
+            const b_desc = _normalize(e.description);
+            if (a === b_name) return true;
+            if (_contains(a, b_desc) || _contains(b_desc, a)) return true;
+            return opts.addr_evidence(e);
+        }
+        return _descriptions_match(desc, e);
+    });
     if (matched.length === 1) {
         return { decision: "same_device", entry: matched[0] };
     }

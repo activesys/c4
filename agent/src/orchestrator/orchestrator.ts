@@ -147,6 +147,10 @@ interface SessionState {
      *  兜底）锁定该设备（devices 只含锚），防同名另一台被误选；方案产出/取消/
      *  终态时清除 */
     disambigHostId: string | null;
+    /** 同名坚持新增语境（用例 49②）：同名冲突追问后等待用户「坚持新增/改名/取消」
+     *  应答——应答含新增语义 → 跳过检索按前缀顺延新增（确定性，不交 LLM）；
+     *  方案产出/取消时清除 */
+    pendingNewDevice: boolean;
     /** 变更流追加草稿（单调累积，addr 为键——已确认字段不被后续轮次重解析覆盖，
      *  2026-09-27 用例10：轮4 重解析曾丢已确认点名并漏绑转发地址） */
     changeAddPoints: Array<Record<string, unknown>> | null;
@@ -172,6 +176,7 @@ function fresh_state(): SessionState {
         pendingChangeAsk: false,
         pendingDisambig: false,
         disambigHostId: null,
+        pendingNewDevice: false,
         changeAddPoints: null,
         changeTargetId: null,
     };
@@ -179,6 +184,15 @@ function fresh_state(): SessionState {
 
 // §2.4.2 取消词表——去空白后全等匹配（禁止包含匹配）
 const CANCEL_WORDS = new Set(["取消", "算了", "不接了", "放弃", "停止接入"]);
+
+// 同名坚持新增的应答语义（用例 49②）：含新增语义即确认新增同名设备（前缀顺延），
+// 由语境（pendingNewDevice）限定生效范围，不影响正常消息流
+const NEW_DEVICE_CONFIRM_RE = /新增一台|另一台|就是新增|确认新增|坚持新增|坚持用/;
+
+// 会话累积文本（接入管线内与 state.userTexts 同源；语义层小助手，避免长表达式重复）
+function semanticOf(state: { userTexts: string[] }): string {
+    return state.userTexts.join("\n");
+}
 
 // 转发意图：肯定表述命中且否定表述未命中（"不需要转发/仅采集"不激活转发链）
 const FORWARD_ON_RE = /转发|入库|写入|上传|推送|发送到/;
@@ -2041,15 +2055,61 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
         }
 
         // ── 设备身份（§3.2.1.3a id 确定流程 1-2 步的确定性部分）──
-        // 检索注册表：同名命中 → 描述匹配仲裁；无命中 → 新设备（前缀确定性派生 +
-        // 撞名顺延 / 匿名 dev{N} 序列）；同名多条无法区分 → 追问用户
-        const retrieval = retrieve_device(abbr, devName, state.userTexts.join("\n"));
+        // 同名坚持语境（用例 49②）：同名冲突追问后用户坚持新增同一名称 → 跳过
+        // 检索直接走新设备流程（前缀撞名顺延），不交 LLM；应答为取消 → 清语境回落
+        const current0 = read_current_config();
+        let forceNewDevice = false;
+        if (state.pendingNewDevice) {
+            if (NEW_DEVICE_CONFIRM_RE.test(semanticOf(state))) {
+                state.pendingNewDevice = false;
+                forceNewDevice = true;
+            } else if (CANCEL_WORDS.has(clean_user_text(semanticOf(state)).trim())) {
+                state.pendingNewDevice = false;
+            }
+        }
+        // 检索注册表：同名命中 → 描述匹配仲裁（强仲裁含点表地址证据——描述含设备
+        // 名的包含判定在同名检索下恒真，不能区分「同一设备重入」与「另一台同名」，
+        // 2026-10-02 B4 实测静默并入）；无命中 → 新设备（前缀确定性派生 + 撞名顺延 /
+        // 匿名 dev{N} 序列）；同名多条无法区分 → 追问用户
         let prefix: string;
         let reused: AbbrEntry | null = null;
+        if (forceNewDevice) {
+            const cand = device_prefix_candidate(devName);
+            prefix =
+                cand === "dev"
+                    ? next_dev_prefix(abbr)
+                    : resolve_prefix_conflict(abbr, cand);
+        } else {
+        const retrieval = retrieve_device(abbr, devName, state.userTexts.join("\n"), {
+            addr_evidence: (entry) => {
+                // 点表地址证据：本轮提取点表与既有条目宿主上同前缀点表 addr 集一致
+                // → 同一设备重入（用例 2 重接入语义）；不一致/无点表 → 非证据
+                const newAddrs = (state.recv.points ?? [])
+                    .map((p) => Number(p["addr"]))
+                    .filter((n) => !Number.isNaN(n));
+                if (newAddrs.length === 0) return false;
+                const inst = (current0?.[entry.service_type] ?? []) as Array<
+                    Record<string, unknown>
+                >;
+                const hit = inst.find((i) => String(i["id"] ?? "") === entry.host);
+                if (!hit) return false;
+                const pre = `${entry.prefix}_`;
+                const oldAddrs = ((hit["points"] ?? []) as Array<Record<string, unknown>>)
+                    .filter((p) => String(p["id"] ?? p["key"] ?? "").startsWith(pre))
+                    .map((p) => Number(p["addr"]))
+                    .filter((n) => !Number.isNaN(n));
+                if (oldAddrs.length !== newAddrs.length) return false;
+                const oldSet = new Set(oldAddrs);
+                return newAddrs.every((n) => oldSet.has(n));
+            },
+        });
         if (retrieval.decision === "same_device" && retrieval.entry) {
             reused = retrieval.entry;
             prefix = retrieval.entry.prefix;
         } else if (retrieval.decision === "name_conflict") {
+            // 同名冲突（§3.2.1.3a）：列区分建议追问，同时开启「坚持新增」应答语境
+            //（用例 49②：用户坚持同名 → 前缀顺延；改口可区分名称/取消 → 正常流程）
+            state.pendingNewDevice = true;
             const cands = (retrieval.candidates ?? [])
                 .map((c) => `点 key 前缀 ${c.prefix}_（${c.description || "无描述"}）`)
                 .join("；");
@@ -2058,7 +2118,8 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 display: "",
                 issue:
                     `已有一台「${devName}」注册在案（${cands}）——现场可能存在同名设备。` +
-                    `若要接入的是另一台设备，请用可区分的名称重新说明（如「2号风机」「1号风机B」）；` +
+                    `若要接入的是另一台设备，请用可区分的名称重新说明（如「2号风机」「1号风机B」），` +
+                    `或回复「就是新增一台，也叫${devName}」确认新增同名设备（点 key 前缀将顺延）；` +
                     `若要操作的是已有设备，请直接说明要做的变更（如「给${devName}加点」「删除${devName}」）。`,
             };
         } else {
@@ -2068,6 +2129,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                     ? next_dev_prefix(abbr)
                     : resolve_prefix_conflict(abbr, cand);
         }
+        }
 
         const svcType = state.recv.protocol
             ? find_service_type(registry, normalize_protocol(state.recv.protocol), "writer")
@@ -2075,7 +2137,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
         if (!svcType) {
             return null; // 协议缺口未闭合——缺口层已拦，此处防御
         }
-        const current = read_current_config();
+        const current = current0;
 
         // ── channel 序号分配（§3.2.1.3）：未使用最小序号，全服务类型共享同一序号空间；
         //  高位水印取注册表与现存实例的较大值（永不回退）──
@@ -2288,6 +2350,62 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 plan_device_points(state, ft);
             }
             forward_targets.push(ft);
+        }
+
+        // ── 同目标转发 addr 查重（agent.md §2.7.1 接入层 2，2026-10-02 回填）──
+        // 同一转发目标（ip:port）上全部转发实例（含既有实例）的 addr 不得重复——
+        // 下游（II区）按 addr 唯一区分数据，两条连接同 addr 即互踩。比较域跨实例
+        // 聚合：连接型转发每设备一实例，单实例校验（POINT_DUP）查不到跨实例冲突。
+        // 方案期拦截（确认按钮之前），不进入执行
+        for (const ft of forward_targets) {
+            const ftIp = String(ft["ip"] ?? "");
+            const ftPort = Number(ft["port"] ?? NaN);
+            if (ftIp === "" || !Number.isInteger(ftPort)) continue;
+            const ftSvc = find_service_type(
+                registry,
+                normalize_protocol(String(ft["protocol"] ?? "")),
+                "reader",
+            );
+            if (!ftSvc) continue;
+            const batchAddrs = ((ft["points"] ?? []) as Array<Record<string, unknown>>)
+                .map((p) => Number(p["addr"]))
+                .filter((n) => !Number.isNaN(n));
+            const batchSet = new Set(batchAddrs);
+            const seen = new Map<number, string>();
+            const existingInsts = ((current?.[ftSvc] ?? []) as Array<Record<string, unknown>>)
+                .filter((i) => {
+                    if (String(i["id"] ?? "") === String(ft["instanceId"])) return false;
+                    return (
+                        String(i["ip"] ?? "") === ftIp && Number(i["port"] ?? NaN) === ftPort
+                    );
+                });
+            for (const inst of existingInsts) {
+                for (const p of (inst["points"] ?? []) as Array<Record<string, unknown>>) {
+                    const a = Number(p["addr"]);
+                    if (!Number.isNaN(a)) seen.set(a, String(p["key"] ?? a));
+                }
+            }
+            const clash = batchAddrs.find((a) => seen.has(a));
+            if (clash !== undefined) {
+                // 不引用既有转发点 key（含实例句柄前缀）——句柄不出现在对话文本
+                return {
+                    plan: {},
+                    display: "",
+                    issue:
+                        `转发地址 ${clash} 已被发往 ${ftIp}:${ftPort} 的既有转发配置占用——` +
+                        `同一转发目标上转发地址必须全局唯一，重叠会使 II区 侧数据互踩。` +
+                        `请提供不重叠的转发点表后重试（如 7100~7109）。`,
+                };
+            }
+            // 批次内重复（同一新实例两点半址）由 POINT_DUP（L2/merge 前置）兜底；
+            // 此处补跨目标批次互撞（两个新目标同 ip:port）——同批 multiple targets 少见
+            if (batchSet.size !== batchAddrs.length) {
+                return {
+                    plan: {},
+                    display: "",
+                    issue: `转发点表存在重复地址——同一转发目标上转发地址必须唯一，请检查后重试。`,
+                };
+            }
         }
 
         // 平台硬约束兜底（2026-09-29 用例11）：缺转发目标的纯采集方案不得进入确认——
@@ -3991,6 +4109,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 state.pendingChangeAsk = false;
                 state.pendingDisambig = false;
                 state.disambigHostId = null;
+                state.pendingNewDevice = false;
                 state.changeAddPoints = null;
                 state.userTexts = [];
                 state.fileTable = null;
@@ -4143,6 +4262,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 state.pendingChangeAsk = false;
                 state.pendingDisambig = false;
                 state.disambigHostId = null;
+                state.pendingNewDevice = false;
                 state.changeAddPoints = null;
                 state.userTexts = [];
                 state.fileTable = null;
@@ -4167,6 +4287,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 state.pendingChangeAsk = false;
                 state.pendingDisambig = false;
                 state.disambigHostId = null;
+                state.pendingNewDevice = false;
                 state.changeAddPoints = null;
                 stateWriter.setAccessPlan(false);
                 stateWriter.setPhase("idle");
@@ -4550,6 +4671,8 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 display: assembled.display,
                 registryWrites: assembled.registryWrites,
             };
+            // 方案产出 → 同名坚持语境消费完毕（后续轮次不得再绕过检索）
+            state.pendingNewDevice = false;
             stateWriter.setAccessPlan(true);
             stateWriter.setPhase("planning");
             cfg.agentLogger.phase(conversation, "planning");
