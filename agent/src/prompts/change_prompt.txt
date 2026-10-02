@@ -18,6 +18,10 @@
    - 无法判定 → intent 填 null
 2. target：从 devices_json 中匹配用户提到的设备——按 id 精确匹配或按名称包含关系
    匹配（"1#风机" 匹配 "华能阿拉善1#风机"）。匹配不到 → target_id 填 null，禁止猜测。
+   批量删除（如「把风机都删了」「设备全部下线」）：用户删除范围覆盖多台设备、无法唯
+   一确定单台时，target_id 填 null，改以 target_ids 数组逐台列出匹配到的实例 id
+   （按设备名称包含的类型词圈定，如「风机」匹配名称含「风机」的所有设备）；范围无法
+   判定 → target_ids 填空数组 []，禁止猜测。范围只覆盖一台时仍用 target_id。
 3. instance_fields：用户明确给出的实例级字段新值（如 IP 是 192.168.110.5 →
    {"ip": "192.168.110.5"}）。端口仅在用户明确要求修改端口时提取。
 4. points：用户指名的点——从 devices_json 对应设备的 points 中匹配（按点名/地址），
@@ -52,6 +56,7 @@
 {
   "intent": "modify" | "delete" | "delete_points" | "add_points" | null,
   "target_id": "匹配到的实例 id，匹配不到填 null",
+  "target_ids": "仅批量删除时逐台列出实例 id 数组，其余填 null",
   "instance_fields": {"字段名": "新值"},
   "points": [{"id": "点 id"}],
   "point_updates": [{"id": "点 id", "字段名": "新值"}],

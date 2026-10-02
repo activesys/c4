@@ -225,6 +225,37 @@ function receive_scoped_text(texts: string[]): string {
         .join("\n");
 }
 
+// location_prompt first_access（rule6）产物中的拼音缩写（§3.2.1.3a：华能阿拉善→hnals、
+// 开鲁→kl，泛化后缀不计入）：仅收 2~12 位字母数字，其余视为未生成（不猜缩写）
+function generated_abbr_of(r: Record<string, unknown> | null): string {
+    const abbr =
+        r && typeof r["generated_abbr"] === "string" ? (r["generated_abbr"] as string).trim() : "";
+    return /^[a-z0-9]{2,12}$/i.test(abbr) ? abbr.toLowerCase() : "";
+}
+
+// 转发点表幂等比较（地址骨架）：既有点表与新生成骨架逐位同址 → 无实质进展。
+// 累积文本补扫描（fwdScoped）每回合重复命中同一范围时，重复置 progress 会把
+// 「连续追问」计数清零（2026-10-02 用例52 实测：缺口收摊永不触发、无进展死循环）。
+// 既有点表更丰富（含点名）且地址相同时不覆盖——保留丰富提取结果
+function same_addr_points(
+    a: Array<Record<string, unknown>> | null,
+    b: Array<Record<string, unknown>>,
+): boolean {
+    if (a === null || a.length !== b.length) return false;
+    return a.every((p, i) => p["addr"] === b[i]["addr"]);
+}
+
+// 转发点表幂等比较（LLM 提取结果，深比较）：同序同字段视为无实质进展
+function same_points_deep(
+    a: Array<Record<string, unknown>> | null,
+    b: Array<Record<string, unknown>>,
+): boolean {
+    if (a === null || a.length !== b.length) return false;
+    const norm = (pts: Array<Record<string, unknown>>): string =>
+        pts.map((p) => JSON.stringify(p, Object.keys(p).sort())).join("\n");
+    return norm(a) === norm(b);
+}
+
 // 修改/删除意图（针对已接入设备）
 const CHANGE_INTENT_RE =
     /不再采集|停用|删除|移除|删了|删掉|去掉|改为|改成|修改|调整|更新|增加.{0,8}点|追加.{0,8}点|添加.{0,8}点|加点|新增点/;
@@ -872,14 +903,55 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             }
         }
 
-        // 阶段1 场站（§3.2.1.3a：site 存于 agent.json 权威配置）
-        // 未绑定 → 不自动提取，必须显式询问（首次接入契约）；用户按格式答复后确定性固化
+        // 阶段1 场站（§3.2.1.3a：site 存于 agent.json 权威配置；2026-10-02 修订）
+        // 未绑定 → 不自动提取，必须显式询问（首次接入契约）：只询问场站名称，缩写由
+        // LLM 按拼音首字母自动生成（华能阿拉善→hnals、开鲁→kl）。确定性捕获显式声明
+        // 格式（「场站名称：X」，用户自愿提供缩写时仍成对采纳）；缺口追问
+        //（pendingGap === "site"）下的自由文本应答交 location_prompt rule6
+        //（first_access 模式）兜底提取——提问即上下文锁定，非无询问的自动提取
         if (!state.site) {
-            const m = semantic.match(
+            let siteName = "";
+            let siteAbbr = "";
+            const pair = semantic.match(
                 /场站名称[:：]\s*([^\s，,。]{2,20})\s*[，,]?\s*(?:缩写|简称)[:：]\s*([^\s，,。]{1,12})/,
             );
-            if (m) {
-                state.site = { name: m[1], abbr: m[2] };
+            const nameOnly = pair
+                ? null
+                : semantic.match(/场站名称\s*(?:[:：]|是|为)\s*([^\s，,。]{2,20})/);
+            if (pair) {
+                siteName = pair[1];
+                siteAbbr = pair[2];
+            } else if (nameOnly) {
+                siteName = nameOnly[1];
+            } else if (state.pendingGap === "site") {
+                const r = await llm_json(
+                    "location_prompt.txt",
+                    { known_site: "（未设置）" },
+                    semantic,
+                    conversation,
+                ).catch(() => null);
+                const exSite =
+                    r && r["mode"] === "first_access" && typeof r["user_site"] === "string"
+                        ? (r["user_site"] as string).trim()
+                        : "";
+                if (exSite.length >= 2 && exSite.length <= 20) {
+                    siteName = exSite;
+                    siteAbbr = generated_abbr_of(r);
+                }
+            }
+            if (siteName !== "" && siteAbbr === "") {
+                // 有名称无缩写：LLM 按拼音首字母生成，随回复与接入方案展示给用户；
+                // 生成失败 → 本回合不固化，缺口保持追问（不猜缩写）
+                const r = await llm_json(
+                    "location_prompt.txt",
+                    { known_site: "（未设置）" },
+                    siteName,
+                    conversation,
+                ).catch(() => null);
+                siteAbbr = generated_abbr_of(r);
+            }
+            if (siteName !== "" && siteAbbr !== "") {
+                state.site = { name: siteName, abbr: siteAbbr };
                 boundSite = state.site;
                 for (const d of drafts.values()) {
                     if (d !== state) d.site = boundSite;
@@ -1309,7 +1381,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                     r && Array.isArray(r["points"])
                         ? (r["points"] as Array<Record<string, unknown>>)
                         : null;
-                if (pts && pts.length > 0) {
+                if (pts && pts.length > 0 && !same_points_deep(state.fwd.points, pts)) {
                     state.fwd.points = pts;
                     progress = true;
                 }
@@ -1325,15 +1397,17 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 const count = Math.min(n, span);
                 const pts: Array<Record<string, unknown>> = [];
                 for (let i = 0; i < count; i++) pts.push({ addr: start + i });
-                if (count === n) {
+                if (count === n && !same_addr_points(state.fwd.points, pts)) {
                     state.fwd.points = pts;
                     progress = true;
                 }
             } else if (zhStart !== null) {
                 const pts: Array<Record<string, unknown>> = [];
                 for (let i = 0; i < n; i++) pts.push({ addr: zhStart + i });
-                state.fwd.points = pts;
-                progress = true;
+                if (!same_addr_points(state.fwd.points, pts)) {
+                    state.fwd.points = pts;
+                    progress = true;
+                }
             } else if (!state.fwd.points) {
                 if (state.fwd.protocol === "influxdb") {
                     // §2.7.1 确定性推导：influxdb 点字段（measurement/field/type）全部可由
@@ -1599,11 +1673,13 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
         if (!state.site) {
             gaps.push({
                 key: "site",
-                text: "场站名称与缩写（首次接入需要绑定场站，如：场站名称：华能阿拉善，缩写：hnals）",
-                ask: "请提供场站名称与缩写，例如：场站名称：华能阿拉善，缩写：hnals",
+                // §3.2.1.3a（2026-10-02 修订）：只询问场站名称，缩写由 LLM 按拼音首字母
+                // 自动生成——不再要求用户按「名称+缩写」成对提供
+                text: "场站名称（首次接入需要绑定场站，如：场站名称：华能阿拉善）",
+                ask: "请提供场站名称，例如：场站名称：华能阿拉善",
             });
         } else {
-            recap.push(`场站：${state.site.name}`);
+            recap.push(`场站：${state.site.name}（缩写 ${state.site.abbr}）`);
         }
         // 设备名称/编号必答缺口（recv.device，§3.2.1.3c）：点 key 前缀依赖设备身份，
         // 依赖序位于场站之后、接入协议之前——名称或编号任一即闭合
@@ -2544,10 +2620,42 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 !/数据点|采集点|点位|的点|点[（(]|点名|地址\s*\d/.test(semantic);
             if (deleteish) {
                 // 明确编号但设备不存在（用例 27：「删除3号风机」）→ 回复不存在；
-                // 未指明编号（「把风机都删了」）→ 空 target_id，由上层列清单询问
+                // 未指明编号（「把风机都删了」）→ 批量范围圈定：消息含设备类型词时
+                // 按类型词确定性圈定受影响设备集（target_ids，func_test_case 用例 28
+                // 2026-10-02 口径：列清单 + 单次确认整体执行，确认按钮出现）；
+                // 圈定失败 → 空 target_id，由上层列清单询问（不得静默全删、不得猜）
                 const mnum = norm(semantic).match(
                     /(\d+)(?:#|号)?(风机|主变|逆变器|测风塔|机组|数据源|变压器|设备)/,
                 );
+                if (!mnum) {
+                    const tm = semantic.match(
+                        /风电机组|风机|主变|变压器|逆变器|测风塔|机组|光伏|储能|升压站|数据源|设备/,
+                    );
+                    if (tm) {
+                        const tw = tm[0];
+                        const generic = tw === "设备";
+                        const plurality = /都|全部|所有|一并|一起|统统/.test(semantic);
+                        const affected = generic
+                            ? devices
+                            : devices.filter((d) =>
+                                  norm(String(d["name"])).includes(norm(tw)),
+                              );
+                        if (
+                            affected.length > 0 &&
+                            (!generic || plurality)
+                        ) {
+                            return {
+                                intent: "delete",
+                                target_id: "",
+                                target_ids: affected.map((d) => String(d["id"])),
+                                instance_fields: {},
+                                point_updates: [],
+                                points: [],
+                                add_points: [],
+                            };
+                        }
+                    }
+                }
                 return {
                     intent: "delete",
                     target_id: mnum ? `__missing__${mnum[1]}${mnum[2]}` : "",
@@ -2997,7 +3105,12 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             const needsAnchor =
                 r === null ||
                 (String(r["target_id"] ?? "") === "" &&
-                    String(r["intent"] ?? "") === "delete");
+                    String(r["intent"] ?? "") === "delete" &&
+                    // 批量删除（用例 28）已圈定受影响设备集 → 不被锚覆盖为单台删除
+                    !(
+                        Array.isArray(r["target_ids"]) &&
+                        (r["target_ids"] as unknown[]).length > 0
+                    ));
             if (needsAnchor) {
                 const forced = deterministic_change_parse(
                     clean_user_text(user_text),
@@ -3123,14 +3236,83 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                     .join("、")}。`,
             };
         }
-        // 模糊删除（func_test_case 用例 28）：意图明确但未指明设备 → 列出清单询问，
-        // 不得直接出确认方案，也不得回复"设备不存在"
+        // 模糊删除（func_test_case 用例 28）：意图明确但未指明单台设备 → 批量范围
+        //（target_ids，确定性类型词圈定/LLM 兜底）非空时列出受影响清单、逐台装配
+        // 删除步骤，单次确认整体执行（确认按钮出现）；范围无法确定 → 列出清单询问
+        //（不得静默全删，也不得模糊不作为）
         if (!targetId && action === "delete") {
+            const batchIds = Array.isArray(r["target_ids"])
+                ? (r["target_ids"] as unknown[])
+                      .map((x) => String(x))
+                      .filter((id) => devices.some((d) => String(d["id"]) === id))
+                : [];
+            if (batchIds.length === 0) {
+                return {
+                    steps: [],
+                    display: `您想删除哪一台设备？当前已接入：${devices
+                        .map(device_label)
+                        .join("、")}。请明确设备后再确认。`,
+                    ask: true,
+                };
+            }
+            const batchChanges: Array<Record<string, unknown>> = [];
+            const batchRegDeletes: string[] = [];
+            const batchLines: string[] = [];
+            for (const bid of batchIds) {
+                const bd = devices.find((d) => String(d["id"]) === bid);
+                if (!bd) continue;
+                const bs = String(bd["service_type"]);
+                const bp = String(bd["prefix"] ?? "");
+                const bn = String(bd["name"] ?? bid);
+                // 独占/共用判定与单台删除同源（§3.2.1.3a）：共用实例做前缀点组手术，
+                // 独占（删除后宿主无条目）整实例删除，reader 侧成对清理由 merge 级联完成
+                const hostEntries = reg.entries.filter((e) => e.host === bid);
+                if (bp !== "" && hostEntries.length > 1) {
+                    const delPts = ((bd["points"] ?? []) as Array<Record<string, unknown>>).map(
+                        (p) => ({ id: String(p["id"]) }),
+                    );
+                    batchChanges.push({
+                        action: "delete",
+                        service_type: bs,
+                        instance: { id: bid },
+                        points: delPts,
+                    });
+                    batchLines.push(
+                        `· 删除「${bn}」的全部 ${delPts.length} 个数据点（${bp}_ 前缀；该实例与其他设备共用，实例保留）`,
+                    );
+                } else {
+                    batchChanges.push({
+                        action: "delete",
+                        service_type: bs,
+                        instance: { id: bid },
+                    });
+                    batchLines.push(
+                        `· 删除设备「${bn}」${bp !== "" ? `（${bp}_ 前缀）` : ""}及其全部数据点（关联转发配置一并清理）`,
+                    );
+                }
+                if (bp !== "") batchRegDeletes.push(bp);
+            }
+            if (batchChanges.length === 0) return null;
+            // 方案已产出 → 消歧语境与锚消费完毕
+            state.pendingDisambig = false;
+            state.disambigHostId = null;
             return {
-                steps: [],
-                display: `您想删除哪一台设备？当前已接入：${devices
-                    .map(device_label)
-                    .join("、")}。请明确设备后再确认。`,
+                steps: batchChanges.map((c) => ({
+                    action: c["action"] as ServiceStep["action"],
+                    service_type: c["service_type"] as string,
+                    instance: c["instance"] as Record<string, unknown>,
+                    points: (c["points"] ?? []) as ServiceStep["points"],
+                })),
+                display:
+                    `变更方案如下（批量删除，逐台核对）：\n${batchLines.join(
+                        "\n",
+                    )}\n是否确认执行？请点击下方「确认」按钮；如需取消请点击「取消」。`,
+                registryWrites: {
+                    upserts: [],
+                    deletes: batchRegDeletes,
+                    pointMapDrops: [],
+                    channelHighWatermark: reg.channelHighWatermark,
+                },
             };
         }
         const dev = devices.find((d) => String(d["id"]) === targetId);
@@ -3461,6 +3643,14 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             );
             if (missingForward.length > 0) {
                 state.pendingGap = "change.forward_addr";
+                // 句柄不出现在对话文本（§3.2.1.3）：转发链路用业务目标（ip:port）指代，
+                // 目标信息缺失时省略指代——实例 id（channel{N}）绝不拼入用户可见文本
+                //（2026-10-02 链步20+16 实测：${reader.id} 泄漏 channel6）
+                const chain = _reader_chain_info(current, reader.id, reader.service_type);
+                const target =
+                    chain && chain.ip !== null
+                        ? `（${chain.ip}${chain.port !== null ? `:${chain.port}` : ""}）`
+                        : "";
                 return {
                     steps: [],
                     display:
@@ -3470,7 +3660,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                                     `「${String(p["name"] ?? "")}（地址 ${String(p["addr"] ?? "?")}）」`,
                             )
                             .join("、")}还需要转发地址——` +
-                        `当前转发链路 ${reader.id} 的转发地址已用到 ${reader.maxAddr}。` +
+                        `当前转发链路${target}的转发地址已用到 ${reader.maxAddr}。` +
                         `请告知每个新增点的转发地址后重试。`,
                     ask: true,
                 };
