@@ -153,7 +153,7 @@ Modbus/TCP 设备连接实例。
 | `name` | string | — | 实例名称，用于日志和监控标识 |
 | `id` | string | — | 实例标识符，全局唯一（接入分配的顺序句柄 channel{N}，用户不可见，agent.md §3.2.1.3）。与 point id 组合形成 `{service_id}.{point_id}` 的全局 key |
 | `ip` | string | — | Modbus/TCP 设备 IP 地址 |
-| `port` | int | `502` | Modbus/TCP 端口，标准 502 |
+| `port` | int | 无（必填） | Modbus/TCP 端口——标准端口 502 仅为协议常识，配置**无默认值**，用户未提供时必须询问（agent.md §3.3 监听端口的必填约束同类裁定） |
 | `t0` | int | `30` | 连接超时（秒） |
 | `t1` | int | `10` | 请求/响应超时（秒） |
 | `retries` | int | `10` | 请求失败最大重试次数（`0` = 无限重试，与 C 采集层 `libmodbus` 语义一致） |
@@ -302,7 +302,7 @@ Agent 在需要调整共享内存容量或变更采集配置时，执行 Stop-St
 ### 4.1 Modbus/TCP 帧格式（二进制）
 
 Modbus/TCP 通过 MBAP Header（7 字节）封装标准 Modbus PDU，构成应用数据单元（ADU）。
-**所有多字节字段均为大端（网络字节序）编码**。默认端口 `502`。
+**所有多字节字段均为大端（网络字节序）编码**。标准端口 `502` 仅为协议常识——配置无默认值，用户未提供时必须询问。
 
 ```
 Modbus/TCP ADU（最大 260 字节 = 7 + 253）

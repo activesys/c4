@@ -331,7 +331,7 @@ Agent 系统覆盖数据接入流程中 Agent 侧的全部职能：
 | 服务 | 校验规则（错误码见各服务文档） | 状态 |
 |------|---------|------|
 | c4_modbus_client | UID_OUT_OF_RANGE / ADDR_OUT_OF_RANGE（>0xFFFF）/ FUN_TYPE_MISMATCH（fun∈{1,2}→type∈{0,15}；fun∈{3,4}→8 个寄存器型）/ BAD_SWAP（合法值 {0,1,2,4}；单数据单元点必须 0；须整除字节跨度）/ POINT_DUP（uid+fun+addr）/ POINT_OVERLAP（同 uid+fun 组内，跨度=pointSpan） | ✅ 已从 validateConfig 源码确认（完整规则见该文档） |
-| c4_asfp2_client / c4_asfp2_server | POINT_DUP（addr 为 24 位 key，重复即映射静默覆盖；**dup 检测加入共享校验函数，启动校验随之修复现状缺口**）/ ADDR_OUT_OF_RANGE（> MaxAddr 0xFFFFFF）；addr 非区间编址，无重叠概念 | ✅ 已确认 |
+| c4_asfp2_client / c4_asfp2_server | POINT_DUP（addr 为 24 位 key，重复即映射静默覆盖；**dup 检测加入共享校验函数，启动校验随之修复现状缺口**）/ ADDR_OUT_OF_RANGE（> MaxAddr 0xFFFFFF）；addr 非区间编址，无重叠概念。**同目标转发 addr 查重**（两个转发实例发往同一 ip:port 目标时 addr 不得重复——下游按 addr 唯一区分数据，重复即互踩）属**跨实例合并比较域**，本工具无状态查不到，归方案层装配 / merge 前置（下接入层 2/4，2026-10-02 补） | ✅ 已确认 |
 | c4_iec104_client | POINT_DUP（信息对象地址重复）；addr 上限归启动校验（依赖实例级 ioa_size，本工具参数不含实例字段） | ✅ 已确认 |
 | c4_influxdb_client | POINT_DUP（measurement+field 组合）/ MEASUREMENT_EMPTY / INVALID_TYPE / FIELD_FORMAT（空值或 `^[a-zA-Z_]+$` 不符——field 必填，tags 若提供则同校验）。**同 Writer key 双映射**（两个不同 measurement+field 引用同一 Writer 点 → 运行期 duplicate shm_id）由 **L1 reader-key 唯一性**在阶段 6 出口拦截（本工具参数含 key 字段可查，但职责归 L1——key 是结构引用非协议语义） | ✅ 已确认 |
 
@@ -358,10 +358,12 @@ cross_rules 的规则必须在 L2/启动校验中存在对应裁决实现**（�
 
 1. **阶段 3/6 出口判据**（§3.2）：identity 查重 + 必填完备（L1）；
 2. **方案层装配**（§3.2.0.1，阶段 8）：批次×既有点的合并比较域 overlap + duplicate 校验
-   （此处在确认按钮**之前**，编造字段与点冲突在此拦截）；
+   （此处在确认按钮**之前**，编造字段与点冲突在此拦截）；**同目标转发 addr 查重**——同一转发
+   目标（ip:port）上全部转发实例（含既有实例）的 addr 不得重复（下游按 addr 唯一区分数据，
+   两条连接同 addr 即互踩；连接型转发每设备一实例，比较域必须跨实例聚合，2026-10-02 补）；
 3. **plan_steps 拆解器**（§3.2.0.1，阶段 9）：`validate_step_invariants` 引用共享库；
-4. **merge 前置**（执行模块）：merge 前对最终点表再执行 overlap + duplicate 校验，
-   违例拒绝执行——坏配置落不了盘。
+4. **merge 前置**（执行模块）：merge 前对最终点表再执行 overlap + duplicate 校验及同目标
+   转发 addr 查重，违例拒绝执行——坏配置落不了盘。
 
 c4_modbus_client 启动校验保留为最后防线（Go 侧不动）。方案层合并比较域的规则**仅对
 身份+type 字段齐全的点执行**，字段不齐交由拆解器/merge 前置拦截。
@@ -1034,6 +1036,7 @@ interface ForwardTargetSpec {
 - **后续接入的场站归属校验**（由 `query_abbr_registry` 函数在 `add` 意图下**确定性执行**（agent 内部函数，非 MCP 工具），非 LLM 判断）：
   - 用户资料**无场站信息** → 默认就是当前场站的资料（正常检索注册表）
   - 用户资料**出现场站信息且归属不明**（地名与当前场站一致但非完整场站名，如「阿拉善风电场」）→ 返回判定标签 `site_ambiguous`，提醒用户确认场站归属
+  - 消息中的场站名**包含完整配置名**（如配置「华能阿拉善」、消息「华能阿拉善风电场」——多出的「风电场」为泛化后缀）→ 视为**一致**，直接接入、不触发归属确认（2026-10-02 补裁定）；`site_ambiguous` 仅指上述子集形态
   - 资料**明确不属于当前场站**（完整场站名地名不同，如「华能大青山」vs「华能阿拉善」）→ 返回判定标签 `site_mismatch`，提醒用户「该资料不属于当前场站」
 
 **场地判定仲裁规则**：阶段 1 的 LLM 语义判断（location_prompt，含语义等价→一致）与
