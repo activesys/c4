@@ -867,7 +867,8 @@ function handle_delete(
             if (entry?.role !== "reader") {
                 continue;
             }
-            for (const inst of svc_instances as MCPInstanceConfig[]) {
+            const reader_instances = svc_instances as MCPInstanceConfig[];
+            for (const inst of reader_instances) {
                 if (!Array.isArray(inst.points)) {
                     continue;
                 }
@@ -883,6 +884,17 @@ function handle_delete(
                     warnings.push(
                         `delete: 从 ${st}.${inst.id} 级联移除 ${before_n - inst.points.length} 个转发点`,
                     );
+                }
+            }
+            // §3.2.1.6 delete 分支 1：点组手术清空的专属转发实例 → 整实例移除，
+            // 不得残留空转发实例（2026-10-02 B1 链步48 实测：摘除 3号后空实例残留）
+            const non_empty = reader_instances.filter(
+                (inst) => Array.isArray(inst.points) && inst.points.length > 0,
+            );
+            if (non_empty.length !== reader_instances.length) {
+                (config as Record<string, unknown>)[st] = non_empty;
+                if (non_empty.length === 0) {
+                    update_shm_classification(st, "delete", config, registry, warnings);
                 }
             }
         }

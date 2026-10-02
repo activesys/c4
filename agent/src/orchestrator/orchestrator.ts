@@ -1925,6 +1925,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
     function find_reader_for_writer(
         current: Record<string, unknown>,
         writerId: string,
+        devicePrefix = "",
     ): { id: string; service_type: string; maxAddr: number } | null {
         let best: {
             id: string;
@@ -1941,9 +1942,19 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 for (const p of (inst["points"] ?? []) as Array<Record<string, unknown>>) {
                     const k = String(p["key"] ?? "");
                     const dot = k.indexOf(".");
-                    if (dot > 0 && k.slice(0, dot) === writerId) hits++;
-                    const a = Number(p["addr"]);
-                    if (!Number.isNaN(a)) addrs.push(a);
+                    if (dot > 0 && k.slice(0, dot) === writerId) {
+                        // 共享宿主按设备前缀归属 reader（channel1.wt3_* → wt3 设备）：
+                        // 仅按 writer 实例 id 匹配会在多台并入设备的转发实例间错落
+                        //（2026-10-02 B1 链步54 实测：7010 落到 1号转发实例）
+                        if (
+                            devicePrefix === "" ||
+                            k.slice(dot + 1).startsWith(`${devicePrefix}_`)
+                        ) {
+                            hits++;
+                            const a = Number(p["addr"]);
+                            if (!Number.isNaN(a)) addrs.push(a);
+                        }
+                    }
                 }
                 if (hits > 0 && (!best || hits > best.hits)) {
                     best = {
@@ -2939,7 +2950,12 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                     addr: p["addr"],
                 }));
             devices.push({
-                id: entry.host,
+                // id = 设备唯一身份（注册表前缀——同名设备经前缀顺延保证唯一）；
+                // host = 宿主实例 id。二者不可混用：并入形态多台设备同宿主，
+                // 以 host 作 id 会让 devices.find 永远命中第一条（2026-10-02
+                // B1 链步54 实测：给3号加点错落到1号、wt1_ 前缀）
+                id: entry.prefix,
+                host: entry.host,
                 name: entry.name,
                 prefix: entry.prefix,
                 service_type: hit.st,
@@ -3264,9 +3280,10 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 const bs = String(bd["service_type"]);
                 const bp = String(bd["prefix"] ?? "");
                 const bn = String(bd["name"] ?? bid);
+                const bHost = String(bd["host"]);
                 // 独占/共用判定与单台删除同源（§3.2.1.3a）：共用实例做前缀点组手术，
                 // 独占（删除后宿主无条目）整实例删除，reader 侧成对清理由 merge 级联完成
-                const hostEntries = reg.entries.filter((e) => e.host === bid);
+                const hostEntries = reg.entries.filter((e) => e.host === bHost);
                 if (bp !== "" && hostEntries.length > 1) {
                     const delPts = ((bd["points"] ?? []) as Array<Record<string, unknown>>).map(
                         (p) => ({ id: String(p["id"]) }),
@@ -3274,7 +3291,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                     batchChanges.push({
                         action: "delete",
                         service_type: bs,
-                        instance: { id: bid },
+                        instance: { id: bHost },
                         points: delPts,
                     });
                     batchLines.push(
@@ -3284,7 +3301,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                     batchChanges.push({
                         action: "delete",
                         service_type: bs,
-                        instance: { id: bid },
+                        instance: { id: bHost },
                     });
                     batchLines.push(
                         `· 删除设备「${bn}」${bp !== "" ? `（${bp}_ 前缀）` : ""}及其全部数据点（关联转发配置一并清理）`,
@@ -3336,6 +3353,9 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
         const svcType = String(dev["service_type"]);
         const devPrefix = String(dev["prefix"] ?? "");
         const devDisplayName = String(dev["name"] ?? targetId);
+        // targetId = 设备身份（注册表前缀）；config 实例操作一律用宿主实例 id
+        //（并入形态下二者不同，2026-10-02 B1 链步54 错宿主缺陷）
+        const hostId = String(dev["host"]);
         const changes: Array<Record<string, unknown>> = [];
         let detail: string;
         const regDeletes: string[] = [];
@@ -3344,7 +3364,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             // 独占/共用判定（§3.2.1.3a）＝宿主上注册表条目数：删除后归零 → 空实例移除
             //（独占形态设备即实例整体，整实例删除）；条目数 ≥1 → 实例保留，
             //「删除设备」= 前缀点组手术（action=delete + points[] 逐点列出待删 key）
-            const hostEntries = reg.entries.filter((e) => e.host === targetId);
+            const hostEntries = reg.entries.filter((e) => e.host === hostId);
             if (devPrefix !== "" && hostEntries.length > 1) {
                 const delPts = ((dev["points"] ?? []) as Array<Record<string, unknown>>).map(
                     (p) => ({ id: String(p["id"]) }),
@@ -3358,7 +3378,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 changes.push({
                     action: "delete",
                     service_type: svcType,
-                    instance: { id: targetId },
+                    instance: { id: hostId },
                     points: delPts,
                 });
                 detail =
@@ -3372,7 +3392,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 changes.push({
                     action: "delete",
                     service_type: svcType,
-                    instance: { id: targetId },
+                    instance: { id: hostId },
                 });
                 detail = `删除设备「${devDisplayName}」及其全部数据点（关联转发配置一并清理）`;
             }
@@ -3398,7 +3418,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             changes.push({
                 action: "delete",
                 service_type: svcType,
-                instance: { id: targetId },
+                instance: { id: hostId },
                 points: delIds.map((id) => ({ id })),
             });
             if (devPrefix !== "") {
@@ -3411,7 +3431,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
         } else if (action === "modify") {
             const fields = (r["instance_fields"] ?? {}) as Record<string, unknown>;
             const pu = (r["point_updates"] ?? []) as Array<Record<string, unknown>>;
-            const inst: Record<string, unknown> = { id: targetId, ...fields };
+            const inst: Record<string, unknown> = { id: hostId, ...fields };
             const ch: Record<string, unknown> = {
                 action: "modify",
                 service_type: svcType,
@@ -3635,8 +3655,13 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             }
         }
         // ⑤ 新增采集点必须同时转发（func_test_case 用例 16/20 裁定）：缺转发地址
-        // → 询问（不静默顺延）；给出 → reader 侧成对追加（key = writer 实例 id.点 id）
-        const reader = find_reader_for_writer(current, targetId);
+        // → 询问（不静默顺延）；给出 → reader 侧成对追加（key = writer 实例 id.点 id）。
+        // 共享宿主按设备前缀归属 reader——否则成对转发会落到别的并入设备实例
+        const reader = find_reader_for_writer(
+            current,
+            String(dev["host"]),
+            String(dev["prefix"] ?? ""),
+        );
         if (reader) {
             const missingForward = ap.filter(
                 (p) => p["forward_addr"] === undefined || p["forward_addr"] === null,
@@ -3697,7 +3722,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             {
                 action: "modify",
                 service_type: svcType,
-                instance: { id: targetId },
+                instance: { id: String(dev["host"]) },
                 points: ap as ServiceStep["points"],
             },
         ];
@@ -3707,7 +3732,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             )
             .join("、")}`;
         const fwdPts = ap.map((p) => ({
-            key: `${targetId}.${String(p["id"])}`,
+            key: `${String(dev["host"])}.${String(p["id"])}`,
             addr: Number(p["forward_addr"]),
             shm_id: 0,
         }));
@@ -3760,7 +3785,8 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             const instId = String(inst["id"] ?? "");
             // service_type 以实例真实归属为准（LLM 记忆缺失时的猜测不采信）
             let svc = String(c["service_type"] ?? "");
-            const hitDev = devices.find((d) => String(d["id"]) === instId);
+            // 内嵌载荷的 instance.id 是宿主实例 id——按 host 匹配虚拟设备视图
+            const hitDev = devices.find((d) => String(d["host"]) === instId);
             if (instId && hitDev) svc = String(hitDev["service_type"]);
             else if (instId) {
                 for (const [st, list] of Object.entries(current)) {
