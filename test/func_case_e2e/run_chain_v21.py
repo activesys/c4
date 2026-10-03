@@ -232,13 +232,18 @@ def data_smoke(fwd_proc, recv_port, begin, end):
     raise rc.Fail(f"数据面断链：注入 {begin}~{end} 后 →{recv_port} 转发端 {20}s 无数据")
 
 
-# ── 驱动流（一次性应答 + 按钮确认 + 完成谓词/实例数变化即停）────
-def flow(conv, message, answers=(), done=None, max_turns=12):
+# ── 驱动流（一次性应答 + 按钮确认 + 完成谓词/实例数变化/失败信号即停）────
+def flow(conv, message, answers=(), done=None, max_turns=12, stop_on=()):
     def icount(cfg):
         if not isinstance(cfg, dict):
             return 0
         return sum(len(v) for k, v in cfg.items()
                    if isinstance(v, list) and k != "c4_shm_manager")
+    # 预期失败信号（如「已恢复原样」回滚汇报）：命中即交还调用方断言后续状态。
+    # 失败回滚到空态时实例数回到初值，「实例数变化」早退对此路径天然失效，
+    # 且失败文案含「方案已保留…确认」会误触自动点击——必须先于点击检查
+    def hit_stop(t):
+        return any(re.search(p, t) for p in stop_on)
     n0 = icount(rc.read_config())
     consumed = [False] * len(answers)
     text = conv.send(message)
@@ -248,11 +253,15 @@ def flow(conv, message, answers=(), done=None, max_turns=12):
             return text, clicked
         if icount(rc.read_config()) != n0:
             return text, clicked          # 执行落地（实例数变化）
+        if hit_stop(text):
+            return text, clicked          # 预期失败汇报
         if clicked < 2 and ("是否确认" in text or "确认执行" in text or "确认后我将" in text
                             or ("方案" in text and "确认" in text)
                             or ("方案" in text and "是否" in text)):
             text = conv.send("[C4_BUTTON_CONFIRM] 确认")
             clicked += 1
+            if hit_stop(text):
+                return text, clicked      # 失败汇报先于 wait_idle，避免 90s 空等
             rc.wait_idle()
             continue
         hit = False

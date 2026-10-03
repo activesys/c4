@@ -1317,13 +1317,22 @@ export async function rollback_config_change(
 ): Promise<{ restored: boolean; result: StopStartResult }> {
     const restored = await restore_prev1(configPath);
 
-    // 以恢复后的（或保留现状的）config.json 为准重建客户端清单
     let systemConfig: SystemConfig;
-    try {
+    if (restored) {
+        // 以恢复后的 config.json 为准重建客户端清单
         const raw = await fs.readFile(configPath, "utf-8");
         systemConfig = JSON.parse(raw) as SystemConfig;
-    } catch {
+    } else {
+        // 无 .prev（首次接入）在线执行失败 → 原样 = 空：坏配置滞留比失败更危险
+        //（§2.10 一律回滚；func_test_case 用例 51①「config.json 无新实例」）——
+        // 写空壳并以空配置为准重建（stop 已启动实例、start 空），「已恢复原样」
+        // 的汇报才与实际状态一致。崩溃重启的无 .prev 分支不受影响（架构 §3.1.2
+        // 保守保留 + 报告未知，走启动恢复路径、不经本函数）
         systemConfig = { c4_shm_manager: { writer: [], reader: [] } };
+        await atomic_write_raw(
+            configPath,
+            JSON.stringify(systemConfig, null, 4) + "\n",
+        );
     }
 
     const shmClient = new_shm_client(manager, instanceId, configPath);

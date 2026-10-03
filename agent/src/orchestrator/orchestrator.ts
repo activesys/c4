@@ -1108,7 +1108,20 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
         }
         if (!fwdIntentHit && !FORWARD_OFF_RE.test(semantic) && fwdIntentLlm) {
             const v = await fwdIntentLlm;
-            fwdIntentHit = v !== null && (v["intent"] === true || v["intent"] === "true");
+            let llmHit = v !== null && (v["intent"] === true || v["intent"] === "true");
+            // 非转发缺口的应答语境（2026-10-03 用例 47A 实测）：待答「设备叫什么」时
+            // 用户答「2」被保守提示词误判 intent=true → 置 forwardIntent 并烧掉
+            // progress → pendingGap 应答绑定失效、设备缺口死循环。此语境（pendingGap
+            // 为非 fwd.* 缺口且消息不含转发关键词）下 LLM 的肯定判定不采信——
+            // 真正的转发意图表述必然含关键词（快路已覆盖），此处只拦误判
+            if (
+                state.pendingGap !== null &&
+                !String(state.pendingGap).startsWith("fwd.") &&
+                !FORWARD_ON_RE.test(semantic)
+            ) {
+                llmHit = false;
+            }
+            fwdIntentHit = llmHit;
         }
         if (!state.forwardIntent && fwdIntentHit && !FORWARD_OFF_RE.test(semantic)) {
             state.forwardIntent = true;
@@ -1214,7 +1227,9 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             // (?!IP|ip|地址|端口)：「设备IP是x.x.x.x」的宾语是连接参数不是设备名
             //（2026-10-02 modbus 链步30 实测，设备名曾成「IP是192.168.110.51」）
             const dm = semantic.match(
-                /(?:设备名称|设备)[:：]?\s*(?!信息|IP|ip|地址|端口)([^\s，。,]{2,24})/,
+                // 系动词「叫/名为/名称为」随引导词一并消耗（2026-10-03 用例 47D 实测：
+                // 「设备名叫 power_forecast_1」曾把「名叫」捕获为设备名）
+                /(?:设备名称|设备)(?:名字叫|名称为|名为|叫)?[:：]?\s*(?!信息|IP|ip|地址|端口|叫|名)([^\s，。,]{2,24})/,
             );
             const dm2 = dm && !stop.has(dm[1].slice(0, 2)) ? dm[1] : null;
             const hm = semantic.match(/接入(?:另一个设备|华能)?[：:]?\s*([^\s，。,]*\d+#\S+)/);
@@ -1224,8 +1239,17 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             const acc =
                 semantic.match(/接入([^\s，。，:：]{2,24}?)的数据/) ??
                 semantic.match(/接入([^\s，。，:：]{2,24}?)，/);
+            // 纯类型词不是设备名（func_test_case 用例 47①：不得以类型词蒙混、不得编造
+            // 默认名）——「接入风机的数据」的「风机」无编号/名称信息，交 recv.device
+            // 缺口向用户追问（宁可放过不可错绑）。**升压站除外**：单台无编号设备按
+            // 设计以类型词指称即合法设备名（§3.2.1.3c 前缀派生 syz，47 追问示例同）
+            const TYPE_ONLY_RE =
+                /^(?:风机|风电机组|主变|变压器|逆变器|测风塔|机组|光伏|储能|数据源|设备)$/;
             const accName =
-                acc && !/^(?:另一个设备|华能)/.test(acc[1]) && !/^\d+#/.test(acc[1])
+                acc &&
+                !/^(?:另一个设备|华能)/.test(acc[1]) &&
+                !/^\d+#/.test(acc[1]) &&
+                !TYPE_ONLY_RE.test(acc[1])
                     ? acc[1]
                     : null;
             // 常见编号表述（func_test_case 用例 1 形态）：「1号风机」「1#风机」

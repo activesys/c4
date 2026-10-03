@@ -439,8 +439,14 @@ stop_start 失败**一律回滚**——起不来的配置即坏配置，滞留�
 滞留）。回滚细则：
 
 - `restore_prev1` 执行前校验 `config.json.prev.1`（.prev 链，transaction 层）存在且可解析；
-  缺失/不可解析时降级：保留当前 config.json + **保留 pending_change.json 标记**（交由 L0
-  重启收敛）+ 向用户报告「配置状态需人工核验」；
+  **有 .prev 而不可解析**时降级：保留当前 config.json + **保留 pending_change.json 标记**
+  （交由 L0 重启收敛）+ 向用户报告「配置状态需人工核验」；
+- **首次接入（config.json 原不存在、无 .prev）在线执行失败 → 回滚到空态**：写空壳
+  config.json（`c4_shm_manager` writer/reader 空数组）并以空配置为准执行完整 Stop-Start
+  （stop 已启动实例、start 空）——「坏配置滞留比失败更危险」，失败的合并不滞留、
+  「已恢复原样」的汇报与实际状态一致（func_test_case 用例 51①「config.json 无新实例」，
+  2026-10-03 补裁定；崩溃重启的无 .prev 分支不受影响——该场景无执行上下文，保守保留 +
+  如实报告「结果未知」，见架构文档 §3.1.2）；
 - 回滚自身的 Stop-Start 失败 → 报告「已恢复变更前配置，但服务未完全恢复，需人工核验」+
   保留/重建事务标记。
 - **注册表不在回滚范围内**：设备身份注册表（abbr_registry.json）的固化挂在 merge +
