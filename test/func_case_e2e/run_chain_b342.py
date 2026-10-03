@@ -109,7 +109,7 @@ def s49():
     # ① 同名命中 → 描述仲裁 → 必有区分追问（不得静默复用 wt1、不得静默新建）
     dialog = "".join(base._assistant_texts())
     if not re.search(r"同名|已有一台|区分|另一台|重新说明", dialog):
-        raise rc.Fail(f"49①: 无同名消歧追问: {text[:200]}")
+        raise rc.Fail(f"49①: 无同名消歧追问: {text}")
     text, _ = base.flow(conv, MSG49B,
                         done=lambda: rc.writer_of(rc.read_config(), 1400) is not None,
                         max_turns=8)
@@ -148,9 +148,9 @@ def s24():
     if json.dumps(before, sort_keys=True) != json.dumps(after, sort_keys=True):
         raise rc.Fail("24①: 冲突请求写入了 config")
     if re.search(r"是否确认|确认执行", text):
-        raise rc.Fail(f"24①: 冲突请求进入可确认方案（应方案期拒绝）: {text[:200]}")
+        raise rc.Fail(f"24①: 冲突请求进入可确认方案（应方案期拒绝）: {text}")
     if not re.search(r"冲突|重叠|已被占用|重复|无法|请更换|调整", text):
-        raise rc.Fail(f"24①: 无可读冲突信号: {text[:200]}")
+        raise rc.Fail(f"24①: 无可读冲突信号: {text}")
     base.assert_no_handle_leak("24①")
     # ② 改 7100~7109 → 并入宿主 + 新转发实例 →9900
     fwd = rc.start_receiver(P_FWD1)

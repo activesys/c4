@@ -408,8 +408,8 @@ class Conv:
         PH.user(message)
         self.history.append({"role": "user", "content": message})
         text, events = chat(message, self.history[:-1], self.conversation_id)
-        log(f"  >> {message[:60]}...")
-        log(f"  << {text[:280]}...")
+        log(f"  >> {message}")
+        log(f"  << {text}")
         tools = {name for (t, name) in events if t == "tool_call"}
         PH.assistant(text, tools)
         for (t, _name) in events:

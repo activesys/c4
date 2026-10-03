@@ -22,20 +22,35 @@ const CONN_FIELD_LABELS: Record<string, string> = {
     ip: "IP 地址",
     port: "端口",
     uid: "从站号(uid)",
+    url: "写入地址(url)",
+    token: "token 令牌",
+    org: "组织(org)",
+    bucket: "bucket 名",
 };
 
 const CONN_FIELD_EXAMPLES: Record<string, string> = {
     ip: "192.168.1.5",
     port: "9001",
     uid: "1",
+    url: "http://127.0.0.1:8086",
+    token: "your-token",
+    org: "my-org",
+    bucket: "my-bucket",
 };
 
 /** 提问文本中的字段展示名：已知字段用短标签，未知字段回退 schema 描述截断/原名 */
 function field_label(name: string, description?: string): string {
     if (CONN_FIELD_LABELS[name]) return CONN_FIELD_LABELS[name];
     if (description) {
-        // 描述常带"必填：必须由用户显式指定…"等元指令，截取首个分隔符前的主体
-        return description.split(/[，,；;：:]/)[0];
+        // 描述常带"必填：必须由用户显式指定…"等元指令，截取首个分隔符前的主体；
+        // 截断残段防御：截断点落在括号内会留下孤立「（」（如「bucket 名（必填」）
+        // ——去掉残括号及其后（2026-10-03 用例 39 实测）
+        const head = description.split(/[，,；;：:]/)[0];
+        const open = head.indexOf("（");
+        if (open >= 0 && !head.includes("）")) {
+            return head.slice(0, open);
+        }
+        return head;
     }
     return name;
 }

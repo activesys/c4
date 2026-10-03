@@ -288,11 +288,11 @@ def s32():
     if json.dumps(before, sort_keys=True) != json.dumps(after, sort_keys=True):
         raise rc.Fail("32: 冲突请求写入了 config")
     if re.search(r"是否确认|确认执行", text):
-        raise rc.Fail(f"32: 冲突请求进入可确认方案: {text[:150]}")
+        raise rc.Fail(f"32: 冲突请求进入可确认方案: {text}")
     if not re.search(r"3210", text):
-        raise rc.Fail(f"32: 未逐项指出重复地址 3210: {text[:200]}")
+        raise rc.Fail(f"32: 未逐项指出重复地址 3210: {text}")
     if not re.search(r"功能码|非法", text):
-        raise rc.Fail(f"32: 未指出功能码非法: {text[:200]}")
+        raise rc.Fail(f"32: 未指出功能码非法: {text}")
     base.assert_no_handle_leak("32")
 
 
@@ -353,9 +353,9 @@ def s36():
     if json.dumps(before, sort_keys=True) != json.dumps(after, sort_keys=True):
         raise rc.Fail("36: 冲突请求写入了 config")
     if re.search(r"是否确认|确认执行", text):
-        raise rc.Fail(f"36: 冲突请求进入可确认方案: {text[:150]}")
+        raise rc.Fail(f"36: 冲突请求进入可确认方案: {text}")
     if not re.search(r"16385|重复", text):
-        raise rc.Fail(f"36: 未指出 IOA 重复: {text[:200]}")
+        raise rc.Fail(f"36: 未指出 IOA 重复: {text}")
     base.assert_no_handle_leak("36")
 
 

@@ -266,7 +266,7 @@ def flow(conv, message, answers=(), done=None, max_turns=12):
             continue
         time.sleep(10)
         text = conv.send("继续")
-    raise rc.Fail(f"flow 超过 {max_turns} 轮未收敛，尾回复: {text[:200]}")
+    raise rc.Fail(f"flow 超过 {max_turns} 轮未收敛，尾回复: {text}")
 
 
 # ── 链步实现 ───────────────────────────────────────────────
@@ -319,7 +319,7 @@ def s_borrow26(tag):
                          done=lambda: not [k for k in rc.server_instances(rc.read_config())
                                            if k[0] in ("c4_asfp2_server", "c4_asfp2_client")])
     if clicked == 0 and not re.search(r"删除|确认", text):
-        raise rc.Fail(f"删除流程未进入: {text[:150]}")
+        raise rc.Fail(f"删除流程未进入: {text}")
     rc.wait_config(lambda c: not [k for k in rc.server_instances(c)
                                   if k[0] in ("c4_asfp2_server", "c4_asfp2_client")],
                    timeout=180, desc=f"{tag}: 全部实例清空")
@@ -357,7 +357,7 @@ def s3():
     if json.dumps(before, sort_keys=True) != json.dumps(after, sort_keys=True):
         raise rc.Fail("3: 异场站消息改变了 config")
     if not re.search(r"不属于当前场站", text):
-        raise rc.Fail(f"3: 未回复「不属于当前场站」: {text[:150]}")
+        raise rc.Fail(f"3: 未回复「不属于当前场站」: {text}")
 
 
 def s1():
@@ -386,7 +386,7 @@ def s20_16():
     conv = rc.Conv()
     text = conv.send(MSG20)
     if not re.search(r"转发|5010", text):
-        raise rc.Fail(f"20: 未询问转发地址即推进: {text[:150]}")
+        raise rc.Fail(f"20: 未询问转发地址即推进: {text}")
     before = rc.snapshot_w1(rc.read_config())
     text, _ = flow(conv, "转发地址5010",
                    done=lambda: rc.writer_of(rc.read_config(), 2010) is not None)
@@ -448,13 +448,13 @@ def s18():
     time.sleep(5)
     after = rc.read_config()
     if json.dumps(before, sort_keys=True) != json.dumps(after, sort_keys=True):
-        raise rc.Fail(f"18: 冲突请求写入了 config（回复: {text[:150]}）")
+        raise rc.Fail(f"18: 冲突请求写入了 config（回复: {text}）")
     if re.search(r"是否确认|确认执行", text):
-        raise rc.Fail(f"18: 冲突请求进入了可确认方案（应方案期拒绝）: {text[:150]}")
+        raise rc.Fail(f"18: 冲突请求进入了可确认方案（应方案期拒绝）: {text}")
     if not rc.listening(P_RECV1):
         raise rc.Fail("18: 19001 监听丢失（服务被重启）")
     if not re.search(r"已被占用|重复|重名|冲突|已存在|无法|不能|拒绝", text):
-        raise rc.Fail(f"18: 无可读拒绝信号: {text[:200]}")
+        raise rc.Fail(f"18: 无可读拒绝信号: {text}")
 
 
 def s19():
@@ -466,9 +466,9 @@ def s19():
     if json.dumps(before, sort_keys=True) != json.dumps(rc.read_config(), sort_keys=True):
         raise rc.Fail("19: config 被修改")
     if re.search(r"是否确认|确认执行", text):
-        raise rc.Fail(f"19: 不存在的点进入了可确认方案: {text[:150]}")
+        raise rc.Fail(f"19: 不存在的点进入了可确认方案: {text}")
     if not re.search(r"不存在|失败|没有", text):
-        raise rc.Fail(f"19: 未指明点不存在: {text[:150]}")
+        raise rc.Fail(f"19: 未指明点不存在: {text}")
 
 
 def s21():
@@ -522,7 +522,7 @@ def s27():
     if json.dumps(reg_before, sort_keys=True) != json.dumps(registry(), sort_keys=True):
         raise rc.Fail("27: 注册表被修改")
     if not re.search(r"不存在|未接入|从未|没有", text):
-        raise rc.Fail(f"27: 未指明设备不存在: {text[:150]}")
+        raise rc.Fail(f"27: 未指明设备不存在: {text}")
 
 
 def s25():
@@ -584,9 +584,9 @@ def s28():
     conv = rc.Conv()
     text = conv.send(MSG28)
     if not re.search(r"1号|1#", text):
-        raise rc.Fail(f"28: 未列受影响设备清单: {text[:200]}")
+        raise rc.Fail(f"28: 未列受影响设备清单: {text}")
     if not re.search(r"确认", text):
-        raise rc.Fail(f"28: 列清单后未索要确认: {text[:200]}")
+        raise rc.Fail(f"28: 列清单后未索要确认: {text}")
     conv.send("[C4_BUTTON_CONFIRM] 确认")
     rc.wait_idle()
     rc.wait_config(lambda c: not [k for k in rc.server_instances(c)

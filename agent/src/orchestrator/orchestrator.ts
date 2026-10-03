@@ -272,7 +272,7 @@ function same_points_deep(
 
 // 修改/删除意图（针对已接入设备）
 const CHANGE_INTENT_RE =
-    /不再采集|停用|删除|移除|删了|删掉|去掉|改为|改成|修改|调整|更新|增加.{0,8}点|追加.{0,8}点|添加.{0,8}点|加点|新增点/;
+    /不再采集|停用|删除|移除|删了|删掉|去掉|改为|改成|修改|调整|更新|增加.{0,8}点|追加.{0,8}点|添加.{0,8}点|加点|新增点|再加|再添|再写|同步写|多写一份|再映射/;
 
 // point_prompt 9a 条按侧别注入（2026-09-27 用例4 线上事故：receive 侧 prompt 携带
 // forward 侧禁抄规则时，消息中的「点表与I区一致」触发词把提取带偏为空数组——
@@ -287,6 +287,10 @@ const FORWARD_SIDE_RULES =
     "未经用户给出的数字）复制为转发 addr，此时 points 返回空数组 []，reason 注明" +
     "「用户未提供转发地址，需向用户询问」（上游会以缺口追问；等价描述由上游在缺口" +
     "应答层受理，走方案层与采集一致的确定性推导）。" +
+    "influxdb 侧：field/measurement/type 仅当用户明确给出时提取（如「写进wind_turbine" +
+    "这个measurement」「字段名跟点名对应（windspeed、power…）」「类型统一float」——" +
+    "「跟点名对应」= field 取该点英文名/翻译）；用户未给出映射规则时 points 返回空数组 []" +
+    "（上游推导 measurement/type、向用户追问 field），禁止编造 field 名。" +
     "例外——输入含 <file_data> 时：该文件是用户针对转发点表的显式提供（用户在被询问" +
     "转发点表时上传），文件中的地址列即用户给出的转发地址，逐行提取为各点的 addr" +
     "（点名/名称列忽略，转发点无点名），此情形不算借用采集地址。";
@@ -1456,13 +1460,18 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 }
             } else if (!state.fwd.points) {
                 if (state.fwd.protocol === "influxdb") {
-                    // §2.7.1 确定性推导：influxdb 点字段（measurement/field/type）全部可由
-                    // 源点/场站/用户表名映射，无需 LLM 提取——此处仅落 addr 骨架，
-                    // 方案层装配时填充推导字段
-                    state.fwd.points = (state.recv.points ?? []).map((p) => ({
-                        addr: p["addr"],
-                    }));
-                    progress = true;
+                    // 用户显式点表描述优先提取（2026-10-02 用例 38 实测）：「字段名跟
+                    // 点名对应（windspeed…）」是用户提供而非推导——确定性骨架先行会
+                    // 吞掉首轮语义（field 按裁定不推导，缺口又无法从历史文本闭合，
+                    // 死循环）；提取为空（用户真未给映射）→ 回落 §2.7.1 确定性推导
+                    // 骨架（measurement/type 由方案层源点映射填充）
+                    await extract_fwd_points(fwdScopedNow);
+                    if (!state.fwd.points) {
+                        state.fwd.points = (state.recv.points ?? []).map((p) => ({
+                            addr: p["addr"],
+                        }));
+                        progress = true;
+                    }
                 } else {
                     // 文件数据通道（2026-09-29 用例11 缺陷C）：文本无显式范围时注入
                     // <file_data>——被问「转发点表」时上传点表文件是常见应答。仅限本回合
@@ -1482,9 +1491,17 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
 
         // 阶段7 转发连接：ip:port 确定性捕获只依赖转发意图（协议未明也要保住去向信息，
         // 用例 4 轮次4「转发地址127.0.0.1:9900」曾因协议未明被整段跳过而丢失）；
-        // connection_prompt 提取需注入协议，仍在协议已明时进行
+        // connection_prompt 提取需注入协议，仍在协议已明时进行。发起条件按 schema
+        // required 字段驱动（2026-10-02 用例 39 实测）：influxdb 的必要项是
+        // url/token/org/bucket 而非 ip/port——写死 ip/port 判空会对 influxdb 恒真、
+        // 每轮空转 LLM 并置 progress，把 conn 键值应答绑定（⑥.6）活活跳过
         if (state.forwardIntent) {
-            if (state.fwd.conn["ip"] === undefined || state.fwd.conn["port"] === undefined) {
+            const fwdRequired = required_config_fields(state.fwd, "reader");
+            const fwdConnMissing = fwdRequired.some((k) => {
+                const v = state.fwd.conn[k];
+                return v === undefined || v === null || v === "";
+            });
+            if (fwdConnMissing) {
                 // catch-up：当前消息无 ip:port 时，扫累积文本中的转发关键词句子
                 //（2026-09-27 用例6：目标地址在协议之前的消息里给出）
                 const m =
@@ -1530,11 +1547,23 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                         conversation,
                     );
                     if (r && typeof r["connection"] === "object" && r["connection"] !== null) {
-                        Object.assign(
-                            state.fwd.conn,
+                        // 仅新增字段算进展（2026-10-02 用例 39 实测）：重复提取到已有
+                        // 字段（url/token/org）时置 progress 会把「连续追问」计数清零、
+                        // 缺失字段（bucket）的收摊永不触发
+                        let gotNew = false;
+                        for (const [k, v] of Object.entries(
                             r["connection"] as Record<string, unknown>,
-                        );
-                        progress = true;
+                        )) {
+                            if (
+                                state.fwd.conn[k] === undefined &&
+                                v !== undefined &&
+                                v !== ""
+                            ) {
+                                state.fwd.conn[k] = v;
+                                gotNew = true;
+                            }
+                        }
+                        if (gotNew) progress = true;
                     }
                 }
             }
@@ -1616,6 +1645,18 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
         const mk = (key: string, text: string): Gap => ({ key, text, ask: ask_of(key, text) });
         const gaps: Gap[] = [];
         const recap: string[] = [];
+        // 点标签协议感知（2026-10-02 用例 38 实测）：influxdb 点无 addr（形态为
+        // field/measurement/type），写死 `${name}(${addr})` 会渲染成 undefined——
+        // 有 addr 按地址形态，无 addr 按 measurement:field 形态展示
+        //（如 wind_turbine:windspeed，2026-10-03 用户裁定）
+        const pt_label = (p: Record<string, unknown>): string => {
+            if (p["addr"] !== undefined) {
+                return `${String(p["name"] || `地址${p["addr"]}`)}(${String(p["addr"])})`;
+            }
+            const f = String(p["field"] ?? p["id"] ?? "?");
+            const m = String(p["measurement"] ?? "");
+            return m !== "" ? `${m}:${f}` : f;
+        };
         if (!side.protocol) {
             gaps.push(
                 mk(
@@ -1630,7 +1671,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 recap.push(
                     `${label}点表 ${side.points.length} 个点：${side.points
                         .slice(0, 5)
-                        .map((p) => `${String(p["name"] || `地址${p["addr"]}`)}(${String(p["addr"])})`)
+                        .map(pt_label)
                         .join("、")}${side.points.length > 5 ? "等" : ""}`,
                 );
             }
@@ -1698,7 +1739,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
         recap.push(
             `${label}点表 ${side.points.length} 个点：${side.points
                 .slice(0, 5)
-                .map((p) => `${String(p["name"] || `地址${p["addr"]}`)}(${String(p["addr"])})`)
+                .map(pt_label)
                 .join("、")}${side.points.length > 5 ? "等" : ""}`,
         );
         return { gaps, recap };
@@ -2535,8 +2576,14 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 const fp = pts[i];
                 const sp = (writerPoints[i] ?? {}) as Record<string, unknown>;
                 const derived = fp["_derived"] ? "（自动推导）" : "";
+                // 转发点标签协议感知：influxdb 点无 addr，按 measurement:field 展示
+                //（如 wind_turbine:windspeed，2026-10-03 用户裁定）；其余协议按地址
+                const fwdLabel =
+                    fp["addr"] !== undefined
+                        ? String(fp["addr"])
+                        : `${String(fp["measurement"] ?? "")}:${String(fp["field"] ?? "?")}`;
                 lines.push(
-                    `      · 采集 ${String(sp["addr"] ?? "?")}（${String(sp["name"] ?? "") || "（未命名）"}，${String(sp["id"] ?? "")}） → 转发 ${String(fp["addr"])}${derived}`,
+                    `      · 采集 ${String(sp["addr"] ?? "?")}（${String(sp["name"] ?? "") || "（未命名）"}，${String(sp["id"] ?? "")}） → 转发 ${fwdLabel}${derived}`,
                 );
             }
         }
@@ -3138,6 +3185,24 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 };
             }
             return null;
+        }
+
+        // 入库再映射拦截（func_test_case 用例 41，C4_FUN_00090 同 Writer key 双映射）：
+        // 「给X的入库再加一条/同步写一份到Y measurement」= 同一采集点在入库实例内的
+        // 第二份映射——同实例 shm_id 重复（start 校验 INVALID_POINT）。方案期可读
+        // 拒绝并引导独立入库实例（多路下游共用同一采集点 key 是设计支持的形态）
+        if (
+            /(?:入库|入库实例).{0,14}再加|同步写一份到|再写一份到|再写一份进|再映射/.test(
+                semantic,
+            )
+        ) {
+            return {
+                steps: [],
+                display:
+                    "同一采集点的数据在当前入库实例内已有一份映射，无法在同一实例内再次映射" +
+                    "（同一入库数据点会被重复引用，数据点配置无效）。确需把数据同时写入多个" +
+                    "measurement，请作为独立入库实例另行接入（指向同一批采集点即可）。",
+            };
         }
 
         const embedded = extract_embedded_json(semantic);
@@ -4554,6 +4619,35 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                         }
                     }
                 } else {
+                    // 文字键值应答绑定（conn 类缺口，2026-10-02 用例 39 实测）：
+                    // influxdb 的 url/token/org/bucket 追问后用户按「bucket是hnals」
+                    // 形态应答——parse_bare_value 只认数字形态，文字键值无绑定通路
+                    // 则缺口永不闭合。关键词路由（宁缺勿错：仅绑定用户明确点名的键）
+                    if (state.pendingGap === "fwd.conn" || state.pendingGap === "recv.conn") {
+                        const target =
+                            state.pendingGap === "fwd.conn" ? state.fwd.conn : state.recv.conn;
+                        const kvRes: Array<[RegExp, string]> = [
+                            [/url(?:地址)?(?:是|为|[:：])\s*([^\s，。]+)/i, "url"],
+                            [/token(?:是|为|[:：])\s*([^\s，。]+)/i, "token"],
+                            [/org(?:是|为|[:：])\s*([^\s，。]+)/i, "org"],
+                            [/bucket(?:名)?(?:是|为|[:：])\s*([^\s，。]+)/i, "bucket"],
+                        ];
+                        let boundKv = 0;
+                        for (const [re, key] of kvRes) {
+                            const m = userText.match(re);
+                            if (m && target[key] === undefined) {
+                                target[key] = m[1];
+                                boundKv++;
+                            }
+                        }
+                        if (boundKv > 0) {
+                            extraction_progress = true;
+                            cfg.agentLogger.memory(conversation, "pending_bind", {
+                                gap: state.pendingGap,
+                                kv: boundKv,
+                            });
+                        }
+                    }
                     const bare = parse_bare_value(userText);
                     const bind = bare
                         ? bind_bare(
