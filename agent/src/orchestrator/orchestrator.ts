@@ -226,7 +226,7 @@ function forward_scoped_text(texts: string[]): string {
     return texts
         .join("\n")
         .split(/[。．！!？?]+/)
-        .filter((s) => /转发|入库|写入|上传|推送|发送到|目标|服务器/.test(s))
+        .filter((s) => /转发|入库|写入|上传|推送|发送到|送到|发到|送往|送至|目标|服务器/.test(s))
         .join("\n");
 }
 
@@ -1145,10 +1145,20 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
         }
         // 阶段4 接入连接 LLM 兜底（connection_prompt side=receive）：确定性正则未捕获、
         // 消息疑似含端口/地址表述时交提示词提取（长尾表述如「端口使用9001」）；
+        // ip/port 齐全但消息含 schema 其余实例级字段的声明语境（如 iec104「公共地址2」，
+        // 2026-10-02 链步37 实测——无提取通道导致用户值被 schema 默认值顶替）时同样发起。
         // 仅填充缺失字段，不覆盖确定性捕获。
+        const recvConnFields = Object.keys(
+            entry_of_side(state.recv, "writer")?.entry?.config_schema?.fields ?? {},
+        );
+        const extraConnCtx =
+            recvConnFields.filter((f) => f !== "ip" && f !== "port").length > 0 &&
+            /公共地址|装置地址|ASDU|源地址/.test(semantic);
         if (
-            (state.recv.conn["ip"] === undefined || state.recv.conn["port"] === undefined) &&
-            /端口|port|ip/i.test(semantic)
+            ((state.recv.conn["ip"] === undefined ||
+                state.recv.conn["port"] === undefined) &&
+                /端口|port|ip/i.test(semantic)) ||
+            extraConnCtx
         ) {
             const r = await llm_json(
                 "connection_prompt.txt",
@@ -1180,7 +1190,12 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             );
             if (r && typeof r["connection"] === "object" && r["connection"] !== null) {
                 const conn = r["connection"] as Record<string, unknown>;
-                for (const key of ["ip", "port"]) {
+                // 采纳白名单 = 服务 config_schema 全部字段（连接型协议的实例级字段
+                // 如 iec104 common_address 也经此落位）——LLM 只会返回 schema 内字段，
+                // 硬编码 ip/port 会把其余用户值静默丢弃（2026-10-02 链步37 实测）
+                for (const key of recvConnFields.length > 0
+                    ? recvConnFields
+                    : ["ip", "port"]) {
                     if (state.recv.conn[key] === undefined && conn[key] !== undefined) {
                         state.recv.conn[key] = conn[key];
                         progress = true;
@@ -1191,10 +1206,24 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
         if (state.recv.deviceName === null) {
             const stop = new Set(["使用", "的", "是", "叫", "不", "已", "在", "为", "与", "和"]);
             // (?!信息)：上传信封的固定话术「请解析此文件中的设备信息」会把「信息」
-            // 误提为设备名（2026-09-28 上传实测，recap 曾显示「设备：信息」）
-            const dm = semantic.match(/(?:设备名称|设备)[:：]?\s*(?!信息)([^\s，。,]{2,24})/);
+            // 误提为设备名（2026-09-28 上传实测，recap 曾显示「设备：信息」）；
+            // (?!IP|ip|地址|端口)：「设备IP是x.x.x.x」的宾语是连接参数不是设备名
+            //（2026-10-02 modbus 链步30 实测，设备名曾成「IP是192.168.110.51」）
+            const dm = semantic.match(
+                /(?:设备名称|设备)[:：]?\s*(?!信息|IP|ip|地址|端口)([^\s，。,]{2,24})/,
+            );
             const dm2 = dm && !stop.has(dm[1].slice(0, 2)) ? dm[1] : null;
             const hm = semantic.match(/接入(?:另一个设备|华能)?[：:]?\s*([^\s，。,]*\d+#\S+)/);
+            // 「接入X的数据 / 接入X，」句式（modbus/104 链路常见形态）：取「接入」与
+            //「的数据」/逗号之间的完整设备名——含类型词链（「1号风机变桨控制器」
+            //「1号主变测控装置」），不得截断为编号+类型词（前缀派生依赖全名）
+            const acc =
+                semantic.match(/接入([^\s，。，:：]{2,24}?)的数据/) ??
+                semantic.match(/接入([^\s，。，:：]{2,24}?)，/);
+            const accName =
+                acc && !/^(?:另一个设备|华能)/.test(acc[1]) && !/^\d+#/.test(acc[1])
+                    ? acc[1]
+                    : null;
             // 常见编号表述（func_test_case 用例 1 形态）：「1号风机」「1#风机」
             // 「2号升压站」——编号 + 设备类型词，无「设备名称:」前缀；中文数字
             // （「三号风机」→ 三号）同样命中（§3.2.1.3c L0，编号转换复用 zh_numeral）
@@ -1206,6 +1235,9 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 progress = true;
             } else if (hm) {
                 state.recv.deviceName = hm[1];
+                progress = true;
+            } else if (accName) {
+                state.recv.deviceName = accName;
                 progress = true;
             } else if (nm) {
                 state.recv.deviceName = nm[1].replace(/\s+/g, "");
@@ -1639,21 +1671,18 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 missing.push(`点「${String(p["name"] || p["addr"] || "?")}」缺 ${miss.join("、")}`);
             }
         }
+        // 校验类缺口聚合为单条（2026-10-02 用例 32 口径：逐项指出全部问题）——点表
+        // 校验错误是用户已给信息的错误清单，一次性列出供逐项更正；拆成多条走单缺口
+        // 顺序提问会把「重复/非法」藏到后续轮次（每轮只发 gaps[0]）
+        const problems: string[] = [];
         if (missing.length > 0) {
-            gaps.push(
-                mk(
-                    `${keyPrefix}.points.fields`,
-                    `${label}点表字段不完整：${missing.slice(0, 3).join("；")}${missing.length > 3 ? "等" : ""}`,
-                ),
+            problems.push(
+                `${label}点表字段不完整：${missing.slice(0, 3).join("；")}${missing.length > 3 ? "等" : ""}`,
             );
         }
-        // L1：数量对账 + 身份查重/重叠（point_rules 共享契约）
         if (side.declared !== null && side.declared !== side.points.length) {
-            gaps.push(
-                mk(
-                    `${keyPrefix}.points.fields`,
-                    `${label}点表数量与声明不符：声明 ${side.declared} 个，实际 ${side.points.length} 个`,
-                ),
+            problems.push(
+                `${label}点表数量与声明不符：声明 ${side.declared} 个，实际 ${side.points.length} 个`,
             );
         }
         if (svc) {
@@ -1661,7 +1690,10 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 required: missingFields,
                 label: svc,
             });
-            for (const it of issues) gaps.push(mk(`${keyPrefix}.points.fields`, `${label}点表问题：${it}`));
+            problems.push(...issues.map((it) => `${label}点表问题：${it}`));
+        }
+        if (problems.length > 0) {
+            gaps.push(mk(`${keyPrefix}.points.fields`, problems.join("\n")));
         }
         recap.push(
             `${label}点表 ${side.points.length} 个点：${side.points
@@ -4489,6 +4521,37 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                             gap: "recv.device",
                             device: dev,
                         });
+                    }
+                } else if (
+                    state.pendingGap === "recv.points.fields" &&
+                    state.recv.points !== null
+                ) {
+                    // 从站号缺口应答绑定（modbus 点级必填，2026-10-02 链步31 实测）：
+                    // 「从站号都是1」批量绑定到点表全部缺 uid 的点——点表落槽后阶段3
+                    // 不再重提取，无绑定通路则 uid 缺口永不闭合（死循环收摊）
+                    const um = userText.match(/从站号?(?:都|全)?(?:是|为|[:：])?\s*(\d{1,3})/);
+                    if (um) {
+                        const uid = Number(um[1]);
+                        let bound = 0;
+                        for (const p of state.recv.points) {
+                            const rec = p as Record<string, unknown>;
+                            if (
+                                rec["uid"] === undefined ||
+                                rec["uid"] === null ||
+                                rec["uid"] === ""
+                            ) {
+                                rec["uid"] = uid;
+                                bound++;
+                            }
+                        }
+                        if (bound > 0) {
+                            extraction_progress = true;
+                            cfg.agentLogger.memory(conversation, "pending_bind", {
+                                gap: "recv.points.fields",
+                                uid,
+                                bound,
+                            });
+                        }
                     }
                 } else {
                     const bare = parse_bare_value(userText);
