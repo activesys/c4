@@ -1110,7 +1110,10 @@ export async function execute_stop_and_start(
         failed_services: failed,
         abort_reason: success
             ? undefined
-            : `Start 阶段: ${failed.length} 个服务启动失败，${started.length} 个成功`,
+            : `Start 阶段: ${failed.length} 个服务启动失败，${started.length} 个成功` +
+              (failed.length > 0
+                  ? `：${failed.map((f) => `${f.service_type}——${f.error}`).join("；")}`
+                  : ""),
     };
 }
 

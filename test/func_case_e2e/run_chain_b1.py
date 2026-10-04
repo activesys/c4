@@ -22,6 +22,8 @@ P_RECV1, P_FWD1, P_FWD2 = rc.P_RECV1, rc.P_FWD1, rc.P_FWD2
 PASSED = []          # 命中的 func_test_case.md 用例号（用于标注 AI测试通过 C4He1）
 SETUP_ONLY = {"A.3"}  # 链首准备步，不对应独立用例
 
+WT1_ID1000 = None  # A.3 首接 wt1 addr=1000 点 id（s23 并入不变性基准，见 prep 记录处）
+
 MSG23 = ("再接入3号风机，第三方厂家通过asfp2协议转来3#风机数据，10个点，从1200到1209，"
          "分别是1200:风速、1201:功率、1202:风向、1203:桨叶角度、1204:发电机转速、"
          "1205:齿轮箱油温、1206:塔筒温度、1207:空气温度、1208:空气湿度、1209:大气压强，"
@@ -51,6 +53,10 @@ def s_prep_a3():
         raise rc.Fail(f"A.3: 句柄 {wid}/{fid} ≠ channel1/channel2（全新环境首接预期）")
     base.assert_writer_keys(cfg, "wt1", range(1000, 1010))
     base.assert_forward_key(cfg, 5000, wid, 1000)
+    # 记录首接点 id（s23 并入不变性断言基准，2026-10-04：LLM 译名 windspeed/
+    # wind_speed 均属合法 snake_case，断言钉「并入后原点不变」，不硬编码译名）
+    global WT1_ID1000
+    WT1_ID1000 = rc.points_of(cfg, "c4_asfp2_server", wid).get(1000, {}).get("id")
     reg = base.registry()
     if reg.get("channelHighWatermark") != 2:
         raise rc.Fail(f"A.3: 水位={reg.get('channelHighWatermark')} ≠ 2")
@@ -91,7 +97,7 @@ def s23():
         if wid != host1:
             raise rc.Fail(f"23: addr 1200 落在 {wid}，1号风机在 {host1}——未并入宿主实例")
         w, wid = base.assert_writer_keys(cfg, "wt3", range(1200, 1210))
-        if w.get(1000, {}).get("id") != "wt1_windspeed":
+        if w.get(1000, {}).get("id") != WT1_ID1000:
             raise rc.Fail(f"23: 宿主上 1号 wt1 点被破坏: {w.get(1000)}")
         # 转发侧：每设备一实例——3号新建独立转发实例（≠1号的），引用键 channel1.wt3_*
         fid3 = base.assert_forward_key(cfg, 7000, wid, 1200)

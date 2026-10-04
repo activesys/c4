@@ -22,6 +22,8 @@ P_RECV1, P_RECV2, P_FWD1 = rc.P_RECV1, rc.P_RECV2, rc.P_FWD1
 PASSED = []           # 命中的 func_test_case.md 用例号
 SETUP_ONLY = {"A.3"}
 
+WT1_ID1000 = None  # A.3 首接 wt1 addr=1000 点 id（s49 并入不变性基准，见 prep 记录处）
+
 MSG22 = ("再接入2号风机，第三方厂家通过asfp2协议转来2#风机数据，10个点，从1100到1109，"
          "分别是1100:风速、1101:功率、1102:风向、1103:桨叶角度、1104:发电机转速、"
          "1105:齿轮箱油温、1106:塔筒温度、1107:空气温度、1108:空气湿度、1109:大气压强，"
@@ -45,6 +47,7 @@ def asfp_count(cfg, st):
 
 def prep_a3():
     """A.3 链首准备（同 B1）：全新环境接入 1号风机 → 用例 1 完成态，水位=2。"""
+    global WT1_ID1000
     conv = rc.Conv()
     base.flow(conv, rc.MSG_CASE1, answers=[(r"场站", "华能阿拉善")])
     cfg = rc.wait_config(lambda c: rc.writer_of(c, 1000) is not None
@@ -57,6 +60,10 @@ def prep_a3():
                       "≠ channel1/channel2")
     if base.registry().get("channelHighWatermark") != 2:
         raise rc.Fail(f"A.3: 水位 ≠ 2: {base.registry().get('channelHighWatermark')}")
+    # 记录首接点 id（s49 并入不变性断言基准，2026-10-04：LLM 译名 windspeed/
+    # wind_speed 均属合法 snake_case，断言钉「并入后原点不变」，不硬编码译名）
+    WT1_ID1000 = rc.points_of(cfg, "c4_asfp2_server",
+                              rc.writer_of(cfg, 1000)).get(1000, {}).get("id")
 
 
 # ── B3：用例 22 ────────────────────────────────────────────
@@ -121,7 +128,7 @@ def s49():
     if wid != "channel1":
         raise rc.Fail(f"49②: 新设备落在 {wid} ≠ 宿主 channel1（同端口应并入）")
     base.assert_writer_keys(cfg, "wt2", range(1400, 1410))
-    if rc.points_of(cfg, "c4_asfp2_server", wid).get(1000, {}).get("id") != "wt1_windspeed":
+    if rc.points_of(cfg, "c4_asfp2_server", wid).get(1000, {}).get("id") != WT1_ID1000:
         raise rc.Fail("49②: 宿主上 1号 wt1 点被破坏")
     # 注册表以 description 区分两台同名
     e2 = base.entry("wt2", name="1号风机", host=wid)

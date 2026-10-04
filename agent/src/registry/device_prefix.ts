@@ -29,6 +29,16 @@ function device_number(name: string): string {
     return "";
 }
 
+/** 设备名 → 类型前缀（风机→wt、逆变器→nb…；未命中 null）——组模式（agent.md §2.11）
+ *  按「类型缩写 + 编号原样」拼前缀（A01逆变器 → nbA01），与 device_prefix_candidate
+ *  共用同一张类型映射表（单一事实源，2026-10-03）。 */
+export function device_type_prefix_of(name: string): string | null {
+    for (const [re, pre] of DEVICE_TYPE_PREFIX) {
+        if (re.test(name)) return pre;
+    }
+    return null;
+}
+
 /** 设备名 → 候选前缀（确定性，注册表撞名后由 resolve_prefix_conflict 顺延）。 */
 export function device_prefix_candidate(name: string): string {
     const num = device_number(name);

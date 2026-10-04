@@ -256,7 +256,8 @@ class Agent:
             "site": {"name": "华能阿拉善", "abbr": "hnals"},
             "model": {
                 "provider": "zhipu",
-                "name": "glm-5.3-flash",
+                "name": "glm-4.5-air",
+                "thinking": "disabled",
                 "base_url": "https://open.bigmodel.cn/api/paas/v4",
                 "temperature": 0,
                 "max_tokens": 4096,

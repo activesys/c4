@@ -72,6 +72,15 @@ import {
 } from "../executor/single_flight.js";
 import { parse_any_file } from "../subagents/tools/doc_parsers.js";
 import type { ServiceStep } from "../types/index.js";
+import {
+    detect_group_access,
+    group_key,
+    group_member_prefix,
+    parse_conn_answer,
+    parse_group_access,
+    type GroupMemberConn,
+    type GroupSpec,
+} from "./group_access.js";
 
 // ── 会话状态（agent.md §3.1 SessionState，单设备在途模型）────
 
@@ -119,6 +128,18 @@ interface AccessPlan {
     };
 }
 
+/** 设备组批量接入会话（agent.md §2.11，2026-10-03；func_test_case 用例 57~62）——
+ *  组模式与单设备在途模型互斥：激活时 recv/fwd 草稿已重置；执行成功/取消/按钮取消
+ *  时整体清空。全部组共用同一接入协议（§2.11 SessionState 扩展点约束）。 */
+interface GroupSessionData {
+    groups: GroupSpec[];
+    protocol: string | null;
+    /** 组转发目标（平台 writer/reader 成对约束；null=未提供） */
+    fwd: { name: string; protocol: string; ip: string; port: number } | null;
+    /** 组会话累积文本（协议/参数应答的补提取语料） */
+    userTexts: string[];
+}
+
 interface SessionState {
     site: SiteInfo | null;
     forwardIntent: boolean;
@@ -156,6 +177,8 @@ interface SessionState {
     changeAddPoints: Array<Record<string, unknown>> | null;
     /** 变更流追加草稿的目标设备 id（草稿创建时确定，应答轮复用） */
     changeTargetId: string | null;
+    /** 设备组批量接入会话（agent.md §2.11；null=未激活） */
+    group: GroupSessionData | null;
 }
 
 function fresh_state(): SessionState {
@@ -179,6 +202,7 @@ function fresh_state(): SessionState {
         pendingNewDevice: false,
         changeAddPoints: null,
         changeTargetId: null,
+        group: null,
     };
 }
 
@@ -194,8 +218,12 @@ function semanticOf(state: { userTexts: string[] }): string {
     return state.userTexts.join("\n");
 }
 
-// 转发意图：肯定表述命中且否定表述未命中（"不需要转发/仅采集"不激活转发链）
-const FORWARD_ON_RE = /转发|入库|写入|上传|推送|发送到/;
+// 转发意图：肯定表述命中且否定表述未命中（"不需要转发/仅采集"不激活转发链）。
+// 「送到/发到/送往/送至」与「发送到」同义（2026-10-04 用例 33 实测：「数据要送到
+// II区 127.0.0.1:19900」不含原词表任何词，快路漏判后 LLM 肯定判定又被无关键词
+// 防护拦截，用户明示的转发目标被沿用既有链路分支吞掉）；词表与 forward_scoped_text
+// 的转发表述口径保持一致
+const FORWARD_ON_RE = /转发|入库|写入|上传|推送|发送到|送到|发到|送往|送至/;
 const FORWARD_OFF_RE = /不需要转发|不转发|无需转发|仅采集|只采集|不用转发/;
 // 否定短语剥除后再判肯定语境：OFF 短语（「不需要转发」）本身含「转发」字样，直接用
 // FORWARD_ON_RE 判定会把拒绝误判为肯定（2026-09-29 用例11 拒绝转发应答处理）
@@ -204,6 +232,25 @@ function forward_on_without_off(text: string): boolean {
         text.replace(/不需要转发|不转发|无需转发|不用转发|仅采集|只采集/g, ""),
     );
 }
+
+// 组模式全局声明词表（2026-10-04 用例 59）：自然语言数据类型/功能码声明 → 枚举码，
+// 对齐 point_field_hints 与 executor/point_rules REGISTER_SPAN。只收无歧义表述——
+// 「16位整数」有符号/无符号歧义不入表，交 LLM 提取或 fail-closed 校验
+const GROUP_TYPE_DECLS: ReadonlyArray<readonly [RegExp, number]> = [
+    [/32\s*位(?:单精度)?浮点|单精度浮点|float32/i, 10],
+    [/64\s*位(?:双精度)?浮点|双精度浮点|float64/i, 11],
+    [/16\s*位有符号整数|int16/i, 3],
+    [/16\s*位无符号整数|uint16/i, 4],
+    [/32\s*位有符号整数|int32/i, 5],
+    [/32\s*位无符号整数|uint32/i, 6],
+    [/布尔|bool/i, 0],
+];
+const GROUP_FUN_DECLS: ReadonlyArray<readonly [RegExp, number]> = [
+    [/保持寄存器|功能码\s*3/, 3],
+    [/输入寄存器|功能码\s*4/, 4],
+    [/线圈|功能码\s*1/, 1],
+    [/离散输入|功能码\s*2/, 2],
+];
 
 // 删除意图的点级线索检测（2026-10-01 fail-safe 重写）：设备名模式先剥除（「10号风机」
 // 的编号不是点号），其余任意 点/地址/点名/两位以上数字 均视为点级线索——设备级删除
@@ -357,6 +404,17 @@ function extract_embedded_json(text: string): Record<string, unknown> | null {
     const m = text.match(/\{[\s\S]*\}/);
     if (!m) return null;
     return parse_json<Record<string, unknown>>(m[0]);
+}
+
+// LLM 连接值按 schema 类型收敛（2026-10-04 用例 35 实测）：4.5-air 对 integer 字段
+// 会返回字符串形态（"common_address": "1"），原样落槽生成 "common_address": "1"
+// 配置，Go 采集器 unmarshal 失败、启动回滚。数字串按 schema 的 integer 声明转数值，
+// 其余形态原样交由采集器配置校验兜底
+function coerce_schema_value(v: unknown, type: unknown): unknown {
+    if (type === "integer" && typeof v === "string" && /^-?\d+$/.test(v.trim())) {
+        return Number(v.trim());
+    }
+    return v;
 }
 
 // ── 点表文件的确定性列映射 ─────────────────────────────────
@@ -664,7 +722,15 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             { role: "user", content: `<user_input>\n${user_input}\n</user_input>` },
         ]);
         let sawNonEmpty = false;
-        for (let attempt = 0; attempt < 3; attempt++) {
+        for (let attempt = 0; attempt < 4; attempt++) {
+            if (attempt > 0) {
+                // 退避重试：429 速率限制（账户级 RPM/TPM，长会话密集调用实测
+                // 2026-10-04）恢复窗口秒级到分钟级，瞬时连打只会连败——
+                // 5s/15s/45s 指数退避后再试
+                await new Promise((r) =>
+                    setTimeout(r, [0, 5000, 15000, 45000][attempt]),
+                );
+            }
             try {
                 const res = await model.invoke([
                     { role: "system", content: rendered },
@@ -676,10 +742,17 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 const parsed = parse_json<Record<string, unknown>>(text);
                 if (parsed !== null) return parsed;
             } catch (err) {
-                if (attempt === 2) {
+                const msg = err instanceof Error ? err.message : String(err);
+                if (attempt === 3) {
                     cfg.agentLogger.error(
                         conversation,
-                        `LLM 调用失败: ${err instanceof Error ? err.message : String(err)}`,
+                        `LLM 调用失败: ${msg}`,
+                    );
+                } else {
+                    // 非末次失败记日志便于区分瞬态（429 等）与终态失败
+                    cfg.agentLogger.error(
+                        conversation,
+                        `LLM 调用失败（第 ${attempt + 1} 次，将退避重试）: ${msg.slice(0, 120)}`,
                     );
                 }
             }
@@ -1044,10 +1117,14 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             }
         }
         if (!state.recv.protocol && semantic.length > 0) {
+            // 词表须与上方 declared_protocol_token 的子句筛选一致（含「规约」）：漏词时
+            // 「装置是IEC104规约」子句被筛掉、别名快路落空，降级到 LLM 后小模型可能把
+            // 同消息里转发侧的协议抄给采集侧（2026-10-04 用例 34 实测：4.5-air 返回
+            // asfp2，设备被建成 asfp2_server，采集实例永不落地）
             const aliasHit = alias_match_protocol(
                 semantic,
                 "writer",
-                /采集|接入|接收|采用|数据源|上传|设备|协议/,
+                /采集|接入|接收|采用|数据源|上传|设备|协议|规约/,
                 FORWARD_CLAUSE_RE,
                 BOTH_SIDES_RE,
             );
@@ -1109,14 +1186,16 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
         if (!fwdIntentHit && !FORWARD_OFF_RE.test(semantic) && fwdIntentLlm) {
             const v = await fwdIntentLlm;
             let llmHit = v !== null && (v["intent"] === true || v["intent"] === "true");
-            // 非转发缺口的应答语境（2026-10-03 用例 47A 实测）：待答「设备叫什么」时
-            // 用户答「2」被保守提示词误判 intent=true → 置 forwardIntent 并烧掉
-            // progress → pendingGap 应答绑定失效、设备缺口死循环。此语境（pendingGap
-            // 为非 fwd.* 缺口且消息不含转发关键词）下 LLM 的肯定判定不采信——
-            // 真正的转发意图表述必然含关键词（快路已覆盖），此处只拦误判
+            // 无转发关键词语境的 LLM 误判防护（2026-10-03 用例 47A / 2026-10-04 用例
+            // 49 实测）：LLM 兜底仅在关键词快路未命中时发起，而其肯定判定在两类语境
+            // 下均属误判——① 应答语境（待答「设备叫什么」时答「2」）置 forwardIntent
+            // 并烧掉 progress → 缺口应答绑定失效死循环；② 首轮消息（pendingGap=null，
+            // 「转来数据」被当转发）→ fwd.protocol 缺口挡住 assemble 层同名消歧，
+            // 沿用链路语义失效。真转发表述必然含关键词（快路已覆盖），故无关键词时
+            // LLM 肯定判定一律不采信；漏判由转发必答缺口追问补齐，不死锁
             if (
-                state.pendingGap !== null &&
-                !String(state.pendingGap).startsWith("fwd.") &&
+                (state.pendingGap === null ||
+                    !String(state.pendingGap).startsWith("fwd.")) &&
                 !FORWARD_ON_RE.test(semantic)
             ) {
                 llmHit = false;
@@ -1210,11 +1289,24 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 // 采纳白名单 = 服务 config_schema 全部字段（连接型协议的实例级字段
                 // 如 iec104 common_address 也经此落位）——LLM 只会返回 schema 内字段，
                 // 硬编码 ip/port 会把其余用户值静默丢弃（2026-10-02 链步37 实测）
+                const recvFieldSchemas =
+                    entry_of_side(state.recv, "writer")?.entry?.config_schema?.fields ?? {};
                 for (const key of recvConnFields.length > 0
                     ? recvConnFields
                     : ["ip", "port"]) {
-                    if (state.recv.conn[key] === undefined && conn[key] !== undefined) {
-                        state.recv.conn[key] = conn[key];
+                    // 守卫须排除 null/空串：LLM（4.5-air 实测）对未提及的必填字段会显式
+                    // 返回 "port": null，落槽后捕获层的 === undefined 检查全部短路、缺口层
+                    // 却视 null 为缺失——追问-应答死循环收摊（2026-10-04 用例 35 实测）
+                    if (
+                        state.recv.conn[key] === undefined &&
+                        conn[key] !== undefined &&
+                        conn[key] !== null &&
+                        conn[key] !== ""
+                    ) {
+                        state.recv.conn[key] = coerce_schema_value(
+                            conn[key],
+                            (recvFieldSchemas[key] as { type?: unknown } | undefined)?.type,
+                        );
                         progress = true;
                     }
                 }
@@ -1574,6 +1666,9 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                         // 仅新增字段算进展（2026-10-02 用例 39 实测）：重复提取到已有
                         // 字段（url/token/org）时置 progress 会把「连续追问」计数清零、
                         // 缺失字段（bucket）的收摊永不触发
+                        const fwdFieldSchemas =
+                            entry_of_side(state.fwd, "reader")?.entry?.config_schema?.fields ??
+                            {};
                         let gotNew = false;
                         for (const [k, v] of Object.entries(
                             r["connection"] as Record<string, unknown>,
@@ -1581,9 +1676,13 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                             if (
                                 state.fwd.conn[k] === undefined &&
                                 v !== undefined &&
+                                v !== null &&
                                 v !== ""
                             ) {
-                                state.fwd.conn[k] = v;
+                                state.fwd.conn[k] = coerce_schema_value(
+                                    v,
+                                    (fwdFieldSchemas[k] as { type?: unknown } | undefined)?.type,
+                                );
                                 gotNew = true;
                             }
                         }
@@ -2615,6 +2714,875 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
         return { plan, display: lines.join("\n"), registryWrites };
     }
 
+    // ── 设备组批量接入（agent.md §2.11，func_test_case 用例 57~62，2026-10-03）──
+    // 组模式与单设备在途模型互斥；缺口仍按依赖序单缺口提问（场站 → 协议 → 模板
+    // 点表 → 连接参数 → 转发），但提问粒度为组级一次（§2.11 组级缺口应答由组参数
+    // 解析器消费，不走 §2.6 裸值兜底绑定）。
+
+    function group_recap_lines(state: SessionState): string[] {
+        const g = state.group;
+        const out: string[] = [];
+        if (g === null) return out;
+        if (state.site) out.push(`场站：${state.site.name}（缩写 ${state.site.abbr}）`);
+        if (g.protocol) out.push(`接入协议：${g.protocol}`);
+        for (const gr of g.groups) {
+            const parts = [
+                `设备组 ${gr.headDesc || gr.typeWord}：${gr.memberNames.length} 台（${gr.memberNames[0]} ~ ${gr.memberNames[gr.memberNames.length - 1]}）`,
+            ];
+            if (gr.templatePoints !== null) {
+                parts.push(`模板点表 ${gr.templatePoints.length} 点（各台同后缀）`);
+            }
+            out.push(parts.join("，"));
+        }
+        return out;
+    }
+
+    /** 场站绑定（与 run_stage_extraction 阶段1 同口径：显式「场站名称：X」确定性
+     *  采纳；提问应答交 location_prompt first_access 兜底；缩写 LLM 生成、失败不固化） */
+    async function group_bind_site(
+        state: SessionState,
+        text: string,
+        conversation: string,
+    ): Promise<boolean> {
+        let siteName = "";
+        let siteAbbr = "";
+        const pair = text.match(
+            /场站名称[:：]\s*([^\s，,。]{2,20})\s*[，,]?\s*(?:缩写|简称)[:：]\s*([^\s，,。]{1,12})/,
+        );
+        const nameOnly = pair
+            ? null
+            : text.match(/场站名称\s*(?:[:：]|是|为)\s*([^\s，,。]{2,20})/);
+        if (pair) {
+            siteName = pair[1];
+            siteAbbr = pair[2];
+        } else if (nameOnly) {
+            siteName = nameOnly[1];
+        } else {
+            const r = await llm_json(
+                "location_prompt.txt",
+                { known_site: "（未设置）" },
+                text,
+                conversation,
+            ).catch(() => null);
+            const ex =
+                r && r["mode"] === "first_access" && typeof r["user_site"] === "string"
+                    ? (r["user_site"] as string).trim()
+                    : "";
+            if (ex.length >= 2 && ex.length <= 20) siteName = ex;
+        }
+        if (siteName !== "" && siteAbbr === "") {
+            const r = await llm_json(
+                "location_prompt.txt",
+                { known_site: "（未设置）" },
+                siteName,
+                conversation,
+            ).catch(() => null);
+            siteAbbr = generated_abbr_of(r);
+        }
+        if (siteName === "" || siteAbbr === "") return false;
+        state.site = { name: siteName, abbr: siteAbbr };
+        boundSite = state.site;
+        for (const d of drafts.values()) {
+            if (d !== state) d.site = boundSite;
+        }
+        return true;
+    }
+
+    /** 组成员连接参数完备性（协议感知：监听型只需端口；modbus 类需从站号） */
+    function group_conn_complete(
+        conn: { ip?: string; port?: number; uid?: number },
+        isListener: boolean,
+        needsUid: boolean,
+    ): boolean {
+        if (conn.port === undefined) return false;
+        if (!isListener && (conn.ip === undefined || conn.ip === "")) return false;
+        if (needsUid && conn.uid === undefined) return false;
+        return true;
+    }
+
+    async function* group_turn(
+        user_text: string,
+        state: SessionState,
+        conversation: string,
+    ): AsyncGenerator<AgentStreamEvent> {
+        const g = state.group;
+        if (g === null) return; // 防御：仅由 invoke_turn 组分支调用
+        const semantic = clean_user_text(user_text);
+        if (g.userTexts[g.userTexts.length - 1] !== semantic) {
+            g.userTexts.push(semantic);
+        }
+        const gText = g.userTexts.join("\n");
+        // ⓪ 组解析（先于缺口提问：组信息随首条消息即入会话，缺口可跨消息补齐；
+        // 同键组单调覆盖、新组追加，应答轮解析为空不影响既有组）
+        const parsed = parse_group_access(semantic);
+        if (parsed !== null) {
+            for (const pg of parsed) {
+                const key = group_key(pg);
+                const idx = g.groups.findIndex((x) => group_key(x) === key);
+                if (idx >= 0) g.groups[idx] = pg;
+                else g.groups.push(pg);
+            }
+        }
+        const gap_guard = (key: string): { capped: boolean; ask: string } => {
+            // 与单设备缺口收摊同口径：同一组级缺口两轮未收敛 → 强制收摊（§2.6）
+            state.gapRepeat =
+                key === state.lastGapSignature ? state.gapRepeat + 1 : 0;
+            state.lastGapSignature = key;
+            state.pendingGap = key;
+            return { capped: state.gapRepeat >= 2, ask: "" };
+        };
+        const cap_line = (gaps: string[]): string =>
+            `这些信息我连续几轮没能确认到，先为您收个尾：\n${gaps
+                .map((t) => `· ${t}`)
+                .join("\n")}\n您可以回复「取消」重新开始，或补充上述信息后再继续。`;
+
+        // ① 场站（依赖序首位）
+        if (!state.site) {
+            if (state.pendingGap === "site") {
+                const bound = await group_bind_site(state, semantic, conversation);
+                if (!bound) {
+                    yield {
+                        type: "text",
+                        content:
+                            "请提供场站名称，例如：场站名称：华能阿拉善\n请提供后我将继续。",
+                    };
+                    yield { type: "done" };
+                    return;
+                }
+                state.pendingGap = null;
+            } else {
+                const nm = gText.match(
+                    /场站名称\s*(?:[:：]|是|为)\s*([^\s，,。]{2,20})/,
+                );
+                let bound = false;
+                if (nm) bound = await group_bind_site(state, nm[1], conversation);
+                if (!bound) {
+                    state.pendingGap = "site";
+                    yield {
+                        type: "text",
+                        content:
+                            "本次批量接入需要先绑定场站。请提供场站名称，例如：场站名称：华能阿拉善\n请提供后我将继续。",
+                    };
+                    yield { type: "done" };
+                    return;
+                }
+            }
+        }
+
+        // ③ 组齐性：组会话已激活但尚未解析到任何组 → 引导描述
+        if (g.groups.length === 0) {
+            yield {
+                type: "text",
+                content:
+                    "请描述要批量接入的设备组（如：1#~3#是倍福PLC风机，点表为1000:风速…，它们的ip从192.168.1.101开始每台加1，端口都是502，从站号都是1）。",
+            };
+            yield { type: "done" };
+            return;
+        }
+
+        // ④ 接入协议（组模式全部组共用同一协议，§2.11）
+        if (g.protocol === null) {
+            const try_bind = async (text: string): Promise<boolean> => {
+                const aliasHit = alias_match_protocol(
+                    text,
+                    "writer",
+                    /采集|接入|接收|采用|上传|设备|协议|规约|PLC/,
+                );
+                if (aliasHit) {
+                    g.protocol = aliasHit;
+                    return true;
+                }
+                const r = await llm_json(
+                    "protocol_prompt.txt",
+                    {
+                        side: "receive",
+                        supported_list: JSON.stringify(protocol_candidates("writer")),
+                        match_hints: match_hints_payload("writer"),
+                    },
+                    text,
+                    conversation,
+                ).catch(() => null);
+                if (
+                    r &&
+                    String(r["match"] ?? "") === "matched" &&
+                    typeof r["canonical_name"] === "string"
+                ) {
+                    g.protocol = r["canonical_name"];
+                    return true;
+                }
+                return false;
+            };
+            if (state.pendingGap === "group.protocol") {
+                const bound = await try_bind(semantic);
+                if (!bound) {
+                    yield {
+                        type: "text",
+                        content: `暂未识别到支持的接入协议。请从以下协议中选择：${protocol_candidates("writer").join("、")}。`,
+                    };
+                    yield { type: "done" };
+                    return;
+                }
+                state.pendingGap = null;
+            } else {
+                const bound = await try_bind(gText);
+                if (!bound) {
+                    const guard = gap_guard("group.protocol");
+                    if (guard.capped) {
+                        yield { type: "text", content: cap_line(["这批设备采用的接入协议"]) };
+                        yield { type: "done" };
+                        return;
+                    }
+                    const head = group_recap_lines(state);
+                    yield {
+                        type: "text",
+                        content: `${head.length > 0 ? `本次批量接入目前已确认：\n${head.map((r) => `· ${r}`).join("\n")}\n` : ""}这批设备采用哪种协议接入？（如：modbus、iec104、asfp2）\n请提供后我将继续。`,
+                    };
+                    yield { type: "done" };
+                    return;
+                }
+            }
+        }
+
+        // ⑤ 模板点表（阶段3 语义：确定性 addr:点名 解析为骨架，point_prompt 补英文
+        // 标识与协议扩展字段——与单设备同源提示词）
+        // g.protocol 已由 ③ 闭合；闭包内赋值使 TS 无法跨步收窄，取局部快照
+        const gProtocol = g.protocol ?? "";
+        const svcType = find_service_type(registry, normalize_protocol(gProtocol), "writer");
+        if (svcType === null) {
+            yield {
+                type: "text",
+                content: `协议 ${g.protocol} 暂无对应的采集服务，请更换协议或回复「取消」。`,
+            };
+            yield { type: "done" };
+            return;
+        }
+        const writerEntry = registry.get_entry(svcType);
+        const pointFields = ((writerEntry?.point_schema?.fields ?? []) as Array<{ name: string }>)
+            .map((f) => f.name);
+        const pointHints = JSON.stringify(
+            (writerEntry?.prompt_hints as Record<string, unknown> | undefined)?.[
+                "point_field_hints"
+            ] ?? {},
+        );
+        // 点级必填身份字段（除 uid——uid 走组级连接参数）：modbus fun 等。缺失时
+        // 组级追问补充说明（§2.11 阶段3 语义：组级一次），应答并入模板语料重提取。
+        // 补充说明按**批**生效——用户按批回答（「各台点表相同」），全部缺失同字段
+        // 的组一并并入语料，不逐组重复追问
+        const identityFieldsNeedingAsk = ((writerEntry?.point_schema?.identity_fields ??
+            []) as string[]).filter((f) => f !== "uid");
+        // 带 type 字段的协议（modbus）：type 参与寄存器跨度 fail-closed 校验，缺失必须
+        // 进组级追问——否则 LLM 提取把 fun 补齐后组即视为身份完整，type 缺失直通最终
+        // 校验回滚（2026-10-04 用例 59 实测）
+        if (
+            ((writerEntry?.point_schema?.fields ?? []) as Array<{ name?: string }>).some(
+                (f) => f.name === "type",
+            )
+        ) {
+            identityFieldsNeedingAsk.push("type");
+        }
+        const group_missing_identity = (gr2: GroupSpec): boolean =>
+            gr2.templatePoints === null ||
+            identityFieldsNeedingAsk.some((f) =>
+                (gr2.templatePoints ?? []).some(
+                    (p) =>
+                        p[f] === undefined || p[f] === null || p[f] === "",
+                ),
+            );
+        if (/^group\.points\.\d+$/.test(state.pendingGap ?? "")) {
+            for (const gr2 of g.groups) {
+                if (group_missing_identity(gr2)) {
+                    gr2.templateText = `${gr2.templateText ?? ""}\n${semantic}`;
+                }
+            }
+            state.pendingGap = null;
+        }
+        for (let gi = 0; gi < g.groups.length; gi++) {
+            const gr = g.groups[gi];
+            if (gr.templateDraft === null || gr.templateDraft.length === 0) {
+                const guard = gap_guard(`group.points.${gi}`);
+                if (guard.capped) {
+                    yield {
+                        type: "text",
+                        content: cap_line([`${gr.headDesc || gr.typeWord} 的模板点表`]),
+                    };
+                    yield { type: "done" };
+                    return;
+                }
+                yield {
+                    type: "text",
+                    content: `请提供${gr.headDesc || gr.typeWord}的模板点表（地址:点名，如 1000:风速、1001:功率，各台相同）。\n请提供后我将继续。`,
+                };
+                yield { type: "done" };
+                return;
+            }
+        }
+        // 逐组顺序提取，但**共享点名翻译映射**：同名点的英文标识沿用先前组的翻译
+        //（「风速」不得在 A/B 两组分别漂移为 windspeed / wind_speed，run12 实测）；
+        // 并注入防展开规则——输入描述多台同构设备时只提取一份模板，禁止按台重复
+        // 展开（展开会让输出超限截断，JSON 解析失败，run12 实测）
+        const nameIdMap = new Map<string, string>();
+        const pendingGroups = g.groups.filter((gr3) => group_missing_identity(gr3));
+        for (const gr3 of pendingGroups) {
+            const mapNote =
+                nameIdMap.size > 0
+                    ? `\n已确认的点名英文标识映射（同名点必须沿用，不得改写）：${Array.from(
+                          nameIdMap.entries(),
+                      )
+                          .map(([n, id]) => `${n}→${id}`)
+                          .join("、")}。`
+                    : "";
+            const groupRule =
+                RECEIVE_SIDE_RULES +
+                "\n输入描述多台同构设备（组批量）时，只提取**一份模板点表**" +
+                "（用户给出的 addr:点名 序列逐点对应），禁止按台重复展开或编造额外点。" +
+                mapNote;
+            const r = await llm_json(
+                "point_prompt.txt",
+                {
+                    side: "receive",
+                    protocol: g.protocol ?? "",
+                    point_fields: JSON.stringify(pointFields),
+                    point_field_hints: pointHints,
+                    side_rules: groupRule,
+                },
+                gr3.templateText ?? semantic,
+                conversation,
+            ).catch(() => null);
+            const llmPts =
+                r && Array.isArray(r["points"])
+                    ? (r["points"] as Array<Record<string, unknown>>)
+                    : [];
+            const byAddr = new Map<number, Record<string, unknown>>();
+            const byName = new Map<string, Record<string, unknown>>();
+            for (const p of llmPts) {
+                const a = Number(p["addr"]);
+                if (Number.isInteger(a) && !byAddr.has(a)) byAddr.set(a, p);
+                const nm = String(p["name"] ?? "");
+                if (nm !== "" && !byName.has(nm)) byName.set(nm, p);
+            }
+            // 确定性骨架权威（addr/数量），LLM 补英文标识与协议扩展字段（fun/type 等）
+            gr3.templatePoints = (gr3.templateDraft ?? []).map((d) => {
+                const src = byAddr.get(d.addr) ?? byName.get(d.name) ?? {};
+                return { ...src, addr: d.addr, name: d.name };
+            });
+            for (const p of gr3.templatePoints) {
+                const nm = String(p["name"] ?? "");
+                const id = typeof p["id"] === "string" ? p["id"] : "";
+                if (nm !== "" && id !== "" && !nameIdMap.has(nm)) nameIdMap.set(nm, id);
+            }
+        }
+        // 全局声明确定性展开（point_prompt 规则2 的兜底，2026-10-04 用例 59 实测）：
+        // 应答并入语料重提取后，LLM 可能只补 fun 漏 type（4.5-air 实测，57 组补了、
+        // 59 组没补）——fun 齐后组即视为身份完整、不再追问，type 缺失直通最终校验
+        // fail-closed 回滚。词表只收无歧义声明、只填缺失字段（宁可放过不可错编），
+        // 对全部组的模板点生效（声明按批表述）
+        for (const gr4 of g.groups) {
+            if (gr4.templatePoints === null) continue;
+            const declText = gr4.templateText ?? "";
+            for (const p of gr4.templatePoints) {
+                const rec = p as Record<string, unknown>;
+                for (const [field, decls] of [
+                    ["type", GROUP_TYPE_DECLS],
+                    ["fun", GROUP_FUN_DECLS],
+                ] as const) {
+                    const cur = rec[field];
+                    if (typeof cur === "number") continue;
+                    if (typeof cur === "string" && /^\d+$/.test(cur)) {
+                        // LLM 偶发返回字符串形态枚举码（"10"），统一收敛为数值
+                        rec[field] = Number(cur);
+                        continue;
+                    }
+                    for (const [re, v] of decls) {
+                        if (re.test(declText)) {
+                            rec[field] = v;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        {
+            const askGroup = g.groups.find((gr3) => group_missing_identity(gr3));
+            if (askGroup !== undefined) {
+                const gi = g.groups.indexOf(askGroup);
+                const missingIdentity = identityFieldsNeedingAsk.filter((f) =>
+                    (askGroup.templatePoints ?? []).some(
+                        (p) =>
+                            p[f] === undefined || p[f] === null || p[f] === "",
+                    ),
+                );
+                const guard = gap_guard(`group.points.${gi}`);
+                if (guard.capped) {
+                    yield {
+                        type: "text",
+                        content: cap_line([
+                            `${askGroup.headDesc || askGroup.typeWord} 点表的 ${missingIdentity.join("/") || "模板点表"}`,
+                        ]),
+                    };
+                    yield { type: "done" };
+                    return;
+                }
+                const head = group_recap_lines(state);
+                yield {
+                    type: "text",
+                    content: `${head.length > 0 ? `本次批量接入目前已确认：\n${head.map((r) => `· ${r}`).join("\n")}\n` : ""}这批设备的点表还差${missingIdentity.join("/") || "模板点表"}等说明。请补充描述（如：全部是保持寄存器（功能码3），32位浮点；各台点表相同）。\n请提供后我将继续。`,
+                };
+                yield { type: "done" };
+                return;
+            }
+        }
+
+        // ⑥ 连接参数（三变体展开；缺失 → 组级追问，应答由组参数解析器消费）
+        const isListener = LISTENER_SERVICES.has(svcType);
+        const needsUid = ((writerEntry?.point_schema?.identity_fields ?? []) as string[]).includes(
+            "uid",
+        );
+        for (let gi = 0; gi < g.groups.length; gi++) {
+            const gr = g.groups[gi];
+            const incomplete = (): boolean =>
+                gr.conns === null ||
+                gr.conns.some((c) => !group_conn_complete(c, isListener, needsUid));
+            if (incomplete() && state.pendingGap === `group.conn.${gi}`) {
+                const ans = parse_conn_answer(semantic, gr.rawNums);
+                if (gr.conns === null) {
+                    gr.conns = ans.conns;
+                } else {
+                    // 单调累积：应答只补缺失字段，不覆盖已确认值
+                    gr.conns = gr.conns.map((c, i) => ({ ...ans.conns[i], ...c }));
+                }
+                if (ans.listenShared) gr.listenShared = true;
+                state.pendingGap = null;
+            }
+            if (incomplete()) {
+                const guard = gap_guard(`group.conn.${gi}`);
+                if (guard.capped) {
+                    yield {
+                        type: "text",
+                        content: cap_line([
+                            `${gr.headDesc || gr.typeWord} 的连接参数（ip/端口${needsUid ? "/从站号" : ""}）`,
+                        ]),
+                    };
+                    yield { type: "done" };
+                    return;
+                }
+                const missing: string[] = [];
+                const anyMissing = (k: "ip" | "port" | "uid"): boolean =>
+                    (gr.conns ?? gr.rawNums.map(() => ({}) as GroupMemberConn)).some(
+                        (c) => c[k] === undefined,
+                    );
+                if (anyMissing("ip")) missing.push("每台的 ip");
+                if (anyMissing("port")) missing.push("端口");
+                if (needsUid && anyMissing("uid")) missing.push("从站号");
+                const head = group_recap_lines(state);
+                yield {
+                    type: "text",
+                    content: `${head.length > 0 ? `本次批量接入目前已确认：\n${head.map((r) => `· ${r}`).join("\n")}\n` : ""}请提供${gr.headDesc || gr.typeWord}的连接信息：${missing.join("、")}。可以逐台给出（如 1#的ip是192.168.1.101:502），也可以用规则描述（如 ip从192.168.1.101开始每台加1、端口都是502、从站号都是1${isListener ? "" : ""}）。\n请提供后我将继续。`,
+                };
+                yield { type: "done" };
+                return;
+            }
+        }
+
+        // ⑦ 组转发（平台 writer/reader 成对硬约束；§2.11 本期仅确定性镜像展开——
+        // 各 writer 实例按接入顺序分块镜像，转发地址自动推导、方案中标注）
+        if (g.fwd === null) {
+            const try_bind = async (text: string): Promise<boolean> => {
+                const proto = alias_match_protocol(
+                    text,
+                    "reader",
+                    /转发|发送|上传|写入/,
+                );
+                const tm = text.match(/(\d{1,3}(?:\.\d{1,3}){3})\s*[:：]\s*(\d{2,5})/);
+                if (proto === null || tm === null) return false;
+                const nm = text.match(/转发(?:到|至)\s*([^\s，。:：\d][^，。:：]{0,10})/);
+                g.fwd = {
+                    name: nm ? nm[1] : "转发目标",
+                    protocol: proto,
+                    ip: tm[1],
+                    port: Number(tm[2]),
+                };
+                return true;
+            };
+            if (state.pendingGap === "group.fwd") {
+                const bound = await try_bind(semantic);
+                if (!bound) {
+                    yield {
+                        type: "text",
+                        content:
+                            "未能识别转发协议与目标。请按「转发采用asfp2协议到127.0.0.1:9900」的格式提供；或回复「取消」结束本次接入。",
+                    };
+                    yield { type: "done" };
+                    return;
+                }
+                state.pendingGap = null;
+            } else {
+                const bound = await try_bind(gText);
+                if (!bound) {
+                    const guard = gap_guard("group.fwd");
+                    if (guard.capped) {
+                        yield {
+                            type: "text",
+                            content: cap_line(["转发协议与转发目标"]),
+                        };
+                        yield { type: "done" };
+                        return;
+                    }
+                    const head = group_recap_lines(state);
+                    yield {
+                        type: "text",
+                        content: `${head.length > 0 ? `本次批量接入目前已确认：\n${head.map((r) => `· ${r}`).join("\n")}\n` : ""}平台要求数据点必须同时配置转发（writer/reader 成对）。请提供这批设备的转发协议与目标，例如：转发采用asfp2协议到127.0.0.1:9900——各台将按接入顺序镜像转发，转发地址自动推导。\n请提供后我将继续。`,
+                    };
+                    yield { type: "done" };
+                    return;
+                }
+            }
+        }
+
+        // ⑧ 组方案装配 + L2 校验 + 展示（一次确认 → 一次 merge + 一次 Stop-Start）
+        const assembled = await assemble_group_plan(state);
+        if (assembled === null) {
+            yield { type: "text", content: "方案装配出现问题，请补充或确认设备组信息后重试。" };
+            yield { type: "done" };
+            return;
+        }
+        if (assembled.issue) {
+            yield { type: "text", content: assembled.issue };
+            yield { type: "done" };
+            return;
+        }
+        for (const dev of (assembled.plan["devices"] ?? []) as Array<
+            Record<string, unknown>
+        >) {
+            const l2 = await validate_points_l2(
+                svcType,
+                (dev["points"] ?? []) as Array<Record<string, unknown>>,
+            );
+            if (l2) {
+                yield {
+                    type: "text",
+                    content: `点表校验未通过（${String(dev["name"])}）：\n${l2}\n请修正后重新提交。`,
+                };
+                yield { type: "done" };
+                return;
+            }
+        }
+        for (const ft of (assembled.plan["forward_targets"] ?? []) as Array<
+            Record<string, unknown>
+        >) {
+            const ftSvc = find_service_type(
+                registry,
+                normalize_protocol(String(ft["protocol"] ?? "")),
+                "reader",
+            );
+            if (ftSvc === null) continue;
+            const l2 = await validate_points_l2(
+                ftSvc,
+                (ft["points"] ?? []) as Array<Record<string, unknown>>,
+            );
+            if (l2) {
+                yield {
+                    type: "text",
+                    content: `转发点表校验未通过：\n${l2}\n请修正后重新提交。`,
+                };
+                yield { type: "done" };
+                return;
+            }
+        }
+        state.accessPlan = {
+            kind: "add",
+            input: assembled.plan,
+            display: assembled.display,
+            registryWrites: assembled.registryWrites,
+        };
+        stateWriter.setAccessPlan(true);
+        stateWriter.setPhase("planning");
+        cfg.agentLogger.phase(conversation, "planning");
+        yield { type: "text", content: assembled.display };
+        yield { type: "button_arm" };
+        yield { type: "done" };
+    }
+
+    /** 组方案装配（agent.md §2.11）：模板点表 × N 台展开为多设备方案——连接型每台
+     *  一实例；监听型共用端口组员并入单实例（用例 62，§2.11 边界④）；注册表批量
+     *  固化挂同一事务（merge + Stop-Start 全部成功才写入，§3.2.1.3a 语义不变） */
+    async function assemble_group_plan(state: SessionState): Promise<{
+        plan: Record<string, unknown>;
+        display: string;
+        registryWrites: NonNullable<AccessPlan["registryWrites"]>;
+        issue?: string;
+    } | null> {
+        const g = state.group;
+        if (g === null || g.protocol === null || g.fwd === null) return null;
+        if (normalize_protocol(g.fwd.protocol) === "influxdb") {
+            return {
+                plan: {},
+                display: "",
+                registryWrites: { upserts: [], deletes: [], pointMapDrops: [], channelHighWatermark: 0 },
+                issue:
+                    "设备组批量接入暂不支持 influxdb 转发（每点 field 必填、无法从模板确定性推导）。请改用其他转发协议，或回复「取消」后逐台接入。",
+            };
+        }
+        const svcType = find_service_type(registry, normalize_protocol(g.protocol), "writer");
+        if (svcType === null) return null;
+        const readerSvc = find_service_type(registry, normalize_protocol(g.fwd.protocol), "reader");
+        if (readerSvc === null) {
+            return {
+                plan: {},
+                display: "",
+                registryWrites: { upserts: [], deletes: [], pointMapDrops: [], channelHighWatermark: 0 },
+                issue: `转发协议 ${g.fwd.protocol} 暂不支持，请更换后重试。`,
+            };
+        }
+        const isListener = LISTENER_SERVICES.has(svcType);
+        const needsUid = ((registry.get_entry(svcType)?.point_schema?.identity_fields ?? []) as string[]).includes("uid");
+        const abbr = await load_abbr(state);
+        const current = read_current_config();
+        let highWater = Math.max(
+            abbr.channelHighWatermark,
+            current ? channel_watermark_from_config(current as never) : 0,
+        );
+        const alloc = (): string => `channel${++highWater}`;
+        // 撞名顺延（既有条款）+ 本批内已分配前缀防撞（注册表逐条目模型不变，§2.11 边界②）
+        const usedPrefixes = new Set<string>(
+            (abbr.entries ?? []).map((e) => e.prefix),
+        );
+
+        const devices: Array<Record<string, unknown>> = [];
+        const upserts: AbbrEntry[] = [];
+        const memberLinesByGroup: string[][] = [];
+        const listenerBuckets = new Map<
+            number,
+            { dev: Record<string, unknown>; hostId: string }
+        >();
+
+        for (const gr of g.groups) {
+            const head = gr.headDesc || gr.typeWord;
+            const memberLines: string[] = [];
+            memberLinesByGroup.push(memberLines);
+            for (let i = 0; i < gr.memberNames.length; i++) {
+                const name = gr.memberNames[i];
+                const conn = gr.conns?.[i] ?? {};
+                const cand = group_member_prefix(gr.typeWord, gr.rawNums[i]);
+                if (cand === null) {
+                    return {
+                        plan: {},
+                        display: "",
+                        registryWrites: { upserts: [], deletes: [], pointMapDrops: [], channelHighWatermark: 0 },
+                        issue: `设备类型「${gr.typeWord}」暂无前缀映射，请用可识别的类型词（风机/逆变器/主变/测风塔/光伏/储能/升压站）重新描述。`,
+                    };
+                }
+                let prefix = resolve_prefix_conflict(abbr, cand);
+                if (usedPrefixes.has(prefix)) {
+                    let k = 2;
+                    while (usedPrefixes.has(`${cand}${k}`)) k++;
+                    prefix = `${cand}${k}`;
+                }
+                usedPrefixes.add(prefix);
+                const offset = gr.addrOffsets?.[i] ?? 0;
+                const pts: Array<Record<string, unknown>> = [];
+                const pointMap: Record<string, string> = {};
+                let minAddr = Number.POSITIVE_INFINITY;
+                let maxAddr = Number.NEGATIVE_INFINITY;
+                for (const tp of gr.templatePoints ?? []) {
+                    const derived = derive_point_id(
+                        typeof tp["id"] === "string" ? tp["id"] : "",
+                        String(tp["name"] ?? ""),
+                        IDENTIFIER_RE,
+                        MAX_IDENTIFIER_LENGTH,
+                    );
+                    if (derived.error !== null || derived.id === "") {
+                        return {
+                            plan: {},
+                            display: "",
+                            registryWrites: { upserts: [], deletes: [], pointMapDrops: [], channelHighWatermark: 0 },
+                            issue: `设备组「${head}」的点「${String(tp["name"] ?? "?")}」缺少英文标识（字母开头，仅字母/数字/下划线）——请补充后重试。`,
+                        };
+                    }
+                    let bare = derived.id;
+                    if (bare.startsWith(`${prefix}_`)) {
+                        bare = bare.slice(prefix.length + 1);
+                    }
+                    const key = `${prefix}_${bare}`;
+                    const p: Record<string, unknown> = {
+                        ...tp,
+                        addr: Number(tp["addr"]) + offset,
+                        id: key,
+                    };
+                    if (needsUid) {
+                        if (conn.uid === undefined) {
+                            return {
+                                plan: {},
+                                display: "",
+                                registryWrites: { upserts: [], deletes: [], pointMapDrops: [], channelHighWatermark: 0 },
+                                issue: `设备组「${head}」的从站号未提供——请补充后重试。`,
+                            };
+                        }
+                        p["uid"] = conn.uid;
+                    }
+                    pts.push(p);
+                    const nm = String(tp["name"] ?? "");
+                    if (nm !== "") pointMap[nm] = key;
+                    const a = Number(p["addr"]);
+                    if (a < minAddr) minAddr = a;
+                    if (a > maxAddr) maxAddr = a;
+                }
+                const upsert: AbbrEntry = {
+                    name,
+                    prefix,
+                    host: "",
+                    service_type: svcType,
+                    description: g.userTexts.join("；").slice(0, 120),
+                    pointMap,
+                };
+                const connDesc =
+                    [
+                        isListener
+                            ? `监听端口 ${String(conn.port ?? "?")}`
+                            : `${String(conn.ip ?? "?")}:${String(conn.port ?? "?")}`,
+                        conn.uid !== undefined ? `从站号 ${String(conn.uid)}` : "",
+                        `采集地址 ${minAddr}~${maxAddr}`,
+                    ]
+                        .filter(Boolean)
+                        .join("，");
+                if (isListener) {
+                    const port = Number(conn.port);
+                    const bucket = listenerBuckets.get(port);
+                    if (bucket !== undefined) {
+                        // 共用监听端口 → 组员并入宿主实例（用例 62，§2.11 边界④）。
+                        // 每台成员仍各自成 device 步骤（同一 instanceId，首台 add、
+                        // 后续 modify）——与单设备并入语义（用例 23）一致：generate_steps
+                        // 的幂等防重按「本设备前缀」剥前缀，若把两台点塞进同一 device
+                        // （prefix=首台），后续台的 key 会被再套一层首台前缀
+                        //（wt1_wt2_windspeed 双前缀，2026-10-04 run15 实测）
+                        const dev: Record<string, unknown> = {
+                            name,
+                            prefix,
+                            action: "modify",
+                            instanceId: bucket.hostId,
+                            protocol: g.protocol,
+                            port,
+                            points: pts,
+                        };
+                        devices.push(dev);
+                        upsert.host = bucket.hostId;
+                        upserts.push(upsert);
+                        memberLines.push(
+                            `· ${name}（点 key 前缀 ${prefix}_，${pts.length} 点）：${connDesc}——并入同一接收实例`,
+                        );
+                    } else {
+                        const dev: Record<string, unknown> = {
+                            name,
+                            prefix,
+                            action: "add",
+                            instanceId: alloc(),
+                            protocol: g.protocol,
+                            port,
+                            points: pts,
+                        };
+                        devices.push(dev);
+                        upsert.host = String(dev["instanceId"]);
+                        upserts.push(upsert);
+                        listenerBuckets.set(port, {
+                            dev,
+                            hostId: String(dev["instanceId"]),
+                        });
+                        memberLines.push(`· ${name}（点 key 前缀 ${prefix}_，${pts.length} 点）：${connDesc}`);
+                    }
+                } else {
+                    const dev: Record<string, unknown> = {
+                        name,
+                        prefix,
+                        action: "add",
+                        instanceId: alloc(),
+                        protocol: g.protocol,
+                        ...(conn.ip !== undefined ? { ip: conn.ip } : {}),
+                        ...(conn.port !== undefined ? { port: conn.port } : {}),
+                        points: pts,
+                    };
+                    devices.push(dev);
+                    upsert.host = String(dev["instanceId"]);
+                    upserts.push(upsert);
+                    memberLines.push(`· ${name}（点 key 前缀 ${prefix}_，${pts.length} 点）：${connDesc}`);
+                }
+            }
+        }
+        if (devices.length === 0 || upserts.length === 0) {
+            return null;
+        }
+
+        // 转发目标：一个 reader 实例覆盖全部 writer 点（拆解器按 writer 步骤顺序
+        // 逐点配对 key）；转发地址按台分块自动推导——同一目标上 addr 全局唯一
+        //（§2.7.1 接入层2），组内各台模板同址时镜像会重叠，故顺序分块
+        let maxExisting = 0;
+        {
+            const existing = ((current?.[readerSvc] ?? []) as Array<Record<string, unknown>>).filter(
+                (x) =>
+                    String(x["ip"] ?? "") === g.fwd?.ip &&
+                    Number(x["port"] ?? NaN) === g.fwd?.port,
+            );
+            for (const inst of existing) {
+                for (const p of (inst["points"] ?? []) as Array<Record<string, unknown>>) {
+                    const a = Number(p["addr"]);
+                    if (Number.isInteger(a) && a > maxExisting) maxExisting = a;
+                }
+            }
+        }
+        let cursor = maxExisting + 1;
+        const fwdPts: Array<Record<string, unknown>> = [];
+        for (const dev of devices) {
+            const n = ((dev["points"] ?? []) as Array<Record<string, unknown>>).length;
+            for (let i = 0; i < n; i++) {
+                fwdPts.push({ addr: cursor++, _derived: "addr" });
+            }
+        }
+        const forward_targets: Array<Record<string, unknown>> = [
+            {
+                name: g.fwd.name,
+                action: "add",
+                instanceId: alloc(),
+                protocol: g.fwd.protocol,
+                ip: g.fwd.ip,
+                port: g.fwd.port,
+                points: fwdPts,
+            },
+        ];
+
+        const plan: Record<string, unknown> = {
+            site: state.site ?? undefined,
+            devices,
+            forward_targets,
+        };
+        const registryWrites: NonNullable<AccessPlan["registryWrites"]> = {
+            upserts,
+            deletes: [],
+            pointMapDrops: [],
+            channelHighWatermark: highWater,
+        };
+
+        const lines: string[] = ["接入方案如下："];
+        lines.push(`· 场站：${state.site?.name ?? "（未绑定）"}（缩写 ${state.site?.abbr ?? "—"}）`);
+        lines.push(
+            `· 接入协议：${g.protocol}，共 ${upserts.length} 台设备（模板点表 + 参数化连接，一次确认批量落盘）`,
+        );
+        for (let gi = 0; gi < g.groups.length; gi++) {
+            const gr = g.groups[gi];
+            lines.push(
+                `· 设备组：${gr.headDesc || gr.typeWord}（${gr.memberNames.length} 台）——模板点表 ${gr.templatePoints?.length ?? 0} 点，各台同后缀：`,
+            );
+            for (const tp of gr.templatePoints ?? []) {
+                lines.push(
+                    `      - 地址 ${String(tp["addr"])} ↔ ${String(tp["name"] ?? "（未命名）")} → ${String(tp["id"] ?? "")}`,
+                );
+            }
+            lines.push(...(memberLinesByGroup[gi] ?? []));
+        }
+        lines.push(
+            `· 新建转发 ${g.fwd.name}（${g.fwd.protocol}）：目标 ${g.fwd.ip}:${String(g.fwd.port)}，共 ${fwdPts.length} 个转发点（按台分块自动推导，确认即批准）`,
+        );
+        lines.push("是否确认执行？请点击下方「确认」按钮；如需取消请点击「取消」。");
+        return { plan, display: lines.join("\n"), registryWrites };
+    }
+
     // ── L2 validate_points（§2.7.1，编排器调用）────────────
     async function validate_points_l2(
         svcType: string,
@@ -3116,6 +4084,34 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             }
             // 点级线索存在但解析不出具体点（未知句式）→ 交 LLM 兜底，不得短路成整设备
             return null;
+        }
+        // 加点确定性提取（2026-10-04 用例 54 实测）：「增加…数据点，地址1210:机舱振动，
+        // 转发地址7010」的 addr:名称 形态完全规整，LLM（4.5-air）却漏提点名 → 追问
+        // 点名后应答词被错绑成点名（「继续」→ wt3_continue）。有目标设备且含加点
+        // 语汇时，addr:名称 对确定性成点；转发地址只认「转发地址N」声明。
+        // 宁缺勿滥：无冒号对（「增加一个振动点」）不在此提取，仍交 LLM/追问
+        const addish = /增加|新增|加点|添加/.test(semantic);
+        if (target && addish) {
+            const pts: Array<Record<string, unknown>> = [];
+            for (const m of semantic.matchAll(
+                /(?:地址)?(\d{2,7})\s*[:：]\s*([\u4e00-\u9fa5A-Za-z][^\s，。,；;:：]{0,23})/g,
+            )) {
+                pts.push({ addr: Number(m[1]), name: m[2].trim() });
+            }
+            if (pts.length > 0) {
+                const fm = semantic.match(/转发地址\s*[:：]?\s*(\d{2,7})/);
+                const fwd = fm ? Number(fm[1]) : undefined;
+                return {
+                    intent: "add_points",
+                    target_id: String(target["id"]),
+                    instance_fields: {},
+                    point_updates: [],
+                    points: [],
+                    add_points: pts.map((p) =>
+                        fwd !== undefined ? { ...p, forward_addr: fwd } : p,
+                    ),
+                };
+            }
         }
         return null;
     }
@@ -3734,6 +4730,27 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             state.changeAddPoints = draft;
             state.changeTargetId = targetId;
             if (draft.length === 0) return null;
+            // 名称已定而 id 未定：专用微翻译补 id（与 change.name 应答路径同一策略，
+            // 干净上下文）——2026-10-04 用例 20 实测：确定性提取带来的中文名若跳过
+            // 此步，英文标识缺口会抢先于转发地址追问，打破「成对约束优先」的问序
+            for (const p of state.changeAddPoints) {
+                const nm = String(p["name"] ?? "").trim();
+                const id = String(p["id"] ?? "").trim();
+                if (nm === "" || id !== "" || IDENTIFIER_RE.test(nm)) continue;
+                const existingPts = ((dev["points"] ?? []) as Array<Record<string, unknown>>)
+                    .map((q) => `${String(q["name"] ?? "")}(${String(q["id"] ?? "")})`)
+                    .join("、");
+                const tr = await llm_json(
+                    "id_translate_prompt.txt",
+                    { existing_points: existingPts, name: nm },
+                    nm,
+                    conversation,
+                ).catch(() => null);
+                const tid = tr ? String(tr["id"] ?? "").trim() : "";
+                if (tid !== "" && IDENTIFIER_RE.test(tid)) {
+                    p["id"] = tid;
+                }
+            }
             return evaluate_change_add(state, targetId, svcType, dev, current, reg);
         } else {
             return null;
@@ -4234,6 +5251,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 state.changeAddPoints = null;
                 state.userTexts = [];
                 state.fileTable = null;
+                state.group = null;
                 stateWriter.setAccessPlan(false);
                 stateWriter.setPhase("idle");
                 cfg.agentLogger.phase(conversation, "idle");
@@ -4380,6 +5398,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 state.locks = { receive: false, forward: false };
                 state.gapRepeat = 0;
                 state.pendingGap = null;
+                state.lastGapSignature = null;
                 state.pendingChangeAsk = false;
                 state.pendingDisambig = false;
                 state.disambigHostId = null;
@@ -4387,6 +5406,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 state.changeAddPoints = null;
                 state.userTexts = [];
                 state.fileTable = null;
+                state.group = null;
                 stateWriter.setPhase("idle");
                 cfg.agentLogger.phase(conversation, "idle");
                 stateWriter.setAccessPlan(false);
@@ -4410,6 +5430,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 state.disambigHostId = null;
                 state.pendingNewDevice = false;
                 state.changeAddPoints = null;
+                state.group = null;
                 stateWriter.setAccessPlan(false);
                 stateWriter.setPhase("idle");
                 cfg.agentLogger.phase(conversation, "idle");
@@ -4425,6 +5446,36 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             if (state.userConfirmed) {
                 // 确认态的普通消息：确认是硬边界，继续等待按钮而非执行
                 state.userConfirmed = false;
+            }
+
+            // ②.5 设备组批量接入（agent.md §2.11，func_test_case 用例 57~62）：组会话
+            // 进行中一切消息进组流水线（取消/按钮已在上方拦截并清空组会话）；全新态
+            // 消息命中组触发（封闭枚举：区间表述/数量词+逐台参数列举/批量语汇）即激活。
+            // 单设备消息不含任何触发形态——不误入组模式（用例 47 逐台口径不受影响）
+            if (state.group !== null) {
+                yield* group_turn(userText, state, conversation);
+                return;
+            }
+            {
+                const groupFresh =
+                    state.recv.deviceName === null &&
+                    state.recv.points === null &&
+                    state.accessPlan === null &&
+                    !state.pendingChangeAsk &&
+                    !state.pendingDisambig &&
+                    !state.pendingNewDevice &&
+                    state.disambigHostId === null &&
+                    state.changeAddPoints === null;
+                if (groupFresh && detect_group_access(clean_user_text(userText))) {
+                    state.recv = fresh_side();
+                    state.fwd = fresh_side();
+                    state.forwardIntent = false;
+                    state.accessPlan = null;
+                    state.pendingGap = null;
+                    state.group = { groups: [], protocol: null, fwd: null, userTexts: [] };
+                    yield* group_turn(userText, state, conversation);
+                    return;
+                }
             }
 
             // ③ 轻量回复分叉（问候/查询/介绍——不进入接入流程）
@@ -4450,10 +5501,17 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
 
             // ⑤ 变更流分叉（modify/delete/add_points，已接入设备的调整）；
             // pendingChangeAsk：变更追问（缺点名/缺转发地址/待选设备）的应答回合
-            // 强制走本分叉，解析输入为累积用户文本（2026-09-27 用例10）
+            // 强制走本分叉，解析输入为累积用户文本（2026-09-27 用例10）。
+            // accessIssuePending：接入方案装配失败待澄清（如转发地址重叠，用例 24）——
+            // 此时应答是对**新设备接入草稿**的修正（「转发点表改为7100~7109」含「改为」
+            // 会被本分叉误劫，设备尚不存在 → 「设备不存在」死路，2026-10-04 实测），
+            // 须留给接入管线做点表改写
+            const accessIssuePending = state.lastGapSignature === "assemble.issue";
             if (
                 state.pendingChangeAsk ||
-                (CHANGE_INTENT_RE.test(userText) && !/^(接入|解析)/.test(trimmed))
+                (CHANGE_INTENT_RE.test(userText) &&
+                    !/^(接入|解析)/.test(trimmed) &&
+                    !accessIssuePending)
             ) {
                 console.error(
                     `[route] change-intent hit: ${JSON.stringify(trimmed.slice(0, 50))} pending=${state.pendingChangeAsk}`,
@@ -4806,6 +5864,8 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 yield { type: "done" };
                 return;
             }
+            // 方案装配成功 → 装配失败语境消费完毕（后续「改为…」类消息恢复变更流路由）
+            state.lastGapSignature = null;
             {
                 const devices = (assembled.plan["devices"] ?? []) as Array<Record<string, unknown>>;
                 const recvProto = String(devices[0]?.["protocol"] ?? "");

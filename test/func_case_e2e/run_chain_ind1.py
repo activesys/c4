@@ -244,7 +244,10 @@ def s51(influx=None):
         conv = rc.Conv()
         base.flow(conv, MSG51A, answers=[(r"场站", "华能阿拉善")],
                   done=lambda: False, max_turns=8,
-                  stop_on=[r"执行过程中出现问题"])
+                  # 两种失败文案都要接住：网络类（PORT_BIND_FAILED→「网络连接出现问题，
+                  # 服务未能启动。本次变更已恢复原样…」2026-10-04 实测）与通用类
+                  #（「执行过程中出现问题，本次变更未生效…」）——与用例 60 stop_on 同口径
+                  stop_on=[r"本次变更已恢复原样", r"执行过程中出现问题"])
         # 回滚异步于 flow 的实例数检测（merge 落盘即 return，回滚在其后）——
         # 先等回滚完成（最终态 = 空态），再断言无幽灵条目
         rc.wait_config(lambda c: not rc.server_instances(c or {}),
@@ -299,8 +302,15 @@ def s51(influx=None):
         e1 = reg["entries"][0]
         if e1.get("host") != wid1 or e1.get("name") not in ("wt1", "1号风机"):
             raise rc.Fail(f"51B③: 重建条目异常: {e1}")
-        if e1.get("pointMap", {}).get("风速") != "wt1_windspeed":
-            raise rc.Fail(f"51B③: pointMap 未按点表重建: {e1.get('pointMap')}")
+        # pointMap 重建契约 = 忠实镜像 config.json 点表（name→id），期望值由 config
+        # 推导、不硬编码 LLM 译名——「风速」→windspeed（5.3-flash 代）/wind_speed
+        # （4.5-air 代）均为合法 snake_case（2026-10-04 实测），断言钉契约不钉译名
+        expected_pm = {}
+        for inst in (rc.read_config() or {}).get("c4_asfp2_server", []) or []:
+            for p in inst.get("points", []) or []:
+                expected_pm[p.get("name")] = p.get("id")
+        if e1.get("pointMap", {}) != expected_pm:
+            raise rc.Fail(f"51B③: pointMap 未按点表重建: {e1.get('pointMap')} ≠ {expected_pm}")
         if reg.get("channelHighWatermark") != 2:
             raise rc.Fail(f"51B④: 水位降级={reg.get('channelHighWatermark')} ≠ 2（现存最大序号：wt1 占 1/2）")
         # 重接 2号（9002 已释放）→ writer = 现存最大 + 1 = channel3（+reader channel4，

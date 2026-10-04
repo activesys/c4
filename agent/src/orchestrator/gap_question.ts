@@ -321,6 +321,14 @@ export function parse_receive_port(message: string): number | null {
 const CHANGE_ID_RE = /^[a-zA-Z][a-zA-Z0-9_]*$/;
 
 /**
+ * 应答性/催促性词语——不是点名也不是英文标识（2026-10-04 用例 54 实测：
+ * 追问点名后驱动器答「继续」，被 change.name 裸值绑定收编成点「继续」、
+ * id=continue）。全等匹配，宁可放过（交回正常解析）不可错绑
+ */
+const CHANGE_STOPWORD_RE =
+    /^(?:继续|接着|好的?|是的?|嗯+|哦|可以|确认|行|对|ok|okay|yes|no)$/i;
+
+/**
  * 把变更追问的应答绑定给追加草稿（原地修改 draft 中的点条目）。
  * - change.name：单词应答（中/英文，非纯数字）→ 覆盖草稿唯一点的点名
  *   （撞名换名场景依赖覆盖语义）；英文形态同时落 id（用户原文提供，不自动生成）
@@ -362,6 +370,7 @@ export function bind_change_answer(
     }
     // 点名/英文标识：仅绑单点草稿（多点追加由 change_prompt 整体给出）
     if (draft.length !== 1) return false;
+    if (CHANGE_STOPWORD_RE.test(t)) return false;
     if (key === "change.name") {
         if (/^[0-9]+$/.test(t)) return false;
         if (!/^[\u4e00-\u9fa5A-Za-z][\u4e00-\u9fa5A-Za-z0-9_]{0,23}$/.test(t)) return false;

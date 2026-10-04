@@ -404,7 +404,6 @@ async function runStartupWaterfall(
 async function createModel(config: AgentConfig, logger: Logger) {
     const { name, base_url, temperature, max_tokens, api_key_env } =
         config.model;
-    void config.model.thinking;
 
     const apiKey = process.env[api_key_env];
     if (!apiKey) {
@@ -417,10 +416,15 @@ async function createModel(config: AgentConfig, logger: Logger) {
     logger.info(
         `创建模型: ${name} @ ${base_url} (temperature=${temperature})`,
     );
-    // 智谱端点对 glm-5.3-flash 拒绝任何 thinking 参数（实测 disabled 与 low/high/max
-    // 均 400 code=1210）；不注入任何 thinking 字段——模型默认始终思考并返回
-    // reasoning_content，正常出正文。
-    const modelKwargs: Record<string, unknown> = {};
+    // 智谱端点 thinking 注入（2026-10-04 恢复条件注入）：glm-4.5-air 默认深度思考——
+    // 每次调用 23s 量级且 reasoning 消耗 max_tokens 配额（e2e 4096 下正文易截断），
+    // agent.json 显式 "thinking": "disabled" 时注入关思考；glm-5.3-flash 拒绝任何
+    // thinking 参数（实测 disabled 与 low/high/max 均 400 code=1210）——该模型名下
+    // 一律不注入（模型默认始终思考并返回 reasoning_content，正常出正文）
+    const modelKwargs: Record<string, unknown> =
+        config.model.thinking === "disabled" && !name.includes("5.3")
+            ? { thinking: { type: "disabled" } }
+            : {};
     return new ChatOpenAI({
         apiKey,
         model: name,
