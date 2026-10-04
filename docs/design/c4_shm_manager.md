@@ -1,6 +1,6 @@
 # C4 共享内存管理设计
 
-> **版本**：v0.3.1 | **最后更新**：2026-07-16 | **父文档**：[c4_architecture.md](c4_architecture.md)
+> **版本**：v0.3.1 | **最后更新**：2026-10-04 | **父文档**：[c4_architecture.md](c4_architecture.md)
 
 ---
 
@@ -173,7 +173,7 @@ sequenceDiagram
 
 - **配置文件是唯一真相源**：`adjust_shm` 以配置文件中的 points 列表为准计算需求和分类 block（已有点 vs 孤儿块 vs 空闲块），不依赖 Agent 传入点数参数
 - **已有点地址不变**：`ftruncate` 只追加尾部空间，已有 block 的物理偏移不变。配置文件中已有点的 shm_id 始终保持原值
-- **shm_id 一次分配，终身不变**：寻址公式绑定物理位置，重编号会导致映射关系全乱。即使 writer 停止或点被删除，其 shm_id 不会被重新分配给其他点——该 block 被回收后仅供同一点重新激活使用
+- **shm_id 数值不重编号**：寻址公式绑定物理位置，重编号会导致映射关系全乱。已分配 point 的 shm_id 始终保持原值；点被删除后其 block 回收，该 shm_id **数值不变、可被新 point 分配使用**（新 point 取得同一数值的 shm_id——「不变」指不改变存有点的编号，非保留空块，见下文回收算法与示例一）
 - **不缩容**：已分配后不再缩减共享内存，避免截断仍在使用的块。块回收仅将 `state` 置 0，不释放文件空间。空间换简单性
 - **回收通过 adjust_shm 统一处理**：Writer 停止或点表缩减时，`adjust_shm` 将不再出现在配置中的 point 对应的 block 的 `state` 置 0，`point_count` 随之递减。回收后 block 可被后续分配复用
 - **全量离线可重建**：如果碎片严重，可在所有 writer 离线时 `shm_unlink` 后重新紧凑分配
@@ -288,7 +288,7 @@ Agent 停止 writer3(3个点)，从配置文件删除 writer3 的 points：
 关键性质：
 - **回收不破坏仍在用的 block**：writer1、2、4 的 block 保持 state=1，数据管道不受影响
 - **回收后可立即复用**：回收的 block[5..7] 在同一 `adjust_shm` 调用中可供新 point 分配
-- **shm_id 不重分配**：block[5] 的 shm_id 始终是 5，即使被回收也不会分配给其他 key——仅在原 writer3 恢复时重新激活
+- **shm_id 不重编号**：block[5] 的 shm_id 数值始终是 5；回收后**可分配给新 point**（示例一 writer5 即取得该 block）——「不重分配」指不改变存有点的编号，非保留空块
 
 #### 同时回收与再分配
 
