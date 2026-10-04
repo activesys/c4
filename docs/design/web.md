@@ -171,7 +171,7 @@ SSE 响应事件（`Content-Type: text/event-stream`）：
 - **后端按 `conversationId` 持久化完整历史**：编排器每轮结束后把 `run.output.messages`
   （含工具调用/结果）按 conversationId 存入内存 Map，后续轮优先恢复服务端历史（前端 history
   仅作服务端无记录时的兜底）；nudge 消息剔除，限长 100 条。修复跨轮工具证据丢失导致的
-  推理死循环（func_test_case 用例 12）。
+  推理死循环（原 func_test_case 用例 12，2026-10-04 随 ReAct 时代用例退役删除）。
 - **后端内存闭包**：`C4Agent` 在内存中维护跨轮的设备信息与接入方案（agent.md §3.2.1.3a），
   且不持久化（Agent 重启即丢失——重启后服务端历史为空，退化为前端 history 兜底）。
 

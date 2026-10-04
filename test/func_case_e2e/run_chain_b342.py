@@ -215,6 +215,7 @@ def main():
             t0 = time.time()
             try:
                 fn()
+                rc.PH.check(f"{chain_name}/{label}")
             except rc.Fail as e:
                 base.dump_diag(f"{chain_name}_{label}", e)
                 rc.log(f"════ 链步 {label} FAIL: {e} ════")

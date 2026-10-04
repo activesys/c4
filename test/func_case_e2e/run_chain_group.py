@@ -378,6 +378,7 @@ def main():
             agent.up()
             rc.AGENT = agent
             fn()
+            rc.PH.check(label)
         except rc.Fail as e:
             base.dump_diag(label, e)
             rc.log(f"════ 链段 {label} FAIL: {e} ════")

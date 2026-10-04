@@ -361,7 +361,9 @@ def main():
     rc.AGENT = agent
     for label, cases, fn in chains:
         rc.log(f"════ 链段 {label} 开始 ════")
-        rc.PH.reset(label)
+        # 51 段为多场景串联（51A 占端口回滚→重接 + 51B 再接→删除→删库→重建），
+        # 每场景各一次合法方案确认——README §4「脚本显式声明的多轮确认除外」
+        rc.PH.reset(label, button_budget={"51": 6}.get(label, 2))
         t0 = time.time()
         try:
             base.chain_clean()
@@ -370,6 +372,7 @@ def main():
             agent.up()
             rc.AGENT = agent
             fn()
+            rc.PH.check(label)
         except rc.Fail as e:
             base.dump_diag(label, e)
             rc.log(f"════ 链段 {label} FAIL: {e} ════")

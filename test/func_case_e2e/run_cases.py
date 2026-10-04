@@ -377,6 +377,69 @@ def chat(message, history, conversation_id=None):
     return "".join(text_parts), events
 
 
+def upload_file(conversation_id, file_path, message=None):
+    """POST /api/upload（multipart + 会话续接，func_test_case 用例 7 驱动通道）。
+
+    - multipart/form-data 手工组包（无 requests 依赖）：字段 file（必）+
+      message/conversationId（可选，服务端 upload.ts 契约）；
+    - filename 以 UTF-8 原始字节写入头——multer 按 latin1 解码、服务端
+      latin1→utf8 还原中文名（浏览器同款行为）；
+    - 响应为 SSE（事件形状与 /api/chat 同构），X-Conversation-Id 头回传服务端
+      采纳的会话 id（web.md §3.1.2：客户端生成、服务端复用）。
+    返回 (完整文本, 事件列表, 服务端回传 conversationId)。"""
+    boundary = "----c4e2e" + uuid.uuid4().hex
+    parts = []
+
+    def field(name, value):
+        parts.append(
+            (f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"'
+             f"\r\n\r\n{value}\r\n").encode("utf-8"))
+
+    if message:
+        field("message", message)
+    field("conversationId", conversation_id)
+    fname = os.path.basename(file_path)
+    with open(file_path, "rb") as f:
+        file_bytes = f.read()
+    parts.append(
+        (f'--{boundary}\r\nContent-Disposition: form-data; name="file"; '
+         f'filename="{fname}"\r\nContent-Type: application/octet-stream\r\n\r\n'
+         ).encode("utf-8") + file_bytes + b"\r\n")
+    parts.append(f"--{boundary}--\r\n".encode("utf-8"))
+    body = b"".join(parts)
+
+    req = urllib.request.Request(
+        BASE + "/api/upload", data=body, method="POST",
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}",
+                 "Accept": "text/event-stream"})
+    text_parts, events = [], []
+    with urllib.request.urlopen(req, timeout=300) as resp:
+        server_cid = resp.headers.get("X-Conversation-Id", "")
+        buf = []
+        for raw in resp:
+            line = raw.decode("utf-8", "replace").rstrip("\n")
+            if line.startswith("data: "):
+                buf.append(line[6:])
+                continue
+            if line == "" and buf:
+                data = "\n".join(buf)
+                buf = []
+                try:
+                    d = json.loads(data)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(d, dict):
+                    continue
+                t = d.get("type")
+                if t == "text" and isinstance(d.get("content"), str):
+                    text_parts.append(d["content"])
+                elif t in ("tool_call", "tool_result"):
+                    events.append((t, str(d.get("name", ""))))
+                elif t == "error":
+                    events.append(("error", ""))
+    return "".join(text_parts), events, server_cid
+
+
 def state():
     with urllib.request.urlopen(BASE + "/api/state", timeout=5) as r:
         return json.loads(r.read().decode())
@@ -435,6 +498,29 @@ class Conv:
         ctext = self.send("[C4_BUTTON_CONFIRM] 确认")
         wait_idle()
         return ctext, True
+
+    def upload(self, file_path, message=None):
+        """上传文件轮（func_test_case 用例 7）：multipart /api/upload + 会话续接。
+
+        客户端 conversationId 全程复用（web.md §3.1.2）——上传解析轮与后续文本轮
+        同会话，服务端草稿才能延续（原用例 12 的行为级验收点）。"""
+        message = map_ports(message) if message else message
+        shown = message or "请解析此文件中的设备信息"
+        PH.user(shown)
+        text, events, server_cid = upload_file(self.conversation_id, file_path, message)
+        if server_cid:
+            if server_cid != self.conversation_id:
+                raise Fail(f"upload: 服务端会话 id 不一致 {server_cid} ≠ {self.conversation_id}")
+        log(f"  >> [upload] {os.path.basename(file_path)} message={shown!r}")
+        log(f"  << {text}")
+        tools = {name for (t, name) in events if t == "tool_call"}
+        PH.assistant(text, tools)
+        for (t, _name) in events:
+            if t == "error":
+                PH.event("error")
+        if text:
+            self.history.append({"role": "assistant", "content": text})
+        return text
 
 
 
@@ -610,6 +696,16 @@ class ProcessHealth:
             notes.append("#5 SKIP（merge/rollback 事件未上线）")
 
         return v, notes
+
+    def check(self, case):
+        """链段收尾过程断言闸门（用例 46）：违例即 FAIL，与数据断言并列
+        （func_case_e2e/README.md §4——PASS 判定 = 数据断言 ∧ 过程断言）。"""
+        vio, notes = self.verdict()
+        for n in notes:
+            log(f"  [过程断言] {n}")
+        if vio:
+            raise Fail(f"过程断言违例（{case}）: {'; '.join(vio)}")
+        log("  过程断言全绿（#1 按钮预算 / #2 无假成功 / #3 无空转 / #4 无自问自答）")
 
 
 PH = ProcessHealth()

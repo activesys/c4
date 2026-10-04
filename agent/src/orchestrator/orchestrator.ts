@@ -319,7 +319,7 @@ function same_points_deep(
 
 // 修改/删除意图（针对已接入设备）
 const CHANGE_INTENT_RE =
-    /不再采集|停用|删除|移除|删了|删掉|去掉|改为|改成|修改|调整|更新|增加.{0,8}点|追加.{0,8}点|添加.{0,8}点|加点|新增点|再加|再添|再写|同步写|多写一份|再映射/;
+    /不再采集|停用|删除|移除|删了|删掉|去掉|改为|改成|改(?:个)?名|更名为|修改|调整|更新|增加.{0,8}点|追加.{0,8}点|添加.{0,8}点|加点|新增点|再加|再添|再写|同步写|多写一份|再映射/;
 
 // point_prompt 9a 条按侧别注入（2026-09-27 用例4 线上事故：receive 侧 prompt 携带
 // forward 侧禁抄规则时，消息中的「点表与I区一致」触发词把提取带偏为空数组——
@@ -4595,6 +4595,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
         let detail: string;
         const regDeletes: string[] = [];
         const pointMapDrops: Array<{ prefix: string; keys: string[] }> = [];
+        const renameRebinds: Array<{ oldName: string; newName: string; key: string }> = [];
         if (action === "delete") {
             // 独占/共用判定（§3.2.1.3a）＝宿主上注册表条目数：删除后归零 → 空实例移除
             //（独占形态设备即实例整体，整实例删除）；条目数 ≥1 → 实例保留，
@@ -4694,6 +4695,21 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 .map((p) => `点 ${String(p["id"])} 的参数调整为 ${JSON.stringify(p)}`)
                 .join("；");
             detail = `在「${devDisplayName}」上修改：${[ftxt, ptxt].filter(Boolean).join("；")}`;
+            // 改名重绑定（agent.md §3.2.1.3a / §3.2.1.6 第 3 步）：name 变化的
+            // point_update 按既有 key 换绑 pointMap——登记新名、摘除旧名（换绑而非
+            // 并存：旧源点名已随改名失效，残留映射会让后续按旧名的操作命中已改名
+            // 点）；新名已映射到其他 key 时跳过该项（防覆盖他人映射）。持久化随
+            // registryWrites 挂成功路径，执行失败回滚不写
+            const devPts = (dev["points"] ?? []) as Array<Record<string, unknown>>;
+            for (const p of pu) {
+                const newName = String(p["name"] ?? "").trim();
+                const key = String(p["id"] ?? "").trim();
+                if (newName === "" || key === "") continue;
+                const old = devPts.find((q) => String(q["id"] ?? "") === key);
+                const oldName = String(old?.["name"] ?? "").trim();
+                if (oldName === "" || oldName === newName) continue;
+                renameRebinds.push({ oldName, newName, key });
+            }
         } else if (action === "add_points") {
             // 草稿合并（单调累积）：有 addr 按 addr 为键；无 addr（先给点名的场景，
             // 2026-09-27「反向有功」实测）按点名匹配，匹配不到以无址条目入草稿，
@@ -4762,6 +4778,22 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
         state.disambigHostId = null;
         const display =
             `变更方案如下：\n· ${detail}\n是否确认执行？请点击下方「确认」按钮；如需取消请点击「取消」。`;
+        // 改名换绑 upsert：有重绑项且注册表条目存在时，整体换绑后的 pointMap 随
+        // 成功路径固化（与加点路径 pointMapAdds 同机制）
+        const renameRegEntry =
+            renameRebinds.length > 0 && devPrefix !== ""
+                ? reg.entries.find((e) => e.prefix === devPrefix)
+                : undefined;
+        let renameUpserts: Array<(typeof reg.entries)[number]> = [];
+        if (renameRegEntry) {
+            const pm: Record<string, string> = { ...renameRegEntry.pointMap };
+            for (const rn of renameRebinds) {
+                if (pm[rn.newName] !== undefined && pm[rn.newName] !== rn.key) continue;
+                if (pm[rn.oldName] === rn.key) delete pm[rn.oldName];
+                pm[rn.newName] = rn.key;
+            }
+            renameUpserts = [{ ...renameRegEntry, pointMap: pm }];
+        }
         return {
             steps: changes.map((c) => ({
                 action: c["action"] as ServiceStep["action"],
@@ -4771,7 +4803,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             })),
             display,
             registryWrites: {
-                upserts: [],
+                upserts: renameUpserts,
                 deletes: regDeletes,
                 pointMapDrops,
                 channelHighWatermark: reg.channelHighWatermark,

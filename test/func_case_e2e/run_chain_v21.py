@@ -672,6 +672,7 @@ def main():
         t0 = time.time()
         try:
             fn()
+            rc.PH.check(label)
         except rc.Fail as e:
             dump_diag(label, e)
             rc.log(f"════ 链步 {label} FAIL: {e} ════")
