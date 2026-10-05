@@ -362,10 +362,12 @@ function _parse_entry(value: unknown): AbbrEntry | null {
         return null;
     }
     const obj = value as Record<string, unknown>;
-    // 旧格式条目（id/abbr、无 prefix/host）直接丢弃——不保留旧格式兼容（§3.2.1.3）
+    // 旧格式条目（id/abbr、无 prefix/host）直接丢弃——不保留旧格式兼容（§3.2.1.3）。
+    // prefix==="" 是 §2.12.6 下游目标条目的合法形态（按 name upsert/delete），
+    // 不得当作损坏数据丢弃（2026-10-05 用例 65 实测：每次加载目标条目凭空消失）
     if (
         typeof obj["name"] !== "string" || obj["name"].length === 0 ||
-        typeof obj["prefix"] !== "string" || obj["prefix"].length === 0 ||
+        typeof obj["prefix"] !== "string" ||
         typeof obj["host"] !== "string" || obj["host"].length === 0
     ) {
         return null;

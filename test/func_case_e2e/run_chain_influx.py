@@ -46,6 +46,9 @@ MSG39 = MSG38.replace(
 ).replace("wind_turbine这个measurement，字段名跟点名对应（windspeed、power、wind_dir、pitch_angle、gen_speed、gearbox_oil_temp、tower_temp、air_temp、humidity、pressure）",
           "wind_turbine，字段名跟点名对应")
 ANS39 = "bucket是hnals。"
+MSG43 = ("这10个点都写一份到另一个bucket：url同，还是http://127.0.0.1:8086，"
+         "token是hnals-influx-2026，org是activesys，bucket换成wind_history，"
+         "measurement和字段名跟wind_turbine那边一样，类型统一float。")
 MSG41 = ("给1号风机的入库再加一条：风速除了wind_turbine，也同步写一份到wind_anomaly这个measurement，"
          "字段也叫windspeed，类型float。")
 
@@ -255,6 +258,81 @@ def s40(influx):
     base.assert_no_handle_leak("40")
 
 
+def s43(influx):
+    """43: 入口 B 第二实例共享读——目标名必答、跨实例同 key、既有实例不变。"""
+    import http.client
+    conn = http.client.HTTPConnection("127.0.0.1", 18086, timeout=10)
+    conn.request("POST", "/query", urlencode({"q": "CREATE DATABASE wind_history"}))
+    conn.getresponse().read()
+    conn.close()
+
+    before = rc.read_config()
+    before_old = next((i for i in rc.server_instances(before or {}).values()
+                       if isinstance(i, dict) and i.get("bucket") == "hnals"), None)
+    conv = rc.Conv()
+    # ① 目标名必答（「另一个bucket」不构成目标名——§2.12.1）→ 答「历史库」
+    base.flow(conv, MSG43, answers=[(r"叫什么|名字|称为", "历史库")],
+              done=lambda: sum(1 for k in rc.server_instances(rc.read_config() or {})
+                               if k[0] == "c4_influxdb_client") >= 2)
+    asked = any(re.search(r"叫什么|名字|称为", h.get("content", ""))
+                for h in conv.history if h.get("role") == "assistant")
+    if not asked:
+        raise rc.Fail("43①: 目标名未必答（消息仅描述「另一个bucket」）")
+    cfg = rc.wait_config(lambda c: sum(1 for k in rc.server_instances(c)
+                                       if k[0] == "c4_influxdb_client") >= 2,
+                         timeout=240, desc="43: 第二实例落地")
+    insts = [i for (st, _i), i in rc.server_instances(cfg).items()
+             if st == "c4_influxdb_client"]
+    hist = next((i for i in insts if i.get("bucket") == "wind_history"), None)
+    old = next((i for i in insts if i.get("bucket") == "hnals"), None)
+    if hist is None or old is None:
+        raise rc.Fail(f"43②: 实例形态不符: {[i.get('bucket') for i in insts]}")
+    # ③ 目标名采纳「历史库」（bucket 名不构成目标名——假失败即此处）
+    reg = base.registry()
+    if not any(e.get("prefix") == "" and e.get("name") == "历史库"
+               for e in reg.get("entries", [])):
+        raise rc.Fail(f"43③: 注册表缺「历史库」目标条目: {reg.get('entries')}")
+    # ④ 跨实例共享读：两实例引用相同采集 key（10 点）
+    keys_old = sorted(str(p.get("key")) for p in old.get("points", []))
+    keys_new = sorted(str(p.get("key")) for p in hist.get("points", []))
+    if keys_old != keys_new or len(keys_new) != 10:
+        raise rc.Fail(f"43④: 跨实例引用不一致: {len(keys_old)} vs {len(keys_new)}")
+    # ⑥ 既有实例不受影响
+    if json.dumps(old, sort_keys=True) != json.dumps(before_old, sort_keys=True):
+        raise rc.Fail("43⑥: 既有 hnals 实例被改动")
+    # ⑤ 数据面：注入 → hnals 与 wind_history 两库均可见（measurement=wind_turbine）
+    rc.inject(P_RECV1, 1000, 1010, times=3)
+    deadline = time.time() + 40
+    got_h = got_w = None
+    while time.time() < deadline:
+        got_h = influx_fields_of("wind_turbine")
+        url = (INFLUX_URL + "/query?db=wind_history&q="
+               + urllib.parse.quote('select * from "wind_turbine" limit 1'))
+        try:
+            with urllib.request.urlopen(url, timeout=10) as r:
+                data = json.loads(r.read().decode("utf-8"))
+            series = (data.get("results") or [{}])[0].get("series") or []
+            got_w = [c for c in (series[0].get("columns", []) if series else [])
+                     if c != "time"] or None
+        except Exception:
+            got_w = None
+        if (got_h and got_w and set(FIELDS38) <= set(got_h)
+                and set(FIELDS38) <= set(got_w)):
+            break
+        time.sleep(2)
+    if not (got_h and got_w and set(FIELDS38) <= set(got_h)
+            and set(FIELDS38) <= set(got_w)):
+        raise rc.Fail(f"43⑤: 数据面断链 hnals={got_h} wind_history={got_w}")
+    # ⑦ 负向：修改下游澄清拒绝，config 不变
+    t7 = conv.send("把历史库的bucket改成stats2。")
+    if not re.search(r"不支持|无法|暂不|澄清", t7):
+        raise rc.Fail(f"43⑦: 修改下游未被澄清拒绝: {t7[:200]}")
+    time.sleep(3)
+    if json.dumps(rc.read_config(), sort_keys=True) != json.dumps(cfg, sort_keys=True):
+        raise rc.Fail("43⑦: 拒绝路径 config 被改动")
+    base.assert_no_handle_leak("43")
+
+
 def influx_reset_db():
     """链首清库（D2/D3 回零的一部分——D1 写入的 series 会干扰数据面断言）。"""
     import http.client
@@ -279,9 +357,11 @@ CHAIN_TAG = "C4He1"
 CHAIN_FAIL_DIR = base.CHAIN_FAIL_DIR
 
 CHAINS = [
-    ("D1", [("A.2", SETUP_ONLY, lambda influx: None), ("38", ["38"], s38), ("41", ["41"], s41)]),
+    ("D1", [("A.2", SETUP_ONLY, lambda influx: influx_reset_db()), ("38", ["38"], s38), ("41", ["41"], s41)]),
     ("D2", [("A.2", SETUP_ONLY, lambda influx: influx_reset_db()), ("39", ["39"], s39)]),
     ("D3", [("A.2", SETUP_ONLY, lambda influx: influx_reset_db()), ("40", ["40"], s40)]),
+    ("D4", [("A.2", SETUP_ONLY, lambda influx: influx_reset_db()), ("38", ["38"], s38),
+            ("43", ["43"], s43)]),
 ]
 
 
@@ -289,8 +369,11 @@ def main():
     rc.log("════ influxdb 组串行测试开始（D1: 38→41 / D2: 39 / D3: 40）════")
     influx = Influxd()
     influx.up()
+    only = set(sys.argv[1:])
     try:
         for chain_name, steps in CHAINS:
+            if only and chain_name not in only:
+                continue
             rc.log(f"════ ── {chain_name} 链开始 ── ════")
             base.chain_clean()
             rc.MCP_STACK.up()

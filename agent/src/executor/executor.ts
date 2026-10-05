@@ -335,6 +335,62 @@ export async function merge_config_from_steps(
         }
     }
 
+    // ── Step 2.7（agent.md §3.2.1.6 delete 第 4 步）：删除下游收缩（后置 pass）──
+    // 本事务含 delete 步骤时，以「全部步骤处理完毕后的最终合并配置」为基准重算引用
+    //（同事务删目标 A、增目标 D 引用同批点时 D 的引用计入，避免先收缩后悬空）：
+    // Writer 点的全局 key 不被任何 Reader 实例引用 → 从 Writer 删除（shm 块由
+    // adjust_shm 既有孤儿回收语义回收复用，c4_shm_manager.md；存有点 shm_id 不变、
+    // 不重编号）；Writer 实例删空 → 整实例移除；服务段清空 → 从
+    // c4_shm_manager.writer[]/reader[] 移除。非删除事务不跑（既有路径零扰动）。
+    const hadDeleteStep = steps.some(
+        (st) => st.action === "delete" && st.service_type !== "c4_shm_manager",
+    );
+    if (hadDeleteStep) {
+        const refs = new Set<string>();
+        for (const list of Object.values(config)) {
+            if (!Array.isArray(list)) continue;
+            for (const inst of list as MCPInstanceConfig[]) {
+                for (const p of (inst.points ?? []) as Array<Record<string, unknown>>) {
+                    const k = String(p["key"] ?? "");
+                    if (k.includes(".")) refs.add(k);
+                }
+            }
+        }
+        for (const list of Object.values(config)) {
+            if (!Array.isArray(list)) continue;
+            for (const inst of list as MCPInstanceConfig[]) {
+                const pts = (inst.points ?? []) as Array<Record<string, unknown>>;
+                if (pts.length === 0) continue;
+                if (!pts.every((p) => p["key"] === undefined)) continue; // 仅 Writer 点（id 形态）
+                const kept = pts.filter((p) => refs.has(`${String(inst.id)}.${String(p["id"])}`));
+                if (kept.length !== pts.length) {
+                    warnings.push(
+                        `shrink: ${String(inst.id)} 收缩 ${pts.length - kept.length} 个无引用采集点（点-下游引用不变量）`,
+                    );
+                    inst.points = kept as unknown as MCPInstanceConfig["points"];
+                }
+            }
+        }
+        for (const [st, list] of Object.entries(config)) {
+            if (st === "c4_shm_manager" || !Array.isArray(list)) continue;
+            const insts = list as MCPInstanceConfig[];
+            const kept = insts.filter((i) => Array.isArray(i.points) && i.points.length > 0);
+            if (kept.length !== insts.length) {
+                warnings.push(`shrink: ${st} 移除 ${insts.length - kept.length} 个删空实例`);
+                config[st] = kept;
+            }
+        }
+        const shm = config["c4_shm_manager"] as unknown as Record<string, unknown> | undefined;
+        for (const role of ["writer", "reader"]) {
+            if (shm && Array.isArray(shm[role])) {
+                shm[role] = (shm[role] as string[]).filter(
+                    (svc) =>
+                        Array.isArray(config[svc]) && (config[svc] as MCPInstanceConfig[]).length > 0,
+                );
+            }
+        }
+    }
+
     // ── Step 3: 原子写入（临时文件 → fsync → rename → 父目录 fsync）──
     const output = JSON.stringify(config, null, 4) + "\n";
     await atomic_write_raw(config_path, output);

@@ -437,7 +437,28 @@ export function generate_steps(
                 0,
             );
 
-            if (required_fields.length > 0) {
+            // key 对齐配对（agent.md §2.12.7 P2 前置落地，2026-10-04 多下游多设备）：
+            // 转发点携带 _pairId（采集点 key）时按 key 配对到对应 Writer 点——多设备
+            // × 多目标下全局位置对齐会把不同设备的转发点错配到首个 Writer。位置
+            // 对齐保留给单目标全量引用形态（既有用例零回归）。
+            const pair_ids =
+                ft_points_raw?.map((p) => String((p as Record<string, unknown>)["_pairId"] ?? "")) ??
+                [];
+            const keyed_pairing =
+                ft_points_raw !== null && pair_ids.length > 0 && pair_ids.every((id) => id !== "");
+            const writer_by_key = new Map<string, { step: (typeof steps)[number]; pt: { id: string } }>();
+            if (keyed_pairing) {
+                for (const ws of steps) {
+                    for (const pt of ws.points) {
+                        writer_by_key.set(String(pt.id), {
+                            step: ws,
+                            pt: pt as unknown as { id: string },
+                        });
+                    }
+                }
+            }
+
+            if (required_fields.length > 0 && !keyed_pairing) {
                 if (!ft_points_raw) {
                     return {
                         steps,
@@ -456,6 +477,35 @@ export function generate_steps(
 
             const reader_points: ServicePoint[] = [];
             let point_index = 0;
+            if (keyed_pairing && ft_points_raw) {
+                for (const src of ft_points_raw as Array<Record<string, unknown>>) {
+                    const pid = String(src["_pairId"]);
+                    const hit = writer_by_key.get(pid);
+                    if (!hit) {
+                        return {
+                            steps,
+                            warnings,
+                            fatal: `转发目标 "${ft.name}" 的转发点引用了不存在的采集点（${pid}）——请核对点集后重试`,
+                        };
+                    }
+                    const rp: Record<string, unknown> = {
+                        key: `${hit.step.instance.id}.${hit.pt.id}`,
+                        shm_id: 0,
+                    };
+                    for (const f of required_fields) {
+                        const v = src[f];
+                        if (v === undefined || v === null || v === "") {
+                            return {
+                                steps,
+                                warnings,
+                                fatal: `转发目标 "${ft.name}" 的转发点（${pid}）缺少必要字段 "${f}"，请向用户询问后重试，禁止编造`,
+                            };
+                        }
+                        rp[f] = v;
+                    }
+                    reader_points.push(rp as unknown as ServicePoint);
+                }
+            } else if (ft_points_raw) {
             for (const writer_step of steps) {
                 for (const pt of writer_step.points) {
                     const rp: Record<string, unknown> = {
@@ -481,6 +531,7 @@ export function generate_steps(
                     reader_points.push(rp as unknown as ServicePoint);
                     point_index++;
                 }
+            }
             }
 
             const instance: Record<string, unknown> = {
