@@ -49,7 +49,7 @@
   --warning-text: #b45309;
 
   /* ── 气泡 ── */
-  --bubble-user-bg: #f9fafb;   /* DeepSeek 用户气泡底（neutral-50） */
+  --bubble-user-bg: #d7e4fa;   /* 用户气泡底：DeepSeek 式浅蓝（对话截图取样） */
   --bubble-user-text: var(--text);
   --bubble-error-bg: #fdf0f0;
   --bubble-error-text: #cf4242;
@@ -346,26 +346,90 @@ input {
 .chat-view {
   display: flex;
   flex-direction: column;
-  height: 100%;
   gap: var(--space-4);
-  min-height: 0;
   width: 100%;
   max-width: var(--chat-column-max);
   margin: 0 auto;
 }
 
+/* 滚动发生在 app__main（滚动条贴窗口右缘）；chat-view 撑满视口高，
+   输入停靠层 sticky 钉底 */
 .chat-view__messages {
   flex: 1 1 auto;
-  overflow: auto;
-  padding: var(--space-2) 0 var(--space-4);
   display: flex;
   flex-direction: column;
   gap: var(--space-4);
+  padding: var(--space-2) 0 var(--space-4);
 }
 
-.chat-view__tool {
+.chat-view__dock {
+  position: sticky;
+  bottom: 0;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-2) 0;
+  background: var(--bg);
+}
+
+/* ── 思考过程折叠块（chat.deepseek.com「已思考」式）── */
+
+.thinking {
+  display: flex;
+  flex-direction: column;
+}
+
+.thinking__header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   align-self: flex-start;
-  max-width: 100%;
+  padding: 4px 10px 4px 0;
+  font-size: 14px;
+  color: var(--text-muted);
+  border-radius: var(--radius-md);
+  transition: color var(--transition);
+}
+
+.thinking__header:hover {
+  color: var(--text);
+}
+
+.thinking__icon {
+  color: var(--primary);
+  flex: 0 0 auto;
+}
+
+.thinking__icon--active {
+  animation: thinking-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes thinking-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+.thinking__chevron {
+  font-size: 12px;
+}
+
+.thinking__body {
+  margin: 2px 0 4px 8px;
+  padding-left: 16px;
+  border-left: 2px solid var(--border-weak);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.thinking__body .tool-card {
+  background: var(--bg-sidebar);
 }
 
 .chat-bubble {
@@ -1115,33 +1179,54 @@ input {
   color: var(--text-muted);
 }
 
-/* ── Agent 回复 Markdown 渲染样式（DeepSeek：正文 16px/28px）── */
+/* ── Agent 回复 Markdown 渲染样式（DeepSeek：正文 16px/28px；2026-10-05
+   用户指令：层次化排版——标题字号/加重阶梯、表格呈现点表与采集转发关系）── */
 .chat-bubble--agent .md > :first-child { margin-top: 0; }
 .chat-bubble--agent .md > :last-child { margin-bottom: 0; }
 .chat-bubble--agent .md p { margin: 0.5em 0; line-height: 1.75; }
 .chat-bubble--agent .md h1,
 .chat-bubble--agent .md h2,
-.chat-bubble--agent .md h3 { margin: 1.2em 0 0.6em; line-height: 1.4; }
-.chat-bubble--agent .md h1 { font-size: 1.25em; }
-.chat-bubble--agent .md h2 { font-size: 1.12em; }
-.chat-bubble--agent .md h3 { font-size: 1em; }
+.chat-bubble--agent .md h3,
+.chat-bubble--agent .md h4 {
+  margin: 1.35em 0 0.55em;
+  line-height: 1.4;
+  font-weight: 700;
+  color: var(--text);
+}
+.chat-bubble--agent .md h1 {
+  font-size: 1.375em;
+  padding-bottom: 0.3em;
+  border-bottom: 1px solid var(--border-weak);
+}
+.chat-bubble--agent .md h2 { font-size: 1.2em; }
+.chat-bubble--agent .md h3 { font-size: 1.08em; }
+.chat-bubble--agent .md h4 { font-size: 1em; }
+.chat-bubble--agent .md strong { font-weight: 650; }
 .chat-bubble--agent .md ul,
 .chat-bubble--agent .md ol { margin: 0.5em 0; padding-left: 1.4em; }
-.chat-bubble--agent .md li { margin: 0.2em 0; }
+.chat-bubble--agent .md li { margin: 0.25em 0; }
 .chat-bubble--agent .md table {
   border-collapse: collapse;
-  margin: 0.5em 0;
+  margin: 0.6em 0;
   font-size: 0.9375em;
   display: block;
   overflow-x: auto;
+  max-width: 100%;
 }
 .chat-bubble--agent .md th,
 .chat-bubble--agent .md td {
-  border: 1px solid var(--border);
-  padding: 0.3em 0.6em;
+  border: none;
+  border-bottom: 1px solid var(--border-weak);
+  padding: 0.45em 0.85em;
   text-align: left;
+  white-space: nowrap;
 }
-.chat-bubble--agent .md th { background: var(--bg-subtle); }
+.chat-bubble--agent .md th {
+  background: var(--bg-subtle);
+  font-weight: 650;
+  border-bottom: 2px solid var(--border);
+}
+.chat-bubble--agent .md tbody tr:nth-child(even) { background: var(--bg-subtle-2, transparent); }
 .chat-bubble--agent .md code {
   background: var(--bg-subtle-2);
   padding: 0.1em 0.4em;
@@ -1189,6 +1274,7 @@ input {
   justify-content: center;
   gap: var(--space-5);
   padding-bottom: var(--space-6);
+  min-height: 100%;
   max-width: 880px;
 }
 

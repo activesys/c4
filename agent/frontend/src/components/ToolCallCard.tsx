@@ -1,9 +1,10 @@
 // c4/agent/frontend/src/components/ToolCallCard.tsx
 // Tool-call progress card — web.md §3.1.1, §3.1.2.
 //
-// Shows ONLY the tool name + status; args are intentionally not rendered
-// (backend always sends args={} and non-technical users should not see
-// protocol-level fields by default). Details collapse by default.
+// Shows the tool name + status, result line expanded by default (2026-10-05
+// 用户指令：思考步骤默认打开)；args are intentionally not rendered (backend
+// always sends args={} and non-technical users should not see protocol-level
+// fields by default). 无结果内容的步骤不渲染详情区。
 
 import { useState } from "react";
 
@@ -20,7 +21,7 @@ export function ToolCallCard({
   status,
   result,
 }: ToolCallCardProps): JSX.Element {
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(true);
 
   const statusText = status === "running" ? "执行中" : "完成";
 
@@ -40,12 +41,8 @@ export function ToolCallCard({
           {expanded ? "▾" : "▸"}
         </span>
       </button>
-      {result !== undefined && (
-        <div
-          data-testid="tool-card-details"
-          className="tool-card__details"
-          hidden={!expanded}
-        >
+      {expanded && result !== undefined && result !== "" && (
+        <div data-testid="tool-card-details" className="tool-card__details">
           {result}
         </div>
       )}

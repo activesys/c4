@@ -17,7 +17,7 @@
 // declares interrupt as "backend never emits it", so the UI does not depend
 // on it. We still tolerate it gracefully (no crash).
 
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   streamChat,
   truncateHistory,
@@ -38,6 +38,12 @@ export interface ToolCardState {
   result?: string;
 }
 
+/** 已结束轮次的思考过程快照（逐轮持久化，新轮次出现后历史思考块不消失） */
+export interface TurnStepsSnapshot {
+  steps: ToolCardState[];
+  elapsedSec: number;
+}
+
 export interface ChatBubble {
   id: string;
   role: "user" | "agent" | "error";
@@ -49,6 +55,10 @@ export interface UseChatStreamReturn {
   status: ChatStreamStatus;
   messages: ChatBubble[];
   toolCards: ToolCardState[];
+  /** 思考过程已用时秒数（回合进行中每秒刷新，结束后保留最终用时） */
+  thinkingSec: number;
+  /** 历史轮次的思考过程快照（索引 = 第 N 次发送的轮次） */
+  turnsHistory: TurnStepsSnapshot[];
   assistantText: string;
   error: string | null;
   send: (
@@ -88,10 +98,33 @@ export function useChatStream(): UseChatStreamReturn {
   // 执行，前端不做任何句式/工具事件推断（agent.md §2.4.4）
   const [planArmed, setPlanArmed] = useState(false);
 
+  // 思考过程计时 + 历史轮次快照（2026-10-05 用户指令：思考块逐轮持久化）
+  const [thinkingSec, setThinkingSec] = useState(0);
+  const [turnsHistory, setTurnsHistory] = useState<TurnStepsSnapshot[]>([]);
+
+  // 回合进行中计时：开始清零，每秒刷新；结束后保留最终用时（供快照与展示）
+  const streaming = status === "sending" || status === "streaming";
+  const thinkingSecRef = useRef(0);
+  useEffect(() => {
+    if (!streaming) return;
+    setThinkingSec(0);
+    thinkingSecRef.current = 0;
+    const t = setInterval(() => {
+      thinkingSecRef.current += 1;
+      setThinkingSec(thinkingSecRef.current);
+    }, 1000);
+    return () => clearInterval(t);
+  }, [streaming]);
+
   // We keep a ref to the *current* agent bubble id so text tokens append
   // to the right bubble. Without this, every token would render a new bubble.
   const agentBubbleIdRef = useRef<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  // toolCards 同步 ref：send() 在新轮开始清空前对上一轮步骤做快照时读取
+  const toolCardsRef = useRef<ToolCardState[]>([]);
+  useEffect(() => {
+    toolCardsRef.current = toolCards;
+  }, [toolCards]);
   // 会话 ID 持久化：跨轮复用同一会话，后端才能恢复完整跨轮上下文（含工具证据）
   const conversationIdRef = useRef<string>("");
 
@@ -128,6 +161,7 @@ export function useChatStream(): UseChatStreamReturn {
     setStatus("idle");
     setMessages([]);
     setToolCards([]);
+    setTurnsHistory([]);
     setAssistantText("");
     setError(null);
     setPlanArmed(false);
@@ -157,6 +191,19 @@ export function useChatStream(): UseChatStreamReturn {
       const agentId = nextId("agent");
       agentBubbleIdRef.current = agentId;
       const label = buttonDisplayLabel(message);
+
+      // 上一轮思考过程快照入史（须在清空 toolCards 前读取；running 卡片按
+      // 回合已终了归一化为 done）。新轮次出现后历史思考块保留不消失。
+      const prevSteps = toolCardsRef.current;
+      if (prevSteps.length > 0) {
+        const snap: TurnStepsSnapshot = {
+          steps: prevSteps.map((s) =>
+            s.status === "running" ? { ...s, status: "done" as const } : s,
+          ),
+          elapsedSec: thinkingSecRef.current,
+        };
+        setTurnsHistory((prev) => [...prev, snap]);
+      }
 
       setMessages((prev) => [
         ...prev,
@@ -290,5 +337,5 @@ export function useChatStream(): UseChatStreamReturn {
     [],
   );
 
-  return { status, messages, toolCards, assistantText, error, send, streamEcho, endEcho, planArmed, getConversationId, setConversationId, setPlanArmed, setAssistantText, reset };
+  return { status, messages, toolCards, thinkingSec, turnsHistory, assistantText, error, send, streamEcho, endEcho, planArmed, getConversationId, setConversationId, setPlanArmed, setAssistantText, reset };
 }

@@ -12,7 +12,7 @@
 // History truncation is applied inside useChatStream.send, so by the time
 // the POST leaves the browser the body is already bounded to N rounds.
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { useChatStream, type ChatBubble } from "@frontend/hooks/useChatStream";
 import {
   CONFIRM_KEYWORD,
@@ -20,11 +20,11 @@ import {
   matchConfirmPhrase,
 } from "@frontend/hooks/useConfirmDetect";
 import { ConfirmButtons } from "./ConfirmButtons";
-import { ToolCallCard } from "./ToolCallCard";
 import { FileUpload } from "./FileUpload";
 import { LandingHero } from "./LandingHero";
 import { Markdown } from "./Markdown";
 import { PointDisplayPanel } from "./PointDisplayPanel";
+import { ThinkingBlock } from "./ThinkingBlock";
 import { streamUpload, classifyFileType } from "@frontend/api/upload";
 
 export interface ChatViewProps {
@@ -38,11 +38,25 @@ export function ChatView({
   landing = false,
   onStarted = () => {},
 }: ChatViewProps): JSX.Element {
-  const { status, messages, toolCards, assistantText, send, streamEcho, endEcho, planArmed, getConversationId, setConversationId, setPlanArmed, setAssistantText } =
-    useChatStream();
+  const {
+    status,
+    messages,
+    toolCards,
+    thinkingSec,
+    turnsHistory,
+    assistantText,
+    send,
+    streamEcho,
+    endEcho,
+    planArmed,
+    getConversationId,
+    setConversationId,
+    setPlanArmed,
+    setAssistantText,
+  } = useChatStream();
   const [draft, setDraft] = useState("");
   const uploadMessage = "请解析此文件中的设备信息";
-  const listRef = useRef<HTMLDivElement | null>(null);
+  const rootRef = useRef<HTMLDivElement | null>(null);
 
   // 落地形态的 hero 只在真正「无内容」时展示——消息或工具卡片一旦出现即视为
   // 已进入对话形态（上传轮的工具卡片可能先于用户消息到达）。
@@ -52,11 +66,27 @@ export function ChatView({
   // 回合进行中：输入框与发送按钮共用禁用态
   const streaming = status === "sending" || status === "streaming";
 
-  // 新消息/工具卡片/流式内容更新时自动滚动到底部
+  // 滚动容器是 app__main（滚动条贴窗口右缘，web.md §3.1 布局约定）——
+  // 新消息/思考步骤/计时变化时钉在底部
   useEffect(() => {
-    const el = listRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [messages, toolCards]);
+    if (landingEmpty) return;
+    const main = rootRef.current?.closest(".app__main");
+    if (main) main.scrollTop = main.scrollHeight;
+  }, [messages, toolCards, thinkingSec, turnsHistory, landingEmpty]);
+
+  // 轮次切分：每个用户气泡开启一轮，其后的 agent/error 气泡归属该轮
+  //（上传回显气泡并入前一轮）。每轮在自己的用户气泡之后渲染各自的思考块——
+  // 历史轮用快照、当前轮用实时 toolCards，新思考块出现后历史思考块不消失
+  //（2026-10-05 用户指令）。快照按「发送序」对齐：send() 每次产生一个用户气泡。
+  const turns: ChatBubble[][] = [];
+  for (const m of messages) {
+    if (m.role === "user" || turns.length === 0) turns.push([m]);
+    else turns[turns.length - 1].push(m);
+  }
+  let userSeen = 0;
+  const turnSnaps = turns.map((turn) =>
+    turn[0].role === "user" ? (turnsHistory[userSeen++] ?? null) : null,
+  );
 
   // 确认按钮双条件：结构化方案已产出（planArmed，output_access_plan 成功）+ 摘要句式命中。
   // 仅凭句式会让信息收集阶段的普通询问（如「请确认转发地址映射」）过早弹出按钮
@@ -136,98 +166,118 @@ export function ChatView({
     }
   };
 
+  // 输入框（落地/对话两形态共用同一实例化 JSX，testid 与发送逻辑单一来源）
+  const inputBox = (
+    <div className="chat-view__input">
+      <textarea
+        data-testid="chat-input"
+        aria-label="聊天输入框"
+        placeholder="问点什么，开始接入…"
+        rows={2}
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" && !e.shiftKey) {
+            e.preventDefault();
+            handleSend();
+          }
+        }}
+        disabled={streaming}
+      />
+      <div className="chat-view__input-row">
+        <FileUpload onUpload={(file) => void handleFileUpload(file)} />
+        <button
+          type="button"
+          className="chat-view__send"
+          onClick={handleSend}
+          disabled={streaming || !draft.trim()}
+          aria-label="发送"
+        >
+          {streaming ? (
+            <span className="chat-view__send-ellipsis" aria-hidden="true">
+              …
+            </span>
+          ) : (
+            <svg
+              className="chat-view__send-icon"
+              viewBox="0 0 24 24"
+              width="22"
+              height="22"
+              aria-hidden="true"
+            >
+              <path
+                d="M12 19V5M5.6 11.4 12 5l6.4 6.4"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2.5"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
+          )}
+        </button>
+      </div>
+    </div>
+  );
+
   return (
     <div
+      ref={rootRef}
       className={`chat-view${landingEmpty ? " chat-view--landing" : ""}`}
       data-testid="chat-view"
     >
       {landingEmpty ? (
-        <LandingHero />
+        <>
+          <LandingHero />
+          {inputBox}
+          <p className="chat-view__disclaimer">
+            AI 生成内容仅供参考，执行操作前请确认
+          </p>
+        </>
       ) : (
         <>
           <PointDisplayPanel />
-          <div
-            className="chat-view__messages"
-            data-testid="message-list"
-            ref={listRef}
-          >
-            {messages.map((m: ChatBubble) => (
-              <Bubble key={m.id} bubble={m} />
-            ))}
-            {toolCards.map((card, idx) => (
-              <div key={`tool-${idx}`} className="chat-view__tool">
-                <ToolCallCard
-                  name={card.name}
-                  status={card.status}
-                  result={card.result}
-                />
-              </div>
-            ))}
+          <div className="chat-view__messages" data-testid="message-list">
+            {turns.map((turn, ti) => {
+              const isLive = ti === turns.length - 1;
+              const snap = turnSnaps[ti];
+              return (
+                <Fragment key={turn[0].id}>
+                  <Bubble bubble={turn[0]} />
+                  {isLive ? (
+                    <ThinkingBlock
+                      steps={toolCards}
+                      active={streaming}
+                      elapsedSec={thinkingSec}
+                    />
+                  ) : snap ? (
+                    <ThinkingBlock
+                      steps={snap.steps}
+                      active={false}
+                      elapsedSec={snap.elapsedSec}
+                    />
+                  ) : null}
+                  {turn.slice(1).map((m) => (
+                    <Bubble key={m.id} bubble={m} />
+                  ))}
+                </Fragment>
+              );
+            })}
           </div>
 
-          <ConfirmButtons
-            visible={confirmVisible}
-            onConfirm={handleConfirm}
-            onCancel={handleCancel}
-          />
+          {/* 停靠层：确认按钮 + 输入框钉在滚动容器底部（滚动条贴窗口右缘） */}
+          <div className="chat-view__dock">
+            <ConfirmButtons
+              visible={confirmVisible}
+              onConfirm={handleConfirm}
+              onCancel={handleCancel}
+            />
+            {inputBox}
+            <p className="chat-view__disclaimer">
+              AI 生成内容仅供参考，执行操作前请确认
+            </p>
+          </div>
         </>
-      )}
-
-      <div className="chat-view__input">
-        <textarea
-          data-testid="chat-input"
-          aria-label="聊天输入框"
-          placeholder="问点什么，开始接入…"
-          rows={2}
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey) {
-              e.preventDefault();
-              handleSend();
-            }
-          }}
-          disabled={streaming}
-        />
-        <div className="chat-view__input-row">
-          <FileUpload onUpload={(file) => void handleFileUpload(file)} />
-          <button
-            type="button"
-            className="chat-view__send"
-            onClick={handleSend}
-            disabled={streaming || !draft.trim()}
-            aria-label="发送"
-          >
-            {streaming ? (
-              <span className="chat-view__send-ellipsis" aria-hidden="true">
-                …
-              </span>
-            ) : (
-              <svg
-                className="chat-view__send-icon"
-                viewBox="0 0 24 24"
-                width="22"
-                height="22"
-                aria-hidden="true"
-              >
-                <path
-                  d="M12 19V5M5.6 11.4 12 5l6.4 6.4"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2.5"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                />
-              </svg>
-            )}
-          </button>
-        </div>
-      </div>
-
-      {landingEmpty && (
-        <p className="chat-view__disclaimer">
-          AI 生成内容仅供参考，执行操作前请确认
-        </p>
       )}
     </div>
   );

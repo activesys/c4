@@ -3,8 +3,8 @@
 //
 // Card displays the tool's name only (NOT its args — backend always sends
 // args={}). Status starts at "running", then flips to "done" on tool_result.
-// Details default to collapsed (non-technical users should not see protocol
-// details by default — §3.1.2).
+// Details default to expanded (2026-10-05 用户指令：思考步骤默认打开)；
+// 无结果内容的步骤不渲染详情区。
 
 import { describe, it, expect } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
@@ -31,35 +31,28 @@ describe("ToolCallCard — render & status (web.md §3.1.1, §3.1.2)", () => {
   });
 });
 
-describe("ToolCallCard — default collapse (web.md §3.1.2)", () => {
-  it("3.4.3 details are collapsed by default; clicking the toggle expands them", () => {
+describe("ToolCallCard — default expand (2026-10-05 用户指令)", () => {
+  it("3.4.3 details are expanded by default; clicking the toggle collapses them", () => {
     const resultText = "解析完成：1#风机，Modbus TCP";
     render(<ToolCallCard name="xlsx_parser" status="done" result={resultText} />);
 
-    // The result must exist in the DOM but be hidden until expanded.
+    // 默认展开：结果直接可见
     const details = screen.getByTestId("tool-card-details");
-    expect(details).toBeInTheDocument();
-    expect(details).not.toBeVisible();
+    expect(details).toBeVisible();
+    expect(details).toHaveTextContent(resultText);
 
-    // Click the header toggle to expand.
+    // 点击头部 → 折叠（条件渲染：详情区从 DOM 移除）
     const toggle = screen.getByRole("button", { name: /xlsx_parser/ });
     fireEvent.click(toggle);
+    expect(screen.queryByTestId("tool-card-details")).toBeNull();
 
-    // After clicking, the details should be visible (expanded).
-    const detailsAfter = screen.getByTestId("tool-card-details");
-    expect(detailsAfter).toBeVisible();
-    expect(detailsAfter).toHaveTextContent(resultText);
-  });
-
-  it("clicking again collapses the details (toggle behavior)", () => {
-    render(<ToolCallCard name="xlsx_parser" status="done" result="result" />);
-    const toggle = screen.getByRole("button", { name: /xlsx_parser/ });
-
-    // expand
+    // 再点 → 展开
     fireEvent.click(toggle);
     expect(screen.getByTestId("tool-card-details")).toBeVisible();
-    // collapse
-    fireEvent.click(toggle);
-    expect(screen.getByTestId("tool-card-details")).not.toBeVisible();
+  });
+
+  it("无结果内容（result 为空串）→ 不渲染详情区（避免空白占位）", () => {
+    render(<ToolCallCard name="registry_lookup" status="done" result="" />);
+    expect(screen.queryByTestId("tool-card-details")).toBeNull();
   });
 });

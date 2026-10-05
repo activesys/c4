@@ -292,6 +292,13 @@ function deletion_pointish(text: string): boolean {
     return /点|地址|点名|\d{2,7}/.test(t);
 }
 
+// 方案展示表格单元格转义：竖线会破坏 markdown 表格列，换行压成空格
+function md_cell(v: unknown): string {
+    return String(v ?? "")
+        .replace(/\|/g, "\\|")
+        .replace(/\r?\n/g, " ");
+}
+
 // catch-up 句级作用域筛选（2026-09-27 用例6）：逐轮提取只看当前消息，闸门后到的
 // 信息需对累积文本补提取——但累积文本常同时含接收表与转发表，9a/规则9 的提示词
 // 纪律压不住小模型（实测 receive 侧把「点表5000~5009」当接收表提取）。两侧各自
@@ -738,6 +745,118 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
     // ── LLM 调用 ───────────────────────────────────────────
     // 本轮 LLM 提取调用序号（invoke_with_logging 每轮清零；仅作日志排序用）
     let turnLlmRound = 0;
+
+    // 思考步骤收集器（web 前端思考块数据源，按会话隔离——多会话并发互不串台）：
+    // 阶段开始 note_step 入队并唤醒 SSE 竞速循环（卡片呈「执行中」），阶段完成
+    // note_result 回填结果并再次唤醒（翻转为「完成」）。invoke_with_logging 在
+    // 「生成器事件 vs 步骤通知」竞速中谁先到谁处理——步骤实时流出，不与应答文本
+    // 一起突兀地出现。收集器只入队不外溢——漏发仅影响展示。
+    interface TurnStepEntry {
+        name: string;
+        result: string;
+        done: boolean;
+        callSent: boolean;
+        resultSent: boolean;
+    }
+    const turnStepsByConv = new Map<string, TurnStepEntry[]>();
+    const stepWaiters = new Map<string, Array<() => void>>();
+    const notify_steps = (conversation: string): void => {
+        const ws = stepWaiters.get(conversation);
+        if (ws !== undefined) {
+            for (const w of ws.splice(0)) w();
+        }
+    };
+    const note_step = (
+        conversation: string,
+        name: string,
+        result = "",
+    ): void => {
+        let q = turnStepsByConv.get(conversation);
+        if (q === undefined) {
+            q = [];
+            turnStepsByConv.set(conversation, q);
+        }
+        q.push({
+            name,
+            result,
+            done: result !== "",
+            callSent: false,
+            resultSent: false,
+        });
+        notify_steps(conversation);
+    };
+    const note_result = (
+        conversation: string,
+        name: string,
+        result: string,
+    ): void => {
+        const q = turnStepsByConv.get(conversation);
+        if (q === undefined) return;
+        for (let i = q.length - 1; i >= 0; i--) {
+            if (q[i].name === name && !q[i].done) {
+                q[i].result = result;
+                q[i].done = true;
+                break;
+            }
+        }
+        notify_steps(conversation);
+    };
+    // 排空队列 → tool_call/tool_result 事件序列（仅增量；已发完的条目移除）
+    function* drain_steps(
+        conversation: string,
+    ): Generator<AgentStreamEvent> {
+        const q = turnStepsByConv.get(conversation);
+        if (q === undefined) return;
+        for (const s of q) {
+            if (!s.callSent) {
+                yield { type: "tool_call", name: s.name, args: {} };
+                s.callSent = true;
+            }
+            if (s.done && !s.resultSent) {
+                yield { type: "tool_result", name: s.name, result: s.result };
+                s.resultSent = true;
+            }
+        }
+        for (let i = q.length - 1; i >= 0; i--) {
+            if (q[i].resultSent) q.splice(i, 1);
+        }
+        if (turnStepsByConv.get(conversation)?.length === 0) {
+            turnStepsByConv.delete(conversation);
+        }
+    }
+    // LLM 结构化提取结果 → 思考步骤摘要（短键值串；数组只报项数，防点表刷屏）
+    const summarize_parsed = (obj: Record<string, unknown>): string => {
+        const parts = Object.entries(obj)
+            .filter(([, v]) => v !== null && v !== undefined && v !== "")
+            .slice(0, 4)
+            .map(([k, v]) => {
+                let s: string;
+                if (typeof v === "string") s = v;
+                else if (Array.isArray(v)) s = `共 ${v.length} 项`;
+                else {
+                    try {
+                        s = JSON.stringify(v) ?? "";
+                    } catch {
+                        s = "";
+                    }
+                }
+                if (s.length > 40) s = s.slice(0, 40) + "…";
+                return `${k}: ${s}`;
+            });
+        const out = parts.join("；");
+        return out.length > 140 ? out.slice(0, 140) + "…" : out;
+    };
+    // 提示文件 → 步骤展示名（llm_json 自动记录用）
+    const PROMPT_STEP_LABELS: Record<string, string> = {
+        "forward_intent_prompt.txt": "AI 判定转发意图",
+        "protocol_prompt.txt": "AI 识别接入协议",
+        "location_prompt.txt": "AI 解析场站归属",
+        "connection_prompt.txt": "AI 解析连接信息",
+        "point_prompt.txt": "AI 解析点表信息",
+        "change_prompt.txt": "AI 解析变更请求",
+        "id_translate_prompt.txt": "AI 换算点位编号",
+    };
+
     async function llm_json(
         prompt_file: string,
         params: Record<string, string>,
@@ -745,6 +864,9 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
         conversation: string,
     ): Promise<Record<string, unknown> | null> {
         const rendered = render_prompt(prompt_file, params);
+        const stepLabel =
+            PROMPT_STEP_LABELS[prompt_file] ?? `AI 解析（${prompt_file}）`;
+        note_step(conversation, stepLabel);
         cfg.agentLogger.llm_call(conversation, ++turnLlmRound, [
             { role: "system", content: rendered },
             { role: "user", content: `<user_input>\n${user_input}\n</user_input>` },
@@ -768,7 +890,10 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 cfg.agentLogger.llm_text(conversation, text);
                 if (text.trim() !== "") sawNonEmpty = true;
                 const parsed = parse_json<Record<string, unknown>>(text);
-                if (parsed !== null) return parsed;
+                if (parsed !== null) {
+                    note_result(conversation, stepLabel, summarize_parsed(parsed));
+                    return parsed;
+                }
             } catch (err) {
                 const msg = err instanceof Error ? err.message : String(err);
                 if (attempt === 3) {
@@ -793,11 +918,13 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 `LLM 连续 3 次空响应（${prompt_file}）——提取失败，走调用方降级路径`,
             );
         }
+        note_result(conversation, stepLabel, "未能提取到结构化结果，走确定性兜底");
         return null;
     }
 
     // 场站固化：写入 agent.json 的 site 字段（§3.2.1.3a 权威配置）
-    function persist_site(site: SiteInfo): void {
+    function persist_site(site: SiteInfo, conversation: string): void {
+        note_step(conversation, "固化场站信息", site.name);
         try {
             const raw = readFileSync(cfg.agentConfigPath, "utf-8");
             const obj = JSON.parse(raw) as Record<string, unknown>;
@@ -1019,6 +1146,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             if (parsed.points.length > 0) {
                 filePoints = parsed.points;
                 progress = true;
+                note_step(conversation, "解析点表文件", `${parsed.points.length} 个点位`);
                 // 新点表 → 开启新一轮接入草稿（保留场站与记忆库）
                 state.recv = fresh_side();
                 state.fwd = fresh_side();
@@ -1101,7 +1229,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 for (const d of drafts.values()) {
                     if (d !== state) d.site = boundSite;
                 }
-                persist_site(state.site);
+                persist_site(state.site, conversation);
                 progress = true;
             }
         }
@@ -2398,6 +2526,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
         registryWrites?: AccessPlan["registryWrites"];
         issue?: string;
     } | null> {
+        note_step(conversation, "装配多目标接入方案");
         const abbr = await load_abbr(state);
         const current = read_current_config();
         let highWater = Math.max(
@@ -2674,55 +2803,81 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             channelHighWatermark: highWater,
         };
 
-        const lines: string[] = ["接入方案如下："];
-        lines.push(`· 场站：${state.site?.name ?? "（未绑定）"}`);
+        // 展示文本（Markdown 层次化排版：基本信息表 + 每设备采集点表 + 每目标
+        // 采集→转发对应表）
+        const lines: string[] = ["### 接入方案（多设备多目标）", ""];
+        lines.push("**基本信息**");
+        lines.push("");
+        lines.push("| 项目 | 内容 |");
+        lines.push("| --- | --- |");
+        lines.push(`| 场站 | ${md_cell(state.site?.name ?? "（未绑定）")} |`);
+        lines.push(`| 设备 | 共 ${devBuilds.length} 台（新建） |`);
+        lines.push(`| 下游目标 | 共 ${fts.length} 路 |`);
         for (const db of devBuilds) {
+            lines.push("");
             lines.push(
-                `· 将新建设备 ${db.decl.name}（点 key 前缀 ${db.prefix}_）——采用 ${db.decl.protocol} 协议`,
+                `**采集点表：${md_cell(db.decl.name)}**（\`${db.prefix}_\` 前缀，${md_cell(db.decl.protocol)} 协议，端口 ${md_cell(db.decl.port ?? "?")}，${db.points.length} 个点）`,
             );
-            lines.push(`· 设备连接：端口 ${db.decl.port ?? "?"}`);
-            lines.push(`· 采集点（${db.points.length} 个）：`);
+            lines.push("");
+            lines.push("| 地址 | 点名 | 点 key |");
+            lines.push("| --- | --- | --- |");
             for (const p of db.points) {
-                lines.push(`    - 地址 ${p.addr} ↔ ${p.name} → ${p.id}`);
+                lines.push(`| ${md_cell(p.addr)} | ${md_cell(p.name)} | \`${md_cell(p.id)}\` |`);
             }
         }
         for (const ft of fts) {
             const isDb = String(ft["protocol"]) === "influxdb";
-            lines.push(`· ${isDb ? "新建写入" : "新建转发"} ${String(ft["name"])}（${String(ft["protocol"])}）`);
             const c = ft as Record<string, unknown>;
-            if (c["ip"] !== undefined) {
-                lines.push(`    - 目标 ${String(c["ip"])}，端口 ${String(c["port"])}`);
-            }
+            lines.push("");
+            lines.push(
+                `**${isDb ? "新建写入" : "新建转发"}：${md_cell(String(ft["name"]))}**（${md_cell(String(ft["protocol"]))}${c["ip"] !== undefined ? ` → ${md_cell(c["ip"])}:${md_cell(c["port"])}` : ""}）`,
+            );
             if (c["url"] !== undefined) {
+                lines.push("");
                 lines.push(
-                    `    - 写入地址 ${String(c["url"])}，org ${String(c["org"] ?? "")}，bucket ${String(c["bucket"] ?? "")}`,
+                    `写入地址 ${md_cell(c["url"])}，org ${md_cell(c["org"] ?? "")}，bucket ${md_cell(c["bucket"] ?? "")}`,
                 );
             }
             const pts = (ft["points"] ?? []) as Array<Record<string, unknown>>;
-            lines.push(`    - ${isDb ? "入库点" : "转发点"}（${pts.length} 个，与采集点按 key 对应）：`);
+            lines.push("");
+            lines.push(`共 ${pts.length} 个点，与采集点按 key 对应：`);
+            lines.push("");
+            lines.push(`| 采集地址 | 采集点名 | 点 key | ${isDb ? "写入标签" : "转发地址"} |`);
+            lines.push("| --- | --- | --- | --- |");
             for (const p of pts) {
                 const pid = String(p["_pairId"] ?? "");
                 const src = devBuilds.flatMap((d) => d.points).find((q) => q.id === pid);
-                if (isDb) {
-                    lines.push(
-                        `      · 采集 ${src?.addr ?? "?"}（${src?.name ?? "?"}） → ${String(p["measurement"])}.${String(p["field"])}`,
-                    );
-                } else {
-                    lines.push(`      · 采集 ${src?.addr ?? "?"}（${src?.name ?? "?"}） → 转发 ${String(p["addr"])}`);
-                }
+                const fwdLabel = isDb
+                    ? `${String(p["measurement"])}.${String(p["field"])}`
+                    : String(p["addr"]);
+                lines.push(
+                    `| ${md_cell(src?.addr ?? "?")} | ${md_cell(src?.name ?? "?")} | \`${md_cell(pid)}\` | ${md_cell(fwdLabel)} |`,
+                );
             }
         }
-        for (const n of [...coverageNotes, ...skipNotes]) lines.push(`· ${n}`);
+        for (const n of [...coverageNotes, ...skipNotes]) {
+            lines.push("");
+            lines.push(`> 注：${n}`);
+        }
+        lines.push("");
         lines.push(`是否确认执行？请点击下方「确认」按钮；如需取消请点击「取消」。`);
+        note_result(
+            conversation, "装配多目标接入方案",
+            `${devBuilds.length} 台设备 · ${fts.length} 路下游`,
+        );
         return { plan, display: lines.join("\n"), registryWrites };
     }
 
-    async function assemble_access_plan(state: SessionState): Promise<{
+    async function assemble_access_plan(
+        state: SessionState,
+        conversation: string,
+    ): Promise<{
         plan: Record<string, unknown>;
         display: string;
         registryWrites?: AccessPlan["registryWrites"];
         issue?: string;
     } | null> {
+        note_step(conversation, "装配接入方案");
         const abbr = await load_abbr(state);
         const devName = state.recv.deviceName ?? "";
         if (devName === "") {
@@ -3301,56 +3456,70 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             channelHighWatermark: highWater,
         };
 
-        // 展示文本（逐条「地址 ↔ 点名 → 点 key」；实例句柄 channel{N} 不出现在对话文本，
-        // §3.2.1.3——用户确认的业务对象是设备名与点 key）
-        const lines: string[] = ["接入方案如下："];
-        lines.push(`· 场站：${state.site?.name ?? "（未绑定）"}`);
+        // 展示文本（Markdown 层次化排版：三级标题 + 基本信息表 + 采集点表 +
+        // 采集→转发对应表；实例句柄 channel{N} 不出现在对话文本，§3.2.1.3——
+        // 用户确认的业务对象是设备名与点 key）
+        const lines: string[] = ["### 接入方案", ""];
+        lines.push("**基本信息**");
+        lines.push("");
+        lines.push("| 项目 | 内容 |");
+        lines.push("| --- | --- |");
+        lines.push(`| 场站 | ${md_cell(state.site?.name ?? "（未绑定）")} |`);
         lines.push(
             writerAction === "add"
-                ? `· 将新建设备 ${devName}（点 key 前缀 ${prefix}_）——采用 ${state.recv.protocol} 协议`
-                : `· 将在已有设备 ${devName}（${prefix}_ 前缀）上追加/更新数据点`,
+                ? `| 设备 | 新建 ${md_cell(devName)}，点 key 前缀 \`${prefix}_\` |`
+                : `| 设备 | 既有 ${md_cell(devName)}（\`${prefix}_\` 前缀），追加/更新数据点 |`,
         );
-        for (const note of [...notes, ...mtSkipNotes]) lines.push(`· ${note}`);
+        lines.push(`| 接入协议 | ${md_cell(state.recv.protocol ?? "?")} |`);
         const c = state.recv.conn;
         const ipPart = String(c["ip"] ?? "");
         const portPart = c["port"] !== undefined ? `端口 ${String(c["port"])}` : "";
-        lines.push(`· 设备连接：${[ipPart, portPart].filter(Boolean).join("，")}`);
-        if (coverageNote !== "") lines.push(`· ${coverageNote}`);
-        lines.push(`· 采集点（${writerPoints.length} 个）：`);
+        const connDesc = [ipPart, portPart].filter(Boolean).join("，");
+        lines.push(`| 设备连接 | ${md_cell(connDesc === "" ? "—" : connDesc)} |`);
+        for (const note of [...notes, ...mtSkipNotes, ...(coverageNote !== "" ? [coverageNote] : [])]) {
+            lines.push("");
+            lines.push(`> 注：${note}`);
+        }
+        lines.push("");
+        lines.push(`**采集点表**（${writerPoints.length} 个点）`);
+        lines.push("");
+        lines.push("| 地址 | 点名 | 点 key |");
+        lines.push("| --- | --- | --- |");
         for (const p of writerPoints) {
             lines.push(
-                `    - 地址 ${String(p["addr"])} ↔ ${String(p["name"] || "（未命名）")} → ${String(p["id"])}`,
+                `| ${md_cell(p["addr"])} | ${md_cell(p["name"] || "（未命名）")} | \`${md_cell(p["id"])}\` |`,
             );
         }
         for (const ft of forward_targets) {
             const mirrored = state.forwardIntent ? null : ft;
             const isDbFt = String(ft["protocol"]) === "influxdb";
             const verb = isDbFt ? "写入" : "转发";
-            lines.push(
-                `· ${mirrored ? "沿用既有转发链路" : state.locks.forward ? "使用" : "新建"}${verb} ${String(ft["name"])}（${String(ft["protocol"])}）`,
-            );
             const fc = ft as Record<string, unknown>;
-            if (fc["ip"]) {
-                lines.push(
-                    `    - 目标 ${String(fc["ip"])}${fc["port"] ? `，端口 ${String(fc["port"])}` : ""}`,
-                );
-            }
+            const targetDesc = fc["ip"]
+                ? ` → ${md_cell(fc["ip"])}${fc["port"] ? `:${md_cell(fc["port"])}` : ""}`
+                : "";
+            lines.push("");
+            lines.push(
+                `**${mirrored ? "沿用既有" : state.locks.forward ? "使用" : "新建"}${verb}：${md_cell(String(ft["name"]))}**（${md_cell(String(ft["protocol"]))}${targetDesc}）`,
+            );
             if (isDbFt && fc["url"]) {
+                lines.push("");
                 lines.push(
-                    `    - 写入地址 ${String(fc["url"])}，org ${String(fc["org"] ?? "")}，bucket ${String(fc["bucket"] ?? "")}`,
+                    `写入地址 ${md_cell(fc["url"])}，org ${md_cell(fc["org"] ?? "")}，bucket ${md_cell(fc["bucket"] ?? "")}`,
                 );
             }
             // 转发对应展示（agent.md §3.2.1.3b）：转发点无自身点名，按序（或按 key，
-            // 多下游 keyed 配对）引用采集点点名逐条对应呈现——禁止把两侧点表作为
-            // 孤立列表分别罗列
+            // 多下游 keyed 配对）引用采集点点名逐行对应——表格化呈现
             const pts = fc["points"] as Array<Record<string, unknown>>;
             const keyedFt = pts[0] !== undefined && pts[0]["_pairId"] !== undefined;
             const writerByKey = new Map(
                 writerPoints.map((p) => [String(p["id"] ?? ""), p as Record<string, unknown>]),
             );
-            lines.push(
-                `    - ${isDbFt ? "入库点" : "转发点"}（${pts.length} 个，与采集点${keyedFt ? "按 key" : "按序一一"}对应）：`,
-            );
+            lines.push("");
+            lines.push(`共 ${pts.length} 个点，与采集点${keyedFt ? "按 key" : "按序一一"}对应：`);
+            lines.push("");
+            lines.push(`| 采集地址 | 采集点名 | 点 key | ${isDbFt ? "写入标签" : "转发地址"} |`);
+            lines.push("| --- | --- | --- | --- |");
             for (let i = 0; i < pts.length; i++) {
                 const fp = pts[i];
                 const sp = keyedFt
@@ -3364,11 +3533,18 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                         ? String(fp["addr"])
                         : `${String(fp["measurement"] ?? "")}:${String(fp["field"] ?? "?")}`;
                 lines.push(
-                    `      · 采集 ${String(sp["addr"] ?? "?")}（${String(sp["name"] ?? "") || "（未命名）"}，${String(sp["id"] ?? "")}） → ${isDbFt ? "写入" : "转发"} ${fwdLabel}${derived}`,
+                    `| ${md_cell(sp["addr"] ?? "?")} | ${md_cell(sp["name"] ?? "") || "（未命名）"} | \`${md_cell(sp["id"] ?? "")}\` | ${md_cell(fwdLabel)}${derived} |`,
                 );
             }
         }
+        lines.push("");
         lines.push("是否确认执行？请点击下方「确认」按钮；如需取消请点击「取消」。");
+        note_result(
+            conversation, "装配接入方案",
+            `${devName} · ${state.recv.protocol ?? "?"} · ${
+                (state.recv.points ?? []).length
+            } 个采集点`,
+        );
         return { plan, display: lines.join("\n"), registryWrites };
     }
 
@@ -3465,6 +3641,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
     ): AsyncGenerator<AgentStreamEvent> {
         const g = state.group;
         if (g === null) return; // 防御：仅由 invoke_turn 组分支调用
+        note_step(conversation, "批量接入：解析设备组声明");
         const semantic = clean_user_text(user_text);
         if (g.userTexts[g.userTexts.length - 1] !== semantic) {
             g.userTexts.push(semantic);
@@ -3481,6 +3658,10 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 else g.groups.push(pg);
             }
         }
+        note_result(
+            conversation, "批量接入：解析设备组声明",
+            `当前共 ${g.groups.length} 个设备组`,
+        );
         const gap_guard = (key: string): { capped: boolean; ask: string } => {
             // 与单设备缺口收摊同口径：同一组级缺口两轮未收敛 → 强制收摊（§2.6）
             state.gapRepeat =
@@ -3897,7 +4078,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
         }
 
         // ⑧ 组方案装配 + L2 校验 + 展示（一次确认 → 一次 merge + 一次 Stop-Start）
-        const assembled = await assemble_group_plan(state);
+        const assembled = await assemble_group_plan(state, conversation);
         if (assembled === null) {
             yield { type: "text", content: "方案装配出现问题，请补充或确认设备组信息后重试。" };
             yield { type: "done" };
@@ -3963,12 +4144,16 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
     /** 组方案装配（agent.md §2.11）：模板点表 × N 台展开为多设备方案——连接型每台
      *  一实例；监听型共用端口组员并入单实例（用例 62，§2.11 边界④）；注册表批量
      *  固化挂同一事务（merge + Stop-Start 全部成功才写入，§3.2.1.3a 语义不变） */
-    async function assemble_group_plan(state: SessionState): Promise<{
+    async function assemble_group_plan(
+        state: SessionState,
+        conversation: string,
+    ): Promise<{
         plan: Record<string, unknown>;
         display: string;
         registryWrites: NonNullable<AccessPlan["registryWrites"]>;
         issue?: string;
     } | null> {
+        note_step(conversation, "装配分组接入方案");
         const g = state.group;
         if (g === null || g.protocol === null || g.fwd === null) return null;
         if (normalize_protocol(g.fwd.protocol) === "influxdb") {
@@ -4007,7 +4192,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
 
         const devices: Array<Record<string, unknown>> = [];
         const upserts: AbbrEntry[] = [];
-        const memberLinesByGroup: string[][] = [];
+        const memberRowsByGroup: Array<Array<[string, string, string, string]>> = [];
         const listenerBuckets = new Map<
             number,
             { dev: Record<string, unknown>; hostId: string }
@@ -4015,8 +4200,8 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
 
         for (const gr of g.groups) {
             const head = gr.headDesc || gr.typeWord;
-            const memberLines: string[] = [];
-            memberLinesByGroup.push(memberLines);
+            const memberRows: Array<[string, string, string, string]> = [];
+            memberRowsByGroup.push(memberRows);
             for (let i = 0; i < gr.memberNames.length; i++) {
                 const name = gr.memberNames[i];
                 const conn = gr.conns?.[i] ?? {};
@@ -4124,9 +4309,12 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                         devices.push(dev);
                         upsert.host = bucket.hostId;
                         upserts.push(upsert);
-                        memberLines.push(
-                            `· ${name}（点 key 前缀 ${prefix}_，${pts.length} 点）：${connDesc}——并入同一接收实例`,
-                        );
+                        memberRows.push([
+                            name,
+                            `${prefix}_`,
+                            `${pts.length}`,
+                            `${connDesc}，并入同一接收实例`,
+                        ]);
                     } else {
                         const dev: Record<string, unknown> = {
                             name,
@@ -4144,7 +4332,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                             dev,
                             hostId: String(dev["instanceId"]),
                         });
-                        memberLines.push(`· ${name}（点 key 前缀 ${prefix}_，${pts.length} 点）：${connDesc}`);
+                        memberRows.push([name, `${prefix}_`, `${pts.length}`, connDesc]);
                     }
                 } else {
                     const dev: Record<string, unknown> = {
@@ -4160,7 +4348,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                     devices.push(dev);
                     upsert.host = String(dev["instanceId"]);
                     upserts.push(upsert);
-                    memberLines.push(`· ${name}（点 key 前缀 ${prefix}_，${pts.length} 点）：${connDesc}`);
+                    memberRows.push([name, `${prefix}_`, `${pts.length}`, connDesc]);
                 }
             }
         }
@@ -4217,27 +4405,76 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             channelHighWatermark: highWater,
         };
 
-        const lines: string[] = ["接入方案如下："];
-        lines.push(`· 场站：${state.site?.name ?? "（未绑定）"}（缩写 ${state.site?.abbr ?? "—"}）`);
+        // 展示文本（Markdown 层次化排版：基本信息表 + 每组模板点表/成员设备表 +
+        // 按台分块的采集→转发地址段表）
+        const lines: string[] = ["### 接入方案（设备组批量）", ""];
+        lines.push("**基本信息**");
+        lines.push("");
+        lines.push("| 项目 | 内容 |");
+        lines.push("| --- | --- |");
         lines.push(
-            `· 接入协议：${g.protocol}，共 ${upserts.length} 台设备（模板点表 + 参数化连接，一次确认批量落盘）`,
+            `| 场站 | ${md_cell(state.site?.name ?? "（未绑定）")}（缩写 ${md_cell(state.site?.abbr ?? "—")}） |`,
+        );
+        lines.push(`| 接入协议 | ${md_cell(g.protocol)} |`);
+        lines.push(
+            `| 设备规模 | 共 ${upserts.length} 台（模板点表 + 参数化连接，一次确认批量落盘） |`,
         );
         for (let gi = 0; gi < g.groups.length; gi++) {
             const gr = g.groups[gi];
+            lines.push("");
             lines.push(
-                `· 设备组：${gr.headDesc || gr.typeWord}（${gr.memberNames.length} 台）——模板点表 ${gr.templatePoints?.length ?? 0} 点，各台同后缀：`,
+                `**设备组：${md_cell(gr.headDesc || gr.typeWord)}**（${gr.memberNames.length} 台）——模板点表 ${gr.templatePoints?.length ?? 0} 点，各台同后缀`,
             );
-            for (const tp of gr.templatePoints ?? []) {
+            const tps = gr.templatePoints ?? [];
+            if (tps.length > 0) {
+                lines.push("");
+                lines.push("| 模板地址 | 点名 | 点 key 后缀 |");
+                lines.push("| --- | --- | --- |");
+                for (const tp of tps) {
+                    lines.push(
+                        `| ${md_cell(tp["addr"])} | ${md_cell(tp["name"] ?? "（未命名）")} | \`${md_cell(tp["id"] ?? "")}\` |`,
+                    );
+                }
+            }
+            const rows = memberRowsByGroup[gi] ?? [];
+            if (rows.length > 0) {
+                lines.push("");
+                lines.push("成员设备：");
+                lines.push("");
+                lines.push("| 设备名 | 点 key 前缀 | 点数 | 连接 |");
+                lines.push("| --- | --- | --- | --- |");
+                for (const r of rows) {
+                    lines.push(
+                        `| ${md_cell(r[0])} | \`${md_cell(r[1])}\` | ${md_cell(r[2])} | ${md_cell(r[3])} |`,
+                    );
+                }
+            }
+        }
+        // 转发地址按台分块自动推导 → 每台一段地址区间（与 fwdPts 构造同序）
+        lines.push("");
+        lines.push(
+            `**新建转发：${md_cell(g.fwd.name)}**（${md_cell(g.fwd.protocol)} → ${md_cell(g.fwd.ip)}:${md_cell(g.fwd.port)}），共 ${fwdPts.length} 个转发点，按台分块自动推导：`,
+        );
+        lines.push("");
+        lines.push("| 设备 | 采集点数 | 转发地址段 |");
+        lines.push("| --- | --- | --- |");
+        {
+            let cur = maxExisting + 1;
+            for (const dev of devices) {
+                const n = ((dev["points"] ?? []) as Array<Record<string, unknown>>).length;
+                const start = cur;
+                cur += n;
                 lines.push(
-                    `      - 地址 ${String(tp["addr"])} ↔ ${String(tp["name"] ?? "（未命名）")} → ${String(tp["id"] ?? "")}`,
+                    `| ${md_cell(dev["name"])} | ${n} | ${n > 0 ? `${start}~${cur - 1}` : "—"} |`,
                 );
             }
-            lines.push(...(memberLinesByGroup[gi] ?? []));
         }
-        lines.push(
-            `· 新建转发 ${g.fwd.name}（${g.fwd.protocol}）：目标 ${g.fwd.ip}:${String(g.fwd.port)}，共 ${fwdPts.length} 个转发点（按台分块自动推导，确认即批准）`,
-        );
+        lines.push("");
         lines.push("是否确认执行？请点击下方「确认」按钮；如需取消请点击「取消」。");
+        note_result(
+            conversation, "装配分组接入方案",
+            `${g.groups.length} 台设备 · ${g.fwd.protocol} 转发 · ${fwdPts.length} 个转发点`,
+        );
         return { plan, display: lines.join("\n"), registryWrites };
     }
 
@@ -4270,6 +4507,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
         steps: ServiceStep[],
         conversation: string,
     ): Promise<string> {
+        note_step(conversation, `下发执行配置（${steps.length} 步）`);
         const lookup = {
             get_entry: (st: string) => registry.get_entry(st),
             service_types: () => registry.getServiceTypes(),
@@ -4399,6 +4637,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 success: true,
                 summary: okMsg,
             });
+            note_result(conversation, `下发执行配置（${steps.length} 步）`, "配置已生效");
             return okMsg;
         } catch (err) {
             if (err instanceof ConfigBusyError) {
@@ -4406,12 +4645,17 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                     success: false,
                     busy: true,
                 });
+                note_result(conversation, `下发执行配置（${steps.length} 步）`, "配置通道忙，请稍后重试");
                 return CONFIG_BUSY_MESSAGE;
             }
             cfg.agentLogger.tool_result(conversation, "apply_config_steps", {
                 success: false,
                 error: err instanceof Error ? err.message : String(err),
             });
+            note_result(
+                conversation, `下发执行配置（${steps.length} 步）`,
+                "执行失败，已按方案回滚",
+            );
             throw err;
         }
     }
@@ -6618,6 +6862,8 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
     // ── 第二层运行日志接线（§5.2）──────────────────────────
     // invoke 入口统一记录 user_input / done；事件顺序：
     // user_input → (llm_call/llm_text | tool_call/tool_result | phase | memory) → done
+    // 步骤事件实时流出：竞速「生成器事件 vs 步骤通知」，通知先到即先推步骤卡片，
+    // 思考过程不再与应答文本一起突兀地出现。
     async function* invoke_with_logging(
         input: AgentInvokeInput,
     ): AsyncGenerator<AgentStreamEvent> {
@@ -6627,8 +6873,39 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             cfg.agentLogger.user_input(conversation, lastMsg.role, content_of(lastMsg));
         }
         turnLlmRound = 0;
+        turnStepsByConv.delete(conversation); // 本轮步骤队列清零
+        const it = invoke_turn(input, conversation);
+        // next() 的 Promise 跨竞速迭代保持——步骤通知赢得竞速时不能丢弃在途事件
+        let pendingNext: Promise<IteratorResult<AgentStreamEvent>> | null = null;
         try {
-            for await (const ev of invoke_turn(input, conversation)) {
+            while (true) {
+                if (pendingNext === null) pendingNext = it.next();
+                let settle: (() => void) | null = null;
+                const changed = new Promise<void>((res) => {
+                    settle = res;
+                });
+                const ws0 = stepWaiters.get(conversation);
+                if (ws0 !== undefined) ws0.push(settle!);
+                else stepWaiters.set(conversation, [settle!]);
+                const race = await Promise.race([
+                    pendingNext.then((r) => ({ kind: "event" as const, r })),
+                    changed.then(() => ({ kind: "steps" as const })),
+                ]);
+                if (race.kind === "steps") {
+                    // 事件未到，仅步骤通知：推增量步骤后继续等同一 next()
+                    yield* drain_steps(conversation);
+                    continue;
+                }
+                // 事件胜出：清理未触发的 waiter，防泄漏
+                const ws1 = stepWaiters.get(conversation);
+                if (ws1 !== undefined && settle !== null) {
+                    const i = ws1.indexOf(settle);
+                    if (i >= 0) ws1.splice(i, 1);
+                }
+                yield* drain_steps(conversation);
+                pendingNext = null;
+                if (race.r.done) break;
+                const ev = race.r.value;
                 // 确定性回复落盘（§5.2）：提问/方案/错误文本与 LLM 输出同等可追溯
                 //（2026-09-27 用例10 排查盲区补齐——此前提问文本不落盘）
                 if (ev.type === "text") {
@@ -6638,6 +6915,9 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             }
         } finally {
             cfg.agentLogger.done(conversation);
+            turnStepsByConv.delete(conversation);
+            stepWaiters.delete(conversation);
+            await it.return(undefined as never).catch(() => undefined);
         }
     }
 
@@ -6654,6 +6934,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             const userMsg = msgs.filter((m) => m.role === "user").pop();
             const userText = userMsg ? content_of(userMsg) : "";
             const trimmed = userText.trim();
+            note_step(conversation, "分析输入与接入进度", trimmed.slice(0, 60));
 
             // ① 取消检测（§2.4.2 全等匹配，顶层确定性拦截）
             if (CANCEL_WORDS.has(trimmed)) {
@@ -7234,7 +7515,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             const assembled =
                 state.mtDevs !== null
                     ? await assemble_mt_plan(state, conversation)
-                    : await assemble_access_plan(state);
+                    : await assemble_access_plan(state, conversation);
             if (assembled === null) {
                 yield {
                     type: "text",
