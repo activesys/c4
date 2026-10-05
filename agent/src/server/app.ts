@@ -14,6 +14,8 @@ import { createChatRouter } from "./routes/chat.js";
 import { createUploadRouter } from "./routes/upload.js";
 import { createServicesRouter } from "./routes/services.js";
 import { createStateRouter } from "./routes/state.js";
+import { createSiteRouter } from "./routes/site.js";
+import type { AgentStateWriter } from "./types.js";
 import type { Router } from "express";
 
 // ── Application Options ───────────────────────────────────
@@ -32,6 +34,17 @@ export interface AppOptions {
     servicesPath?: string;
     /** Mount path for state router. Default: "/api/state" */
     statePath?: string;
+    /** Mount path for site router. Default: "/api/site"；提供 agentConfigPath 时挂载 */
+    sitePath?: string;
+    /**
+     * agent.json 权威配置路径（§3.2.1.3a）：提供时挂载 GET/POST /api/site
+     * （首次启动场站初始化向导 + 顶栏编辑）
+     */
+    agentConfigPath?: string;
+    /** 场站绑定后的状态写入（顶栏实时更新）；agentConfigPath 提供时必传 */
+    stateWriter?: AgentStateWriter;
+    /** LLM 场站缩写生成回调（缩写缺省时使用；失败走名称派生兜底） */
+    generateSiteAbbr?: (name: string) => Promise<string>;
     /** 对点核验显示路由（agent.md §3.6.5）：/api/points、/api/display、/api/display/stop */
     displayRouter?: Router;
     /**
@@ -93,10 +106,14 @@ export function createApp(options: AppOptions): express.Application {
         uploadPath = "/api/upload",
         servicesPath = "/api/services",
         statePath = "/api/state",
+        sitePath = "/api/site",
         displayRouter,
         frontendDir,
         aliveProvider,
         iconsDir,
+        agentConfigPath,
+        stateWriter,
+        generateSiteAbbr,
     } = options;
 
     // 1. CORS — Express v5: no `cors` npm package needed
@@ -113,6 +130,12 @@ export function createApp(options: AppOptions): express.Application {
     app.use(uploadPath, createUploadRouter(agent));
     app.use(servicesPath, createServicesRouter({ aliveProvider, iconsDir, servicesPath }));
     app.use(statePath, createStateRouter(stateProvider));
+    if (agentConfigPath && stateWriter) {
+        app.use(
+            sitePath,
+            createSiteRouter({ agentConfigPath, stateWriter, generateSiteAbbr }),
+        );
+    }
     if (displayRouter) {
         app.use("/api", displayRouter);
     }

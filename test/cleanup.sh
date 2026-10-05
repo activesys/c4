@@ -2,14 +2,15 @@
 # cleanup.sh — 清理 C4 运行产生的文件并重启 c4-agent，恢复到干净首次接入态。
 #
 # 用法：
-#   sudo ./cleanup.sh [--site-name 名称] [--site-abbr 缩写]
+#   sudo ./cleanup.sh
 #
 # 清理范围：
 #   - ~/.local/c4/config.json + config.json.bak（接入配置）
 #   - ~/.local/c4/abbr_registry.json（abbr 记忆库）
 #   - /dev/shm/<instance_id>（POSIX 共享内存，instance_id 取自 agent.json）
 #   - state/ 与 logs/ 目录内容
-#   - agent.json 的 site 字段重置（默认 华能阿拉善/hnals，可用参数覆盖）
+#   - agent.json 的 site 字段整体移除（2026-10-05：不再默认写入场站——
+#     清理后即真正的首次启动态，页面将呈现场站初始化引导）
 #
 # 清理后自动重启 c4-agent 并自检（服务 active + /api/services 200）。
 
@@ -17,15 +18,11 @@ set -euo pipefail
 
 C4_DIR="${C4_DIR:-/home/c4/.local/c4}"
 SERVICE="${SERVICE:-c4-agent}"
-SITE_NAME="华能阿拉善"
-SITE_ABBR="hnals"
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        --site-name) SITE_NAME="$2"; shift 2 ;;
-        --site-abbr) SITE_ABBR="$2"; shift 2 ;;
         -h|--help)
-            sed -n '2,14p' "$0"
+            sed -n '2,15p' "$0"
             exit 0
             ;;
         *) echo "未知参数: $1" >&2; exit 1 ;;
@@ -74,20 +71,22 @@ rm -f "$C4_DIR/config.json" \
 step "清空 state/ 与 logs/ 目录内容"
 find "$C4_DIR/state" "$C4_DIR/logs" -type f -delete 2>/dev/null || true
 
-# ── 4. 重置 agent.json 的 site 字段 ────────────────────────
+# ── 4. 移除 agent.json 的 site 字段 ────────────────────────
+# 不写默认场站（2026-10-05）：site 整体移除才是「干净首次启动态」——
+# 页面将呈现场站初始化引导层（不可跳过），由用户实际填写
 if [ -f "$AGENT_JSON" ]; then
-    step "重置 site → $SITE_NAME / $SITE_ABBR"
+    step "移除 site 字段（恢复未绑定态）"
     python3 -c "
 import json
 p = '$AGENT_JSON'
 cfg = json.load(open(p))
-cfg['site'] = {'name': '$SITE_NAME', 'abbr': '$SITE_ABBR'}
+cfg.pop('site', None)
 with open(p, 'w') as f:
     json.dump(cfg, f, ensure_ascii=False, indent=4)
     f.write('\n')
 "
 else
-    step "警告: $AGENT_JSON 不存在，跳过 site 重置"
+    step "警告: $AGENT_JSON 不存在，跳过 site 移除"
 fi
 
 # ── 5. 启动服务并自检 ──────────────────────────────────────

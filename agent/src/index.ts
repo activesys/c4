@@ -115,12 +115,19 @@ class AgentStateTracker implements AgentStateProvider, AgentStateWriter {
     private _phase: AgentPhase = "idle";
     private _hasAccessPlan: boolean = false;
     private _lastError: string | null = null;
+    private _siteName: string | null;
+
+    constructor(initialSiteName: string | null = null) {
+        // 初值取部署配置（agent.json §3.2.1.3a 权威绑定），启动即可展示
+        this._siteName = initialSiteName;
+    }
 
     getState(): TypesAgentStateSummary {
         return {
             phase: this._phase,
             hasAccessPlan: this._hasAccessPlan,
             lastError: this._lastError,
+            siteName: this._siteName,
         };
     }
 
@@ -134,6 +141,10 @@ class AgentStateTracker implements AgentStateProvider, AgentStateWriter {
 
     setError(error: string | null): void {
         this._lastError = error;
+    }
+
+    setSiteName(name: string | null): void {
+        this._siteName = name;
     }
 }
 
@@ -547,7 +558,7 @@ async function main(): Promise<void> {
     }
 
     // ── Step 6: Create Agent State Tracker ──
-    const stateTracker = new AgentStateTracker();
+    const stateTracker = new AgentStateTracker(config.site?.name ?? null);
 
     // ── Step 7: Create C4 Agent ──
     let agent: C4Agent;
@@ -572,6 +583,32 @@ async function main(): Promise<void> {
     }
 
     // ── Step 8: Create and start Express server ──
+    // 场站缩写 LLM 生成回调（/api/site 缩写缺省时使用）：单次调用 + 15s 超时，
+    // 失败返回 ""（路由层再走名称派生兜底，初始化不被 LLM 可用性卡死）
+    const generateSiteAbbr = async (name: string): Promise<string> => {
+        try {
+            const res = (await Promise.race([
+                model.invoke([
+                    {
+                        role: "system",
+                        content:
+                            "你是场站缩写生成器。根据场站名称生成一个缩写：2~12 位小写字母/数字，" +
+                            "取拼音首字母组合或名称中已有的英文词。只输出缩写本身，不要任何解释。",
+                    },
+                    { role: "user", content: name },
+                ]),
+                new Promise<never>((_, reject) =>
+                    setTimeout(() => reject(new Error("缩写生成超时")), 15000),
+                ),
+            ])) as { content: unknown };
+            const text =
+                typeof res.content === "string" ? res.content.trim() : "";
+            const m = text.match(/[a-z0-9]{2,12}/i);
+            return m === null ? "" : m[0].toLowerCase();
+        } catch {
+            return "";
+        }
+    };
     const app = createApp({
         agent,
         stateProvider: stateTracker,
@@ -580,6 +617,10 @@ async function main(): Promise<void> {
         frontendDir: config.frontend?.dir,
         // MCP 注册图标目录（协议无关架构）：注册目录下 icons/ 子目录
         iconsDir: path.join(config.mcp_registry.path, "icons"),
+        // 场站初始化向导/顶栏编辑（2026-10-05 用户指令：首次启动须用户提供场站）
+        agentConfigPath: configPath,
+        stateWriter: stateTracker,
+        generateSiteAbbr,
         // MCP 存活状态＝连接状态推导（c4_architecture.md §3.1.1，C4_RS_00060/00068）
         aliveProvider: () => mcpManager.aliveStates(),
     });

@@ -12,6 +12,8 @@ export interface UseAgentStateReturn {
   phase: AgentState["phase"] | "unknown";
   hasAccessPlan: boolean;
   lastError: string | null;
+  /** 当前绑定场站名（未绑定为 null，顶栏中央展示） */
+  siteName: string | null;
   refresh: () => Promise<void>;
 }
 
@@ -46,6 +48,7 @@ export function useAgentState(intervalMs = 1000): UseAgentStateReturn {
     phase: state?.phase ?? "unknown",
     hasAccessPlan: state?.hasAccessPlan ?? false,
     lastError: state?.lastError ?? null,
+    siteName: state?.siteName ?? null,
     refresh,
   };
 }

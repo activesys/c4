@@ -18,6 +18,8 @@ export interface AgentState {
   phase: AgentPhase;
   hasAccessPlan: boolean;
   lastError: string | null;
+  /** 当前绑定场站名（agent.json 权威配置；未绑定为 null，顶栏中央展示） */
+  siteName: string | null;
 }
 
 interface StateResponseOk {

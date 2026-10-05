@@ -39,6 +39,8 @@ export interface AgentStateSummary {
   phase: AgentPhase;
   hasAccessPlan: boolean;
   lastError: string | null;
+  /** 当前绑定场站名（agent.json 权威配置，§3.2.1.3a；未绑定为 null） */
+  siteName: string | null;
 }
 
 // ── Agent State Provider ──────────────────────────────────
@@ -53,4 +55,6 @@ export interface AgentStateWriter {
   setPhase(phase: AgentPhase): void;
   setAccessPlan(exists: boolean): void;
   setError(error: string | null): void;
+  /** 场站绑定更新（顶栏中央展示用，2026-10-05 用户指令） */
+  setSiteName(name: string | null): void;
 }

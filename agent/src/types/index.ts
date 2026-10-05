@@ -75,6 +75,8 @@ export interface AgentStateSummary {
     phase: AgentPhase;
     hasAccessPlan: boolean;
     lastError: string | null;
+    /** 当前绑定场站名（agent.json 权威配置，§3.2.1.3a；未绑定为 null） */
+    siteName: string | null;
 }
 
 // ── Registry ─────────────────────────────────────────────

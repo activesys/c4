@@ -28,6 +28,7 @@ import {
     type AbbrRegistry,
 } from "../registry/abbr_registry.js";
 import { validate_point_table, derive_point_id } from "../executor/point_rules.js";
+import { write_site_config } from "../site_config.js";
 import {
     split_device_decls,
     split_target_decls,
@@ -708,6 +709,7 @@ export interface OrchestratorConfig {
         setPhase(p: string): void;
         setAccessPlan(e: boolean): void;
         setError(e: string | null): void;
+        setSiteName(n: string | null): void;
     };
     agentLogger: import("../logging/agent_logger.js").AgentLogger;
     displayTools?: unknown;
@@ -925,13 +927,9 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
     // 场站固化：写入 agent.json 的 site 字段（§3.2.1.3a 权威配置）
     function persist_site(site: SiteInfo, conversation: string): void {
         note_step(conversation, "固化场站信息", site.name);
-        try {
-            const raw = readFileSync(cfg.agentConfigPath, "utf-8");
-            const obj = JSON.parse(raw) as Record<string, unknown>;
-            obj["site"] = site;
-            writeFileSync(cfg.agentConfigPath, JSON.stringify(obj, null, 4) + "\n");
-        } catch {
-            // agent.json 不可写时仅保留会话内 site
+        // 落盘与 /api/site 初始化向导共用同一实现（site_config.ts 单处维护）
+        if (write_site_config(cfg.agentConfigPath, site)) {
+            stateWriter.setSiteName(site.name); // 顶栏中央实时更新（2026-10-05）
         }
     }
 
@@ -3616,6 +3614,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
         if (siteName === "" || siteAbbr === "") return false;
         state.site = { name: siteName, abbr: siteAbbr };
         boundSite = state.site;
+        stateWriter.setSiteName(siteName); // 顶栏中央实时更新（2026-10-05）
         for (const d of drafts.values()) {
             if (d !== state) d.site = boundSite;
         }

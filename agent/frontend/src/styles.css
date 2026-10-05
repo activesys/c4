@@ -166,9 +166,10 @@ input {
 }
 
 .app__topbar {
-  display: flex;
+  /* 三栏 grid：左品牌 / 中场站名 / 右状态——中栏真居中不随两侧宽度偏移 */
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
   align-items: center;
-  justify-content: space-between;
   padding: var(--space-3) var(--space-5);
   background: var(--bg-elev);
   border-bottom: 1px solid var(--border-weak);
@@ -185,7 +186,15 @@ input {
   display: flex;
   align-items: center;
   gap: var(--space-2);
+  justify-self: start;
   border-radius: var(--radius-md);
+}
+
+/* 顶栏中央：当前绑定场站（落地页/对话页均展示，纯文字无底色） */
+.app__topbar-center {
+  display: flex;
+  justify-content: center;
+  min-width: 0;
 }
 
 .app__brand-icon {
@@ -220,7 +229,137 @@ input {
 .app__topbar-right {
   display: flex;
   align-items: center;
+  justify-self: end;
   gap: var(--space-3);
+}
+
+/* ── 场站初始化引导层 + 编辑对话框（2026-10-05 用户指令）── */
+.app__site-name {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+  max-width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-md);
+  transition: background var(--transition);
+}
+.app__site-name:hover { background: var(--bg-hover); }
+
+.site-gate {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  /* 透明浮层：叠在初始界面之上，露出落地页云雾网格背景；点击被浮层整体
+     拦截（不可跳过）——背景仅作视觉呈现（2026-10-05） */
+  background: transparent;
+  padding: var(--space-5);
+}
+.site-gate__card {
+  width: min(560px, 100%);
+  background: var(--bg-elev);
+  border: 1px solid var(--border-weak);
+  border-radius: var(--radius-lg, 16px);
+  box-shadow: 0 12px 48px rgba(15, 23, 42, 0.08);
+  padding: 48px 56px;
+  text-align: center;
+}
+/* 引导主文案：唯一标题级元素，大字号（2026-10-05 用户指令） */
+.site-gate__lead {
+  margin: 0 0 var(--space-5, 24px);
+  font-size: 30px;
+  font-weight: 700;
+  line-height: 1.4;
+  color: var(--text);
+  text-align: center;
+}
+
+.site-form { text-align: left; }
+.site-form__label {
+  display: block;
+  margin: var(--space-3) 0 var(--space-1);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+.site-form__input {
+  width: 100%;
+  padding: 10px 12px;
+  font-size: 14px;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  outline: none;
+  transition: border-color var(--transition), box-shadow var(--transition);
+}
+.site-form__input:focus {
+  border-color: var(--primary, #3964fe);
+  box-shadow: 0 0 0 3px rgba(57, 100, 254, 0.12);
+}
+.site-form__error {
+  margin: var(--space-2) 0 0;
+  font-size: 13px;
+  color: #d4380d;
+}
+.site-form__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  margin-top: var(--space-4);
+}
+.site-form__btn {
+  padding: 9px 20px;
+  font-size: 14px;
+  font-weight: 600;
+  border-radius: var(--radius-md);
+  transition: background var(--transition), opacity var(--transition);
+}
+.site-form__btn--primary {
+  color: #fff;
+  background: var(--primary, #3964fe);
+}
+.site-form__btn--primary:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.site-form__btn--primary:hover:not(:disabled) {
+  background: var(--primary-hover, #2f55e0);
+}
+.site-form__btn--ghost {
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+}
+.site-form__btn--ghost:hover { background: var(--bg-hover); }
+
+.site-dialog__overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  /* 与引导层一致：透明浮层，不压暗背景（2026-10-05 用户反馈） */
+  background: transparent;
+  padding: var(--space-5);
+}
+/* 编辑对话框与引导层同风格：同尺寸卡片 + 大字号主文案（site-gate__lead 复用） */
+.site-dialog {
+  width: min(560px, 100%);
+  background: var(--bg-elev);
+  border: 1px solid var(--border-weak);
+  border-radius: var(--radius-lg, 16px);
+  box-shadow: 0 12px 48px rgba(15, 23, 42, 0.16);
+  padding: 48px 56px;
+  text-align: center;
+}
+.site-dialog .site-gate__lead {
+  margin: 0 0 var(--space-5, 24px);
 }
 
 .app__error {

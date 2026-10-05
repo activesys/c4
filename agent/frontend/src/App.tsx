@@ -14,6 +14,7 @@ import { useCallback, useState } from "react";
 import { ChatView } from "./components/ChatView";
 import { ServiceDashboard } from "./components/ServiceDashboard";
 import { PhaseBadge } from "./components/PhaseBadge";
+import { SiteEditDialog, SiteSetupGate } from "./components/SiteSetupGate";
 import { useAgentState } from "./hooks/useAgentState";
 import c4IconUrl from "./assets/c4-icon.svg";
 
@@ -24,14 +25,28 @@ function App(): JSX.Element {
   const [started, setStarted] = useState(false);
   const [chatEpoch, setChatEpoch] = useState(0);
   const [errorDismissed, setErrorDismissed] = useState(false);
+  const [siteEditOpen, setSiteEditOpen] = useState(false);
 
-  const { phase, lastError, refresh } = useAgentState(1000);
+  const { phase, lastError, siteName, refresh } = useAgentState(1000);
+
+  // 首次启动引导（2026-10-05 用户指令：不可跳过）：部署后场站未绑定（agent.json
+  // site 为空）时，所有视图之上强制初始化。phase==="unknown" 表示首轮 /api/state
+  // 未返回，此时不渲染引导层，避免已配置部署闪现。
+  const siteUnbound = phase !== "unknown" && siteName === null;
 
   // Reset the dismissal flag whenever a new error appears so the banner
   // re-shows on the next poll.
   const bannerVisible = !errorDismissed && Boolean(lastError);
 
   const dismissError = useCallback(() => setErrorDismissed(true), []);
+
+  // 对话框回调稳定化：useAgentState 每秒轮询触发 App 重渲染，内联箭头函数
+  // 会生成新引用，导致 SiteEditDialog 的 effect 反复重跑（拉取 → 表单被重置）
+  const closeSiteEdit = useCallback(() => setSiteEditOpen(false), []);
+  const handleSiteSaved = useCallback(() => {
+    setSiteEditOpen(false);
+    void refresh();
+  }, [refresh]);
 
   // Force-refresh agent state whenever the user switches views — keeps the
   // badge reasonably fresh without waiting for the next 1s poll tick.
@@ -84,6 +99,20 @@ function App(): JSX.Element {
           />
           <span className="app__brand-name">C4让数据接入更智能、更轻松。</span>
         </button>
+        {/* 顶栏中央：当前绑定场站（落地页/对话页均展示），点击可修改 */}
+        <div className="app__topbar-center" data-testid="site-name">
+          {siteName ? (
+            <button
+              type="button"
+              className="app__site-name"
+              onClick={() => setSiteEditOpen(true)}
+              aria-label="修改场站信息"
+              title="点击修改场站信息"
+            >
+              {siteName}
+            </button>
+          ) : null}
+        </div>
         <div className="app__topbar-right">
           {errorBanner}
           <PhaseBadge phase={phase} />
@@ -144,6 +173,14 @@ function App(): JSX.Element {
           )}
         </main>
       </div>
+
+      {/* 场站初始化引导层（不可跳过）：叠加在初始界面之上——先渲染落地页
+          （云雾网格背景），引导卡片浮于其上（2026-10-05 用户指令） */}
+      {siteUnbound ? <SiteSetupGate onBound={() => void refresh()} /> : null}
+
+      {siteEditOpen ? (
+        <SiteEditDialog onSaved={handleSiteSaved} onClose={closeSiteEdit} />
+      ) : null}
     </div>
   );
 }
