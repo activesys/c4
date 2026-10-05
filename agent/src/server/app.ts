@@ -41,6 +41,8 @@ export interface AppOptions {
     aliveProvider?: () => Array<{ service_type: string; alive: boolean; degraded: boolean }>;
     /** Absolute path to the web frontend static dir; served when set and existing (design §4.3 / §5.1) */
     frontendDir?: string;
+    /** 注册图标文件目录（注册目录 icons/ 子目录）；提供时托管 <servicesPath>/icons 静态路由 */
+    iconsDir?: string;
 }
 
 /** Raw CORS handler that sets headers per-request (Express v5 compatible). */
@@ -94,6 +96,7 @@ export function createApp(options: AppOptions): express.Application {
         displayRouter,
         frontendDir,
         aliveProvider,
+        iconsDir,
     } = options;
 
     // 1. CORS — Express v5: no `cors` npm package needed
@@ -108,7 +111,7 @@ export function createApp(options: AppOptions): express.Application {
     // 3. Routes — dependency injected
     app.use(chatPath, createChatRouter(agent));
     app.use(uploadPath, createUploadRouter(agent));
-    app.use(servicesPath, createServicesRouter(aliveProvider));
+    app.use(servicesPath, createServicesRouter({ aliveProvider, iconsDir, servicesPath }));
     app.use(statePath, createStateRouter(stateProvider));
     if (displayRouter) {
         app.use("/api", displayRouter);

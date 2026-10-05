@@ -2,6 +2,7 @@
   "service_type": "c4_modbus_client",
   "display_name": "Modbus 数据采集",
   "role": "writer",
+  "icon": "icons/c4_modbus_client.v3.png",
   "protocols": [
     {
       "protocol": "modbus",

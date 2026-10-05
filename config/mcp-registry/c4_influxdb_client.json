@@ -2,6 +2,7 @@
   "service_type": "c4_influxdb_client",
   "display_name": "InfluxDB 数据存储",
   "role": "reader",
+  "icon": "icons/c4_influxdb_client.png",
   "protocols": [
     {
       "protocol": "influxdb",

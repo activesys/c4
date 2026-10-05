@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-3 -3 70 70">
+  <!-- C4 品牌图标：双层爆炸（外层琥珀爆焰 + 内层品牌蓝爆心 + C4 字标） -->
+  <defs>
+    <linearGradient id="flame" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fbbf24"/>
+      <stop offset="1" stop-color="#f59e0b"/>
+    </linearGradient>
+    <linearGradient id="core" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4d6bfe"/>
+      <stop offset="1" stop-color="#3257e8"/>
+    </linearGradient>
+  </defs>
+  <!-- 外层爆焰 -->
+  <polygon points="37.84,-1.13 40.59,13.58 52.44,7.63 48.14,20.70 61.96,21.09 52.16,30.24 65.14,37.84 48.59,39.74 56.46,52.52 41.22,45.16 42.80,61.66 33.69,51.31 26.20,64.90 22.87,51.58 11.52,56.40 16.24,43.03 2.81,42.63 13.58,33.61 -0.43,26.28 15.60,24.35 7.79,11.69 22.18,17.97 21.60,3.42 30.24,11.88" fill="url(#flame)" stroke="url(#flame)" stroke-width="3" stroke-linejoin="round"/>
+  <!-- 内层爆心 -->
+  <polygon points="28.92,14.51 33.63,20.41 40.27,15.05 41.66,21.99 49.78,22.55 46.34,29.47 50.08,34.54 44.81,38.25 45.70,45.23 39.30,45.73 35.59,52.34 30.12,45.41 23.72,48.98 24.04,40.24 14.90,41.09 17.77,34.51 10.97,29.04 17.83,25.09 17.87,18.35 25.45,19.68" fill="url(#core)" stroke="url(#core)" stroke-width="3" stroke-linejoin="round"/>
+  <!-- C4 字标 -->
+  <text x="31.5" y="38" font-family="Arial, 'PingFang SC', 'Microsoft YaHei', sans-serif" font-size="17" font-weight="900" fill="#ffffff" text-anchor="middle" letter-spacing="0.5">C4</text>
+</svg>

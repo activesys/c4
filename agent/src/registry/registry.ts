@@ -211,6 +211,8 @@ export class McpServiceRegistry {
       service_type: entry.service_type,
       display_name: entry.display_name,
       role: entry.role,
+      // 注册时提供的图标文件路径原样透传（协议无关架构，Agent 不解释内容）
+      icon: entry.icon,
       protocols: entry.protocols.map((p) => ({
         protocol: p.protocol,
         description: p.description,

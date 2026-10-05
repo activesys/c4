@@ -175,6 +175,43 @@ input {
   flex: 0 0 auto;
 }
 
+/* 落地形态顶栏：www.deepseek.com 式通透导航（无边框，弱化分区） */
+.app--landing .app__topbar {
+  background: transparent;
+  border-bottom: none;
+}
+
+.app__brand {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  border-radius: var(--radius-md);
+}
+
+.app__brand-icon {
+  width: 30px;
+  height: 30px;
+  display: block;
+}
+
+.app__brand-name {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.app__topbar-link {
+  padding: var(--space-2) var(--space-3);
+  font-size: 14px;
+  color: var(--text-muted);
+  border-radius: var(--radius-md);
+  transition: background var(--transition), color var(--transition);
+}
+
+.app__topbar-link:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
 .app__title {
   font-size: 15px;
   font-weight: 600;
@@ -225,6 +262,26 @@ input {
   display: flex;
   flex-direction: column;
   gap: 2px;
+}
+
+/* 「开启新对话」：chat.deepseek.com 侧栏首项样式 */
+.app__nav-new {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0 var(--space-1) var(--space-3);
+  padding: 10px 14px;
+  text-align: left;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--primary);
+  background: var(--primary-tint);
+  border-radius: var(--radius-md);
+  transition: background var(--transition);
+}
+
+.app__nav-new:hover {
+  background: rgba(57, 100, 254, 0.16);
 }
 
 .app__nav-item {
@@ -351,60 +408,87 @@ input {
   font-size: 14px;
 }
 
-/* ── 输入区：DeepSeek 24px 胶囊 + 悬浮阴影 ── */
+/* ── 输入区：DeepSeek 大圆角双层框（上输入区 / 底行 上传+圆形发送）── */
 
 .chat-view__input {
   display: flex;
+  flex-direction: column;
   gap: var(--space-2);
-  align-items: center;
-  padding: var(--space-2) var(--space-2) var(--space-2) var(--space-4);
-  background: var(--bg-elev);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-input);
+  padding: var(--space-4) var(--space-4) var(--space-3);
+  background: rgba(255, 255, 255, 0.78);
+  backdrop-filter: blur(10px);
+  border: 1px solid rgba(120, 140, 200, 0.18);
+  border-radius: 24px;
   flex: 0 0 auto;
   transition: box-shadow var(--transition);
 }
 
 .chat-view__input:hover {
-  box-shadow: var(--shadow-input-hover);
+  box-shadow: 0 6px 20px rgba(80, 100, 160, 0.08);
 }
 
 .chat-view__input:focus-within {
-  box-shadow: var(--shadow-input-focus);
+  box-shadow: 0 6px 20px rgba(80, 100, 160, 0.1),
+    0 0 0 2px rgba(77, 107, 254, 0.12);
 }
 
-.chat-view__input input[type="text"] {
-  flex: 1 1 auto;
+.chat-view__input textarea {
   border: none;
   outline: none;
-  padding: var(--space-2) 0;
+  resize: none;
+  padding: 0;
   background: transparent;
+  font-family: inherit;
   font-size: 16px;
-  line-height: 24px;
+  line-height: 1.6;
   color: var(--text);
 }
 
-.chat-view__input input[type="text"]::placeholder {
+.chat-view__input textarea::placeholder {
   color: var(--text-tertiary);
 }
 
-.chat-view__input button[aria-label="发送"] {
+.chat-view__input-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+/* 圆形发送按钮：DeepSeek 蓝色圆形粗箭头 */
+.chat-view__send {
   flex: 0 0 auto;
-  padding: var(--space-2) 20px;
+  width: 42px;
+  height: 42px;
+  border-radius: 999px;
   background: var(--primary);
   color: #fff;
-  border-radius: 999px;
-  font-weight: 500;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   transition: background var(--transition);
 }
 
-.chat-view__input button[aria-label="发送"]:hover:not(:disabled) {
+.chat-view__send:hover:not(:disabled) {
   background: var(--primary-hover);
 }
 
-.chat-view__input button[aria-label="发送"]:disabled {
-  opacity: 0.45;
+.chat-view__send:disabled {
+  background: #c9d4f2;
   cursor: not-allowed;
+}
+
+.chat-view__send-icon {
+  display: block;
+  margin-top: -1px; /* 箭头视觉居中微调 */
+}
+
+.chat-view__send-ellipsis {
+  font-size: 20px;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: 2px;
+  text-indent: 2px; /* 抵消末字符间距，保持光学居中 */
 }
 
 /* ─── Confirm buttons ─────────────────────────────────────────── */
@@ -507,13 +591,21 @@ input {
 
 .file-upload__button {
   cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   padding: var(--space-2) var(--space-3);
   border: none;
   border-radius: 999px;
   background: transparent;
   color: var(--text-tertiary);
+  font-size: 14px;
   white-space: nowrap;
   transition: background var(--transition), color var(--transition);
+}
+
+.file-upload__icon {
+  display: block;
 }
 
 .file-upload__button:hover {
@@ -529,113 +621,302 @@ input {
   font-size: 12px;
 }
 
-/* ─── Service dashboard ───────────────────────────────────────── */
+/* ─── MCP 目录（ZCode 子智能体式分组列表）────────────────────── */
 
 .service-dashboard {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
-  gap: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
+  width: 100%;
+  max-width: 880px;
+  margin: 0 auto;
 }
 
-.service-card {
-  background: var(--bg-elev);
-  border: 1px solid var(--border-weak);
-  border-radius: var(--radius-xl);
-  padding: var(--space-4);
+.mcp-group__title {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  margin: 0 0 var(--space-3);
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.mcp-group__count {
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--text-tertiary);
+}
+
+.mcp-group__list {
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
-  transition: box-shadow var(--transition);
 }
 
-.service-card:hover {
+.mcp-card {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-4);
+  width: 100%;
+  padding: var(--space-4);
+  text-align: left;
+  background: var(--bg-elev);
+  border: 1px solid var(--border-weak);
+  border-radius: var(--radius-lg);
+  cursor: pointer;
+  transition: box-shadow var(--transition), border-color var(--transition);
+}
+
+.mcp-card:hover {
+  border-color: var(--border-strong);
   box-shadow: var(--shadow-card-hover);
 }
 
-.service-card__header {
+.mcp-card:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.mcp-icon {
+  flex: 0 0 40px;
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: center;
+}
+
+.mcp-icon--proto {
+  color: rgba(255, 255, 255, 0.92);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.mcp-icon--img {
+  object-fit: cover;
+}
+
+.mcp-card__body {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.mcp-card__head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
   gap: var(--space-2);
 }
 
-.service-card__title {
-  margin: 0;
-  font-size: 16px;
+.mcp-card__name {
+  font-size: 15px;
   font-weight: 600;
 }
 
-.service-card__subtitle {
+.mcp-card__type {
   margin: 0;
-  font-size: 12px;
-  color: var(--text-muted);
   font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-tertiary);
 }
 
-.service-card__section h4 {
-  margin: 0 0 var(--space-2);
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-}
-
-.service-card__section ul {
+.mcp-card__desc {
   margin: 0;
-  padding-left: var(--space-4);
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--text-muted);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* ── MCP 详情弹窗 ── */
+
+.mcp-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  background: rgba(15, 17, 21, 0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-5);
+}
+
+.mcp-dialog {
+  width: min(680px, 100%);
+  max-height: min(80vh, 720px);
   display: flex;
   flex-direction: column;
-  gap: var(--space-1);
+  background: var(--bg-elev);
+  border-radius: var(--radius-xl);
+  box-shadow: 0 24px 60px rgba(15, 17, 21, 0.18);
+  overflow: hidden;
+  animation: mcp-dialog-in 0.18s ease both;
+}
+
+@keyframes mcp-dialog-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.mcp-dialog__header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-4) var(--space-5);
+  border-bottom: 1px solid var(--border-weak);
+  flex: 0 0 auto;
+}
+
+.mcp-dialog__heading {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.mcp-dialog__title {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 600;
+}
+
+.mcp-dialog__type {
+  margin: 2px 0 0;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-tertiary);
+}
+
+.mcp-dialog__role {
+  flex: 0 0 auto;
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  background: var(--neutral-tint);
+  color: var(--text-muted);
+}
+
+.mcp-dialog__close {
+  flex: 0 0 auto;
+  width: 30px;
+  height: 30px;
+  border-radius: var(--radius-md);
+  font-size: 20px;
+  line-height: 1;
+  color: var(--text-tertiary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background var(--transition), color var(--transition);
+}
+
+.mcp-dialog__close:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.mcp-dialog__body {
+  overflow-y: auto;
+  padding: var(--space-4) var(--space-5) var(--space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+
+.mcp-dialog__section h4 {
+  margin: 0 0 var(--space-3);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.mcp-dialog__proto {
+  padding: var(--space-3);
+  border: 1px solid var(--border-weak);
+  border-radius: var(--radius-md);
+  background: var(--bg-sidebar);
+}
+
+.mcp-dialog__proto + .mcp-dialog__proto {
+  margin-top: var(--space-2);
+}
+
+.mcp-dialog__proto-name {
+  margin: 0;
+  font-weight: 600;
   font-size: 13px;
 }
 
-.service-card__section code {
+.mcp-dialog__proto-desc {
+  margin: 4px 0 0;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--text-muted);
+}
+
+.mcp-dialog__rules {
+  margin: var(--space-2) 0 0;
+  padding-left: var(--space-4);
+  font-size: 12px;
+  color: var(--text-tertiary);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.mcp-dialog__table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.mcp-dialog__table th,
+.mcp-dialog__table td {
+  border-bottom: 1px solid var(--border-weak);
+  padding: var(--space-2) var(--space-3) var(--space-2) 0;
+  text-align: left;
+  vertical-align: top;
+}
+
+.mcp-dialog__table th {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-tertiary);
+  white-space: nowrap;
+}
+
+.mcp-dialog__table td:last-child {
+  color: var(--text-muted);
+}
+
+.mcp-dialog__table code {
   font-family: var(--font-mono);
   font-size: 12px;
   background: var(--bg-subtle-2);
-  padding: 1px 5px;
-  border-radius: var(--radius-sm);
-}
-
-.role-badge {
-  padding: 2px 8px;
-  border-radius: 999px;
-  font-size: 12px;
-  font-weight: 500;
-}
-
-.role-badge--writer {
-  background: var(--primary-tint-badge);
-  color: var(--color-collecting);
-}
-
-.role-badge--reader {
-  background: var(--success-tint);
-  color: var(--color-confirmed);
-}
-
-.role-badge--unknown {
-  background: var(--neutral-tint);
-  color: var(--color-idle);
-}
-
-.tag {
-  display: inline-block;
-  margin-left: var(--space-1);
   padding: 1px 6px;
-  border-radius: 999px;
-  font-size: 11px;
+  border-radius: 6px;
 }
 
-.tag--required {
-  background: var(--warning-tint);
+.mcp-dialog__req {
+  font-size: 12px;
+  color: var(--text-tertiary);
+  white-space: nowrap;
+}
+
+.mcp-dialog__req--yes {
   color: var(--color-executing);
-}
-
-.tag--optional {
-  background: var(--neutral-tint);
-  color: var(--text-muted);
 }
 
 .services-skeleton {
@@ -884,3 +1165,77 @@ input {
 }
 .chat-bubble--agent .md hr { border: none; border-top: 1px solid var(--border-weak); margin: 0.8em 0; }
 .chat-bubble--agent .md a { color: var(--primary); }
+
+/* ─── 落地形态（www.deepseek.com 风格 hero）────────────────────── */
+
+/* 背景：淡蓝云雾团 + 细网格（www.deepseek.com 首屏观感，纯 CSS 绘制）。
+   网格两层 1px 线性渐变平铺，云雾为多层大尺度径向渐变。 */
+.app--landing {
+  background:
+    linear-gradient(rgba(99, 125, 197, 0.055) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(99, 125, 197, 0.055) 1px, transparent 1px),
+    radial-gradient(560px 420px at 66% 4%, rgba(139, 162, 219, 0.5), transparent 65%),
+    radial-gradient(640px 480px at 6% 40%, rgba(148, 170, 223, 0.48), transparent 65%),
+    radial-gradient(700px 520px at 98% 66%, rgba(148, 170, 223, 0.42), transparent 65%),
+    radial-gradient(520px 380px at 34% 94%, rgba(167, 186, 231, 0.32), transparent 65%),
+    radial-gradient(460px 360px at 52% 52%, rgba(196, 209, 240, 0.28), transparent 70%),
+    linear-gradient(180deg, #f3f5fb 0%, #eaeef8 52%, #eef1f8 100%);
+  background-size: 88px 88px, 88px 88px, auto, auto, auto, auto, auto, auto;
+}
+
+/* hero + 输入框 + 免责声明整组垂直居中，营造官网首页的留白感。
+   栏宽对齐 www.deepseek.com 输入框尺度（约 880px）。 */
+.chat-view--landing {
+  justify-content: center;
+  gap: var(--space-5);
+  padding-bottom: var(--space-6);
+  max-width: 880px;
+}
+
+.hero {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: var(--space-4);
+  animation: hero-rise 0.45s ease both;
+}
+
+@keyframes hero-rise {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* eyebrow：heroTitleSub 式大写小字，蓝色宽字距 */
+.hero__eyebrow {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.32em;
+  text-indent: 0.32em; /* 抵消末字符字距，保持视觉居中 */
+  color: var(--primary);
+  text-transform: uppercase;
+}
+
+/* 主标题：探索未至之境式超大居中标题 */
+.hero__title {
+  margin: 0;
+  font-size: clamp(36px, 6vw, 58px);
+  font-weight: 600;
+  line-height: 1.2;
+  letter-spacing: 0.01em;
+  color: var(--text);
+}
+
+.chat-view__disclaimer {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-tertiary);
+  text-align: center;
+}

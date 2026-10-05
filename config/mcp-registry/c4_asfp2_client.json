@@ -22,7 +22,9 @@
         "description": "转发地址（目标服务器点地址）"
       }
     ],
-    "identity_fields": ["addr"]
+    "identity_fields": [
+      "addr"
+    ]
   },
   "config_schema": {
     "fields": {
@@ -98,7 +100,11 @@
   },
   "prompt_hints": {
     "protocol_match": {
-      "aliases": ["ASFP2", "asfp2", "ASFP2 协议"],
+      "aliases": [
+        "ASFP2",
+        "asfp2",
+        "ASFP2 协议"
+      ],
       "rejected_variants": []
     },
     "point_field_hints": {

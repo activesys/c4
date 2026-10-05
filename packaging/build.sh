@@ -135,10 +135,16 @@ CUR=$((CUR + 1)); step "$CUR" "$TOTAL" "捆绑 Node 运行时"
 install -d "$STAGING/usr/local/lib/c4/agent/node/bin"
 install -m 0555 "$NODE_REAL" "$STAGING/usr/local/lib/c4/agent/node/bin/node"
 
-# ── 6. 注册表 JSON + agent.env.example ──────────────────────
-CUR=$((CUR + 1)); step "$CUR" "$TOTAL" "暂存 MCP 注册表 + agent.env.example"
+# ── 6. 注册表 JSON + 图标 + agent.env.example ────────────────
+CUR=$((CUR + 1)); step "$CUR" "$TOTAL" "暂存 MCP 注册表 + 图标 + agent.env.example"
 install -d "$STAGING/usr/local/etc/c4/mcp-registry"
 install -m 0555 "$C4_ROOT/config/mcp-registry/"*.json "$STAGING/usr/local/etc/c4/mcp-registry/"
+# 注册图标（协议无关架构）：icons/ 子目录整包同步，文件名即缓存键
+if [ -d "$C4_ROOT/config/mcp-registry/icons" ]; then
+    mkdir -p "$STAGING/usr/local/etc/c4/mcp-registry/icons"
+    cp -a "$C4_ROOT/config/mcp-registry/icons/." \
+        "$STAGING/usr/local/etc/c4/mcp-registry/icons/"
+fi
 install -m 0644 "$PACKAGING_DIR/agent.env.example" "$STAGING/usr/local/etc/c4/agent.env.example"
 
 # ── 7. 暂存 install.sh（tar.gz 安装器）──────────────────────

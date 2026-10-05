@@ -2,6 +2,7 @@
   "service_type": "c4_iec104_client",
   "display_name": "IEC104 数据采集",
   "role": "writer",
+  "icon": "icons/c4_iec104_client.v2.png",
   "protocols": [
     {
       "protocol": "iec104",
@@ -121,7 +122,12 @@
   },
   "prompt_hints": {
     "protocol_match": {
-      "aliases": ["IEC 104", "IEC 60870-5-104", "104 规约", "IEC 60870-5-104 规约"],
+      "aliases": [
+        "IEC 104",
+        "IEC 60870-5-104",
+        "104 规约",
+        "IEC 60870-5-104 规约"
+      ],
       "rejected_variants": [
         {
           "name": "IEC 101",

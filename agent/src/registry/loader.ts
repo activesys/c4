@@ -48,12 +48,18 @@ const PointSchemaSchema = z.object({
   identity_fields: z.array(z.string()).optional(),
 });
 
+// ── RegistryIconSchema 已移除（协议无关架构 v2.1.35）：icon 收敛为唯一形式 ——
+// 图标文件路径（字符串）。加载失败/缺省由前端动态生成默认徽标。
+
 // ── RegistryEntrySchema：Registry JSON 的 Zod 校验 ──
 const RegistryEntrySchema = z.object({
   service_type: z.string(),
   display_name: z.string(),
   role: z.enum(["writer", "reader"]),
   protocols: z.array(RegistryProtocolSchema),
+  // 图标文件路径（唯一形式）：相对注册目录的 svg/png 文件，
+  // 如 "icons/c4_asfp2_server.svg"；缺省时由前端生成默认徽标
+  icon: z.string().min(1).optional(),
   point_schema: PointSchemaSchema,
   config_schema: RegistryConfigSchemaSchema,
   binary_path: z.string(),

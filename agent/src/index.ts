@@ -578,6 +578,8 @@ async function main(): Promise<void> {
         corsOrigin: config.server.cors_origin,
         displayRouter,
         frontendDir: config.frontend?.dir,
+        // MCP 注册图标目录（协议无关架构）：注册目录下 icons/ 子目录
+        iconsDir: path.join(config.mcp_registry.path, "icons"),
         // MCP 存活状态＝连接状态推导（c4_architecture.md §3.1.1，C4_RS_00060/00068）
         aliveProvider: () => mcpManager.aliveStates(),
     });

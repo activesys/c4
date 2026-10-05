@@ -35,6 +35,9 @@ export interface ServiceCatalogEntry {
   service_type: string;
   display_name: string;
   role: ServiceRole;
+  /** MCP 注册时提供的图标文件 URL（协议无关架构，Agent 已把注册相对路径解析为
+   *  可直接引用的 URL）；缺省或加载失败时前端生成默认徽标 */
+  icon?: string;
   protocols: ProtocolSummary[];
   point_fields: PointField[];
   plan_fields: PlanField[];

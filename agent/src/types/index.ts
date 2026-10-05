@@ -101,6 +101,8 @@ export interface RegistryEntry {
     display_name: string;
     role: "writer" | "reader";
     protocols: RegistryProtocol[];
+    /** MCP 注册时提供的图标文件路径（协议无关架构，唯一形式）；Agent 只引用不解释 */
+    icon?: string;
     point_schema: PointSchema;    // 点表 schema（fields + identity_fields）
     config_schema: {
         fields: Record<string, {
@@ -124,6 +126,8 @@ export interface RegistryL1Summary {
     display_name: string;
     role: string;
     protocols: RegistryProtocol[];
+    /** 注册时提供的图标文件路径（协议无关架构，唯一形式）；缺省时前端生成默认徽标 */
+    icon?: string;
 }
 
 // ── Agent Config ─────────────────────────────────────────
