@@ -58,6 +58,9 @@ function armingChunks(): string[] {
       name: "output_access_plan",
       result,
     })}\n\n`,
+    // v0.2.0（web.md §3.1.3）：按钮武装仅由后端 button_arm 事件驱动——前端不再从
+    // tool_call/tool_result 推断。旧 mock 缺此事件导致按钮永不渲染（历史遗留失败根因）。
+    `data: {"type":"button_arm"}\n\n`,
   ];
 }
 

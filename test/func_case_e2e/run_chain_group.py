@@ -151,10 +151,11 @@ def dialog_text():
 
 
 def assert_template_once(tag, addr, name, at_most=1):
-    """组模式等价形态断言：模板点表每组展示一次（不得逐台重复罗列）。"""
-    n = len(re.findall(rf"地址 {addr} ↔ {name}", dialog_text()))
+    """组模式等价形态断言：模板点表每组展示一次（不得逐台重复罗列）。
+    v2.1.41 方案 Markdown 表格化后，模板行形态「| 地址 | 点名 | 点 key 后缀 |」。"""
+    n = len(re.findall(rf"^\| {addr} \| {name} \|", dialog_text(), re.M))
     if n != at_most:
-        raise rc.Fail(f"{tag}: 模板行「地址 {addr} ↔ {name}」出现 {n} 次 ≠ {at_most}")
+        raise rc.Fail(f"{tag}: 模板行「| {addr} | {name} |」出现 {n} 次 ≠ {at_most}")
 
 
 # ── 链段 ───────────────────────────────────────────────────
@@ -178,8 +179,10 @@ def s57():
     assert_suffix_shared("57", ["wt1", "wt2", "wt3", "wt4", "wt5"], "风速", "windspeed")
     assert_reader("57", 50)
     assert_template_once("57", 1000, "风速")
-    if "点 key 前缀 wt1_" not in dialog_text():
-        raise rc.Fail("57: 方案未按台明示前缀（缺「点 key 前缀 wt1_」）")
+    # v2.1.41 表格化后按台前缀在成员设备表「点 key 前缀」列（反引号单元格）
+    if not re.search(r"\| 设备名 \| 点 key 前缀 \|", dialog_text()) \
+            or "`wt1_`" not in dialog_text():
+        raise rc.Fail("57: 方案未按台明示前缀（成员设备表缺「点 key 前缀」列或 wt1_ 单元格）")
     reg = base.registry()
     if reg.get("channelHighWatermark") != 6:
         raise rc.Fail(f"57: 水位 {reg.get('channelHighWatermark')} ≠ 6（5 writer + 1 reader）")

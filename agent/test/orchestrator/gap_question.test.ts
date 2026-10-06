@@ -43,11 +43,17 @@ describe("ask_conn", () => {
         expect(s).toContain("192.168.1.5");
     });
 
-    it("未知字段回退 schema 描述主体", () => {
-        const s = ask_conn("转发", [
+    it("未知字段回退 schema 描述主体（bucket 已进短标签表——2026-10-03 用例 39）", () => {
+        // 已知字段走短标签，不走描述回退
+        const known = ask_conn("转发", [
             { name: "bucket", description: "InfluxDB bucket 名称，必填：由用户提供" },
         ]);
-        expect(s).toContain("InfluxDB bucket 名称");
+        expect(known).toContain("bucket 名");
+        // 真正的未知字段才回退 schema 描述主体
+        const s = ask_conn("转发", [
+            { name: "compression", description: "压缩算法，必填：由用户提供" },
+        ]);
+        expect(s).toContain("压缩算法");
     });
 });
 

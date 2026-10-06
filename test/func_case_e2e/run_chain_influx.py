@@ -6,7 +6,7 @@
 #   D3: 40（注入停 InfluxDB——start 成功不谎报、恢复后续写；用例内含恢复后验证）
 # InfluxDB server：本机 1.8.10（/home/wangbo/backup/influxdb），18086（auth 关闭——
 # 鉴权形态不在被测范围，c4_influxdb_client 的 Token 头在 auth-off 下被忽略）；
-# /api/v2/write 兼容端点写入、/query（v1）查询；db=hnals 预建（数据目录持久化）。
+# /api/v2/write 兼容端点写入、/query（v1）查询；db=hnals 由链首 A.2 自建（influx_reset_db）。
 # influxd 生命周期由本驱动器托管（环境 Bash 会话结束会回收后台进程）。
 # 数据面（38⑤/40③）：asfp2_client 注入 → c4_influxdb_client flush → /query 验证，
 # 属附录 B A 级脚本段。
@@ -262,7 +262,9 @@ def s43(influx):
     """43: 入口 B 第二实例共享读——目标名必答、跨实例同 key、既有实例不变。"""
     import http.client
     conn = http.client.HTTPConnection("127.0.0.1", 18086, timeout=10)
-    conn.request("POST", "/query", urlencode({"q": "CREATE DATABASE wind_history"}))
+    # 表单体必须显式 Content-Type——缺省时 Go 不解析 body，静默 400「missing q」
+    conn.request("POST", "/query", urlencode({"q": "CREATE DATABASE wind_history"}),
+                 {"Content-Type": "application/x-www-form-urlencoded"})
     conn.getresponse().read()
     conn.close()
 
@@ -337,9 +339,12 @@ def influx_reset_db():
     """链首清库（D2/D3 回零的一部分——D1 写入的 series 会干扰数据面断言）。"""
     import http.client
     conn = http.client.HTTPConnection("127.0.0.1", 18086, timeout=10)
-    conn.request("POST", "/query", urlencode({"q": "DROP DATABASE hnals"}))
+    # 表单体必须显式 Content-Type——缺省时 Go 不解析 body，静默 400「missing q」
+    conn.request("POST", "/query", urlencode({"q": "DROP DATABASE hnals"}),
+                 {"Content-Type": "application/x-www-form-urlencoded"})
     conn.getresponse().read()
-    conn.request("POST", "/query", urlencode({"q": "CREATE DATABASE hnals"}))
+    conn.request("POST", "/query", urlencode({"q": "CREATE DATABASE hnals"}),
+                 {"Content-Type": "application/x-www-form-urlencoded"})
     conn.getresponse().read()
     conn.close()
 
