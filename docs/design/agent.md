@@ -1,6 +1,6 @@
 # C4 Agent 系统架构设计
 
-> **版本**：v0.7.1 | **最后更新**：2026-10-06 | **父文档**：[c4_architecture.md](c4_architecture.md)
+> **版本**：v0.7.2 | **最后更新**：2026-10-06 | **父文档**：[c4_architecture.md](c4_architecture.md)
 >
 > **设计范围**：C4 Agent 系统的数据接入架构，覆盖从用户输入到 MCP 服务启动的完整数据接入流程。监控自愈等功能不在本次设计范围内。
 >
@@ -1764,15 +1764,24 @@ interface AgentState {
     hasAccessPlan: boolean      // 是否存在待执行的 AccessPlan（等价于 accessPlan !== null，作为不暴露对象的可观测布尔）
     accessPlan: AccessPlan | null  // 待执行的方案（方案层产出后赋值；**执行成功（方案被消耗）后置 null**——回滚不销毁方案，回滚后保留以供 button 重新武装，见 §2.8；经 checkpoint 持久化（若启用），不经 GET /api/state 暴露）
     lastError: string | null    // 最近一次错误（非技术语言），无错误 = null
+    siteName: string | null     // 当前绑定场站（§3.2.1.3a；未绑定 = null）——GET /api/state 可观测子集字段
 }
 ```
 
-**`GET /api/state`**（§3.5 Web 层）：返回 `AgentState` 的**可观测子集**（`phase` / `hasAccessPlan` / `lastError`），
+**`GET /api/state`**（§3.5 Web 层）：返回 `AgentState` 的**可观测子集**（`phase` / `hasAccessPlan` / `lastError` / `siteName`），
 不暴露完整 `accessPlan` 内容：
 
 ```json
-{ "phase": "idle", "hasAccessPlan": false, "lastError": null }
+{ "phase": "idle", "hasAccessPlan": false, "lastError": null, "siteName": "华能阿拉善" }
 ```
+
+- `siteName`（2026-10-05）：当前绑定场站名——启动取 `agent.json` 权威配置（§3.2.1.3a）初始化，
+  对话内绑定（单设备 `persist_site` / 组接入 `group_bind_site`）与 Web 绑定（`POST /api/site`）成功即推送，顶栏中央展示。
+- **`POST /api/state/reset`**（2026-10-05）：「开启新对话」复位全局状态（`phase → idle`、撤销方案武装）——
+  旧会话草稿按 conversationId 隔离留存（LRU 上限内），新会话以全新草稿开始。
+- **回合取消**（2026-10-05）：客户端断开（关页/开新对话/前端 abort）→ chat/upload 路由经
+  `AgentInvokeInput.signal` 透传 AbortSignal，`llm_json` 在途模型调用立即中断并上抛终止回合——
+  dying 回合不再产生后续事件与 phase 写入（避免旧回合把徽标改回「收集信息中」）。
 
 > AgentState 持久化于 LangGraph checkpoint（§5.1 `state.backend`）。`kill()` → 重启后能否自动恢复
 > `phase` 与 `accessPlan`，取决于当前实现是否加载 persistent checkpoint——若 checkpoint 未自动恢复，

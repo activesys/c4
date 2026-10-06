@@ -1,4 +1,17 @@
 2026-10-06  activesys  <activesys@sina.com>
+    Version docs
+    * docs: Update — 功能文档实现状态全量对齐（仅文档，无代码变更，版本不变）：
+      c4_function.md v0.4.15→v0.5.0——18 项 🟡 升 ✅（结构化文档收集/方案生成/
+      步骤分解/MCP 生命周期/确定性采集与转发/协议扩展/共享内存生命周期/守护
+      与恢复四项/人工审核/结构化日志/场站归属/数据不落地/Agent 首次启动）、
+      1 项 ❌ 升 ✅（00080 首次启动引导），✅43/🟡9/❌32（共 84 项，修正原
+      头部 83 的漏计）；00079/00080 补实现现状注记。web.md v0.4.1——§1.3
+      API 就绪表 /api/points、/api/display 系列 ❌→✅，补 /api/state/reset，
+      未就绪清单移除已落地的 00080，§3.4 补状态复位说明。agent.md v0.7.2——
+      GET /api/state 可观测子集补 siteName，补 POST /api/state/reset 与回合
+      取消链路（AbortSignal）说明。
+
+2026-10-06  activesys  <activesys@sina.com>
     Version 2.1.65
     * frontend: Fix — 每次新会话背景不变（2026-10-05 用户反馈）：随机仅在页面
       加载时执行一次，「开启新对话」不重摇。现每次回到落地页重新摇取且避开

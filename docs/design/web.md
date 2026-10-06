@@ -1,6 +1,6 @@
 # C4 Web 界面设计
 
-> **版本**：v0.4.0 | **最后更新**：2026-10-06 | **父文档**：[agent.md](agent.md)
+> **版本**：v0.4.1 | **最后更新**：2026-10-06 | **父文档**：[agent.md](agent.md)
 >
 > **设计范围**：C4 Web 界面的页面、组件与交互设计，**仅覆盖后端已就绪的功能**——
 > 对话式数据接入、文件上传、已接入 MCP 服务目录展示（含注册图标）、Agent 工作状态展示、
@@ -44,11 +44,12 @@ Web 界面依赖的 HTTP API（当前 `src/server/app.ts` 已挂载）：
 | `/api/upload` | POST | 文件上传（multer），SSE 流式返回解析结果 | ✅（实际可解析 xlsx/csv/txt，见 §3.2） |
 | `/api/services` | GET | 返回已接入 MCP 服务目录（L1 摘要，`icon` 为解析后的图标对外 URL）；`GET <servicesPath>/icons/<file>` 只读静态托管图标文件 | ✅（§3.3） |
 | `/api/state` | GET | 返回 Agent 状态 `{ phase, hasAccessPlan, lastError, siteName }` | ✅（§3.4） |
+| `/api/state/reset` | POST | 复位全局会话状态（`phase → idle`、撤销方案武装）——「开启新对话」调用 | ✅（§3.4） |
 | `/api/site` | GET / POST | 场站信息读取 / 绑定（首次启动引导与顶栏编辑共用；写入落盘 `agent.json` 并推送状态） | ✅（§3.6） |
-| `/api/points` | GET | 点位发现：已接入点列表，`?filter=` 按设备/关键词筛选 | ❌（C4_FUN_00085，§3.5） |
-| `/api/display` | GET | 活跃显示会话状态（前端按 `intervalMs` 轮询，见 §3.5） | ❌（C4_FUN_00082/00083/00084，§3.5） |
-| `/api/display` | POST | 创建显示会话 `{ pointKeys[], mode?, intervalMs?, durationMinutes?, refreshCount? }`——重新订阅按钮使用（§3.5.3） | ❌（C4_FUN_00084，§3.5） |
-| `/api/display/stop` | POST | 停止显示（整会话或指定点位，body `{ pointKeys?: string[] }`） | ❌（C4_FUN_00084，§3.5） |
+| `/api/points` | GET | 点位发现：已接入点列表，`?filter=` 按设备/关键词筛选 | ✅（C4_FUN_00085，§3.5） |
+| `/api/display` | GET | 活跃显示会话状态（前端按 `intervalMs` 轮询，见 §3.5） | ✅（C4_FUN_00082/00083/00084，§3.5） |
+| `/api/display` | POST | 创建显示会话 `{ pointKeys[], mode?, intervalMs?, durationMinutes?, refreshCount? }`——重新订阅按钮使用（§3.5.3） | ✅（C4_FUN_00084，§3.5） |
+| `/api/display/stop` | POST | 停止显示（整会话或指定点位，body `{ pointKeys?: string[] }`） | ✅（C4_FUN_00084，§3.5） |
 
 > **确认机制说明**：后端 `AgentStreamEvent` 类型**声明**了 `interrupt` 事件，但当前编排器
 > 实现**从不产出该事件**（无任何生产者，`interruptId` 也从未生成）。接入方案确认只能通过
@@ -56,7 +57,8 @@ Web 界面依赖的 HTTP API（当前 `src/server/app.ts` 已挂载）：
 
 > **未就绪、不在本设计范围**（后端缺失，对应 `c4_function.md` 的相关条目）：
 > C4_FUN_00070 身份认证/角色授权、C4_FUN_00074 结构化审核 UI、C4_FUN_00075 实时运行指标、
-> C4_FUN_00077 告警通知、C4_FUN_00078 审计日志、C4_FUN_00079 的「注册新服务」、C4_FUN_00080 配置向导。
+> C4_FUN_00077 告警通知、C4_FUN_00078 审计日志、C4_FUN_00079 的「注册新服务」。
+> （C4_FUN_00080 首次启动引导已随 §3.6 落地，不再列入未就绪。）
 
 ---
 
@@ -341,6 +343,10 @@ interface StateResponse {
 
 - 顶栏徽标通过**短间隔轮询**（如 1s）+ 对话流开始/结束时强制刷新来更新。
 - `lastError` 非空时，在顶栏显示可关闭的错误条（文案已由后端错误翻译层转为非技术语言）。
+- **状态复位**（2026-10-05）：「开启新对话」时前端调用 `POST /api/state/reset`（§1.3）——
+  全局 `phase` 复位为 `idle`、撤销方案武装；旧会话草稿按 conversationId 隔离留存，
+  新会话以全新草稿开始。若上一回合仍在执行，路由层的回合取消链路（agent.md §3.5）
+  会先终止 dying 回合，避免其将 `phase` 改回「收集信息中」。
 - `siteName` 随同一轮询更新：顶栏中央纯文字展示当前场站名（落地页与对话页均显示）。
   从 null 变为有值（首次启动引导完成，或对话内场站绑定固化）即顶栏即时出现场站名；
   点击可进入编辑对话框（§3.6.3）。`siteName` 为 null 时触发全屏引导层（§3.6.2）。
