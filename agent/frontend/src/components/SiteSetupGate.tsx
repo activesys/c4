@@ -4,8 +4,8 @@
 // C4 部署后不知道场站信息（agent.json site 为空），首次启动时由用户补填：
 //   - SiteSetupGate：全屏引导层，不可跳过——场站是归属判定的根基，初始化
 //     只需一次（POST /api/site 落盘 agent.json 后 1s 轮询内消失）；
-//   - SiteEditDialog：顶栏场站名点击后的编辑态（Esc/遮罩可关闭，改动影响面
-//     在框内提示：仅影响归属判定基准与后续新设备缩写，已接入设备不迁移）。
+//   - SiteEditDialog：顶栏场站名点击后的编辑态（Esc/遮罩可关闭；影响面仅由
+//     主标题「场站有变？数据不搬家」传达，无详细说明文案——已接入设备不迁移）。
 // 两者共用 SiteForm；缩写可选——留空由后端自动生成（LLM→名称派生）。
 
 import { useEffect, useRef, useState } from "react";

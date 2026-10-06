@@ -1,6 +1,6 @@
 # C4 Agent 系统架构设计
 
-> **版本**：v0.6.0 | **最后更新**：2026-10-04 | **父文档**：[c4_architecture.md](c4_architecture.md)
+> **版本**：v0.7.1 | **最后更新**：2026-10-06 | **父文档**：[c4_architecture.md](c4_architecture.md)
 >
 > **设计范围**：C4 Agent 系统的数据接入架构，覆盖从用户输入到 MCP 服务启动的完整数据接入流程。监控自愈等功能不在本次设计范围内。
 >
@@ -47,7 +47,7 @@ Agent 系统覆盖数据接入流程中 Agent 侧的全部职能：
 | C4_FUN_00006 | MCP 生命周期管理 | 执行模块：Stop-Start 协议 + 启动恢复 | §3.2, §3.2.3 | ✅ mergeConfigFromSteps |
 | C4_FUN_00007 | 常规操作自主执行 | 执行模块：config 合并 + 幂等 stop | §3.2 | ✅ 同 C4_FUN_00006 |
 | C4_FUN_00017 | 新协议可插拔扩展 | MCP Service Registry + 双层注入 | §3.3 | ✅ Registry 加载 |
-| C4_FUN_00041 | Web 界面交互 | Express v5 + SSE 流（text/tool_call/button_arm/button_disarm 语义事件） | §3.5 | ✅ 黑盒（SSE 可观测面） |
+| C4_FUN_00041 | Web 界面交互 | Express v5 + SSE 流（text/tool_call/button_arm/button_disarm 语义事件）+ 场站初始化/编辑（GET/POST /api/site）+ 服务目录（注册图标解析与静态托管） | §3.5 | ✅ 黑盒（SSE 可观测面） |
 | C4_FUN_00082 | 点位实时快照查询 | PointDisplayService：c4_shm_manager `read_points` 读取 + 状态标注 | §3.6 | ✅ c4_fun_00082 |
 | C4_FUN_00083 | 点位刷新频率展示 | 会话 tick 的 write_seq 差分 + 滑动窗口 | §3.6 | ✅ c4_fun_00083 |
 | C4_FUN_00084 | 持续显示与终止控制 | DisplaySession 会话模型（时长/次数/手动/切换终止） | §3.6 | ✅ c4_fun_00084 |
@@ -220,7 +220,7 @@ Agent 系统覆盖数据接入流程中 Agent 侧的全部职能：
     **不受影响**。按点-下游引用不变量（§2.12.4），整链撤回后**回到必问下游缺口**
     （"这些数据要转往哪里/写入哪里？"）——无下游的接入不是合法终态，不落
     `not_applicable`（该标记仅适用于变更流语义，§2.1）；接入侧不支持等价操作
-  （场站绑定不可变，接入协议撤回等价整体取消）；
+  （场站绑定对话内不可变，接入协议撤回等价整体取消）；
 - 取消后同一会话可重新接入，等价新会话。
 
 ### 2.5 失效传播表
@@ -233,7 +233,7 @@ Agent 系统覆盖数据接入流程中 Agent 侧的全部职能：
 | 阶段 2/5 协议变更（锁后） | 不发生——拒绝（§2.4.1） |
 | 转发链整链撤回（字段级，§2.4.2） | 清除全部目标在途态（各目标 forward 锁、阶段 5/6/7 数据）；AccessPlan 失效；接入侧不受影响；**回到必问下游缺口**（§2.12.4 第 2 条——无下游非合法终态，不落 not_applicable） |
 | 下游目标改口（§2.12） | **目标粒度**：仅失效该目标的在途态（side 数据）与聚合 AccessPlan；其他目标已答字段不受影响；目标级撤回删至最后一个目标时，语义同整链撤回（回到必问下游缺口） |
-| 场站 | 绑定后不可变（首次接入语义） |
+| 场站 | 绑定后不可变（首次接入语义，**对话内**；Web 顶栏改名通道见 §3.2.1.3a / web.md §3.6.3——不触发本表失效动作） |
 
 ### 2.6 提问即终局与单缺口顺序提问
 
@@ -1294,16 +1294,35 @@ interface ForwardTargetSpec {
    固化必须挂在成功路径之后；§4 时序与此一致）。改名重绑定 pointMap 的持久化同样
    挂在成功路径。固化与 `mergeConfigFromSteps` 同为编排器的确定性文件操作。
 
-**site 获取机制**（一个 C4 实例 = 一个场站的一台接入服务器，site 是单例，绑定后不可更换）：
-- **首次接入**：C4 只询问**场站名称**（如「场站名称：华能阿拉善」）；**缩写由 LLM 按拼音首字母自动生成**
-  （如 华能阿拉善→hnals、开鲁→kl），在回复与接入方案中展示给用户，随方案确认固化到 `agent.json` 的 `site` 字段
-- **绑定唯一**：site 固化后不得询问、不得变更；用户消息无场站信息时一律默认当前场站；
+**site 获取机制**（一个 C4 实例 = 一个场站的一台接入服务器，site 是单例；**任何修改立即生效于
+后续工作，无需重启**——2026-10-06 用户指令）：
+- **首次部署（2026-10-05 起）**：`agent.json` 的 `site` 字段允许为空出厂——Web 端**首次启动
+  引导层强制用户补填**（只收集场站名称，缩写自动生成；web.md §3.6.2），未绑定前 Web 界面
+  不可用；对话通道不参与首次绑定（引导先于对话；Web UI 层时序保证，API 直连不拦）。
+  三个写入口（对话内单设备 / 组接入 / Web 端）共用 `site_config.ts` 落盘（读改写单处
+  维护，防双实现漂移）。
+- **首次接入（对话内）**：C4 只询问**场站名称**（如「场站名称：华能阿拉善」）；**缩写由 LLM 按拼音首字母自动生成**
+  （如 华能阿拉善→hnals、开鲁→kl），在回复与接入方案中展示给用户。**提取当轮即固化**
+  到 `agent.json` 的 `site` 字段（先于方案确认；取消接入不回滚场站）——单设备走
+  `persist_site`、组接入走 `group_bind_site`，均落盘 + 推送 Web 顶栏；缩写生成失败 →
+  本回合不固化，缺口保持追问（不猜缩写）。Web 端缩写缺省时与对话内同一校验口径，
+  另有三级兜底：LLM 生成（15s 超时）→ 名称 ASCII 派生 → 422 手填（web.md §3.6.1）——
+  三级链仅 Web 端存在（对话内 LLM 生成失败即保持追问，不猜缩写），初始化不被 LLM
+  可用性卡死。
+- **绑定唯一（对话内）**：site 固化后**对话内**不得询问、不得变更；用户消息无场站信息时一律默认当前场站；
   用户明确提供其他场站（如「场站名称：开鲁」而当前为华能阿拉善）→ 回复「该资料不属于当前场站」并停止
+- **Web 修改通道（2026-10-05 新增；2026-10-06 起即时生效）**：绑定后允许经 Web 顶栏编辑
+  场站名称（`POST /api/site`，web.md §3.6.3）——**改名不搬家**：仅更新归属判定基准与
+  后续新设备的缩写生成，已接入设备、实例与点 key 不迁移、不重写；原缩写随保存回传
+  （不触发重新生成）。POST 成功即经 `rebindSite` 回灌**运行中编排器**（绑定基准 boundSite
+  与全部活会话草稿），归属判定与新会话默认值**立即**使用新场站，无需重启；
+  `agent.json` 为权威持久化，重启后同样生效
 - **后续接入的场站归属校验**（由 `query_abbr_registry` 函数在 `add` 意图下**确定性执行**（agent 内部函数，非 MCP 工具），非 LLM 判断）：
   - 用户资料**无场站信息** → 默认就是当前场站的资料（正常检索注册表）
   - 用户资料**出现场站信息且归属不明**（地名与当前场站一致但非完整场站名，如「阿拉善风电场」）→ 返回判定标签 `site_ambiguous`，提醒用户确认场站归属
   - 消息中的场站名**包含完整配置名**（如配置「华能阿拉善」、消息「华能阿拉善风电场」——多出的「风电场」为泛化后缀）→ 视为**一致**，直接接入、不触发归属确认（2026-10-02 补裁定）；`site_ambiguous` 仅指上述子集形态
   - 资料**明确不属于当前场站**（完整场站名地名不同，如「华能大青山」vs「华能阿拉善」）→ 返回判定标签 `site_mismatch`，提醒用户「该资料不属于当前场站」
+  - **区号缺失的严格拒绝（2026-10-06 用户裁定）**：场站名常含区段编号（如「国电河北II区」「华能通辽1区」「大唐辽宁三区」）——一个场站下多区是常态，各区独立部署采集/转发服务、**不同区的点表不能混用**；消息仅保留品牌与地名而缺失区段（如对「国电河北II区」提「国电河北风电场」）→ 一律按 `site_mismatch` 严格拒绝，**不**进入 ambiguous 确认（对话层确定性判定：品牌层命中即 other；注册表层核等值必败）；`site_ambiguous` 子集形态仅适用于**去品牌**形式（「阿拉善风电场」之于「华能阿拉善」、「河北II区风电场」之于「国电河北II区」）
 
 **场地判定仲裁规则**：阶段 1 的 LLM 语义判断（location_prompt，含语义等价→一致）与
 注册表确定性校验（site_ambiguous/site_mismatch 标签）**并行执行、确定性标签优先**——
@@ -1895,6 +1914,7 @@ L2 完整 JSON 保留在注册表内存中，方案层（default 填充需 confi
   "service_type": "c4_modbus_client",
   "display_name": "Modbus 数据采集",
   "role": "writer",
+  "icon": "icons/c4_modbus_client.v3.png",
   "protocols": [{
     "protocol": "modbus",
     "description": "Modbus TCP 数据采集客户端，从工业设备读取数据后写入共享内存",
@@ -1956,6 +1976,12 @@ L2 完整 JSON 保留在注册表内存中，方案层（default 填充需 confi
 >   key 引用 Writer 点、无点名生成。**加载期校验**：role=writer 的条目必须声明非空 `identity_fields`，且每个条目
 >   必须是 `fields` 中已声明的字段名；不满足则 Registry 加载报错
 > - `config_schema.fields`（除 `id`/`name`）→ 实例字段（平铺 + 校验，不做语义分类）
+> - `icon`（可选，2026-10-05）→ **图标文件路径，唯一形式**——相对注册目录的 svg/png 文件
+>   （如 `"icons/c4_modbus_client.v3.png"`）。协议无关架构：Agent 不解释图标内容，仅 Zod
+>   校验（非空字符串）并原样透传 L1 摘要；Web 层解析为对外 URL 并静态托管（§3.5）。
+>   缺省或文件缺失时由前端生成默认徽标（web.md §3.3.2）；换图标须换文件名（immutable
+>   长缓存，文件名即缓存键）——与「Registry JSON 即服务自描述」一致，图标是注册的一部分，
+>   新增服务 = 二进制 + Registry JSON + （可选）图标文件，零 Agent 代码改动
 >
 > **系统提示与 MCP 解耦（服务使用知识按阶段路由注入）**：
 > 某个 MCP 服务特有的使用知识——如「ASFP2 数据接收监听端口为必填项，必须由用户显式指定」、
@@ -2177,12 +2203,31 @@ React SPA                    Express Server
                            │       prompt="解析文件 /tmp/upload_abc.xlsx，提取设备信息")
                            │
                            ▼  提取层 的 xlsxParserTool 打开文件路径，读取内容
-  仪表盘组件  ──HTTP─→  GET  /api/services
-  仪表盘组件  ──HTTP─→  GET  /api/state     (AgentState：phase / hasAccessPlan / lastError)
+  仪表盘组件  ──HTTP─→  GET  /api/services  （L1 摘要，icon 已解析为对外 URL）
+  顶栏/目录    ──HTTP─→  GET  /api/services/icons/<file>   （图标只读静态托管）
+  顶栏组件    ──HTTP─→  GET  /api/state     (AgentState：phase / hasAccessPlan / lastError / siteName)
+  场站引导/编辑 ─HTTP─→  GET/POST /api/site  （web.md §3.6；写入经 site_config.ts 落盘 agent.json）
 ```
 
 **文件传递方式**：Express 将文件保存到磁盘后，把**文件路径**注入点表阶段提示词的 `<file_data>`。
 解析工具通过路径打开文件读取，不传 base64（大文件会撑爆上下文窗口）。
+
+**注册图标托管（2026-10-05，协议无关架构）**：Registry JSON 的 `icon` 为相对注册目录
+`icons/` 子目录的文件路径（§3.3，唯一形式）。`GET /api/services` 将其解析为对外 URL
+（`<servicesPath>/icons/<basename>`，取 basename 杜绝相对路径逃逸）并随目录条目返回；
+同路由以 express.static 只读托管该目录，`Cache-Control: public, max-age=31536000, immutable`
+——换图标须换文件名（文件名即缓存键）。文件缺失返回 404，由前端回退默认徽标（web.md §3.3.2）。
+
+**场站信息（2026-10-05，web.md §3.6）**：`GET/POST /api/site`（提供 agentConfigPath 且
+stateWriter 时挂载）承载首次启动引导与顶栏编辑——读/写/校验与对话内 `persist_site` /
+`group_bind_site` 共用 `site_config.ts`（三写入口均落盘 agent.json）；缩写缺省时 LLM 生成
+（15s 超时）→ 名称 ASCII 派生 → 422 手填。`AgentStateSummary` 新增 `siteName`：启动时取
+`agent.json` 权威配置初始化；三写入口绑定成功即推送，`/api/state` 1s 轮询内生效（顶栏
+中央展示）。POST 成功另经 `rebindSite` 回灌运行中编排器（boundSite 与全部活草稿）——
+场站修改即时生效于归属判定与新会话默认值，无需重启（2026-10-06 用户指令）。
+`rebindSite` 为可选注入（生产 index.ts 恒接线）；未注入时 POST 仍成功（落盘 + 推送顶栏），
+运行中编排器须重启后使用新值。`persist_site` 落盘失败（agent.json 不可写）不推送、
+记 agentLogger 错误日志，会话以内存态场站继续（重启即丢，运维可查）。
 
 编排器事件流：编排器 `invoke` 生成器直出（`streamEvents` 消费循环已随 ReAct 退役，§3.1），
 事件来自阶段提取器与执行层。
@@ -2515,7 +2560,7 @@ Agent 启动时读取 `~/.local/c4/agent.json`（固定位置，`~` 为运行 C4
     "dir": "/usr/local/lib/c4/frontend"
   },
 
-  // ========== 场站绑定（§3.2.1.3a，首次接入确认后固化） ==========
+  // ========== 场站绑定（§3.2.1.3a 权威配置；首次部署可为空，Web 引导强制补填） ==========
   "site": {
     "name": "华能阿拉善",
     "abbr": "hnals"
@@ -2542,7 +2587,7 @@ Agent 启动时读取 `~/.local/c4/agent.json`（固定位置，`~` 为运行 C4
 | `logging.dir` | string | 结构化运行日志（NDJSON，每日文件）输出目录；打包部署配 `/var/log/c4/agent`（需 systemd 授予运行账户写权限） |
 | `logging.agent_level` | string | 可选。结构化日志级别：`"debug"` / `"info"` / `"warn"` / `"error"`，缺省 `"debug"` |
 | `frontend.dir` | string | Web 前端静态资源目录（Express 托管，缺省则不托管） |
-| `site` | object | 场站绑定（单例）：`{name, abbr}`，首次接入确认后固化（§3.2.1.3a）；固化后不可询问、不可变更 |
+| `site` | object | 场站绑定（单例）：`{name, abbr}`（§3.2.1.3a 权威配置）。首次部署可为空——Web 首次启动引导强制补填（web.md §3.6.2）；对话内不可询问、不可变更，Web 顶栏允许改名（不迁移已接入设备）。三个写入口统一经 `site_config.ts` 落盘，修改经 `rebindSite` 回灌运行中编排器（立即生效，无需重启） |
 
 ### 5.2 运行时目录结构
 
@@ -2589,10 +2634,10 @@ MCP 服务二进制路径不由 agent.json 统一指定——各 MCP 服务通�
 └── mcp-registry/                 # MCP 服务注册文件（随包分发，Agent 只读扫描）
     ├── c4_modbus_client.json       ← 随包提供
     ├── c4_iec104_client.json
-    ├── c4_iec101_client.json       ← 规划中
     ├── c4_asfp2_server.json
     ├── c4_asfp2_client.json
-    └── c4_influxdb_client.json
+    ├── c4_influxdb_client.json
+    └── icons/                      # 注册图标文件（随包分发；web.md §3.3，文件名即缓存键）
 
 /usr/local/bin/                   # Go MCP 服务二进制（安装脚本以 root 安装，一次性）
 ├── c4_shm_manager                  ← C4 项目编译
@@ -2609,7 +2654,7 @@ MCP 服务二进制路径不由 agent.json 统一指定——各 MCP 服务通�
 | `~/.local/c4/` | — | 所有配置文件 | 运行账户（写入），Agent（读取） |
 | `~/.local/c4/agent.json` | 固定位置 | Agent 自身运行时配置 | 运行账户（写入），Agent 启动时读取 |
 | `~/.local/c4/config.json` | `agent.json → shm_manager.config_path` | 数据路径 MCP 服务配置 | Agent（写入），MCP 服务（读取） |
-| `/usr/local/etc/c4/mcp-registry/` | `agent.json → mcp_registry.path` | MCP 服务注册 JSON | 安装包（root 预置），Agent 只读扫描 |
+| `/usr/local/etc/c4/mcp-registry/` | `agent.json → mcp_registry.path` | MCP 服务注册 JSON + `icons/` 图标子目录 | 安装包（root 预置），Agent 只读扫描/静态托管 |
 | `/usr/local/bin/`（等） | Registry JSON `→ binary_path` | MCP 服务 Go 二进制 | 安装脚本（root 安装，一次性），systemd 常驻拉起 |
 | `~/.local/c4/state/` | `agent.json → state.path` | LangGraph 对话状态 | Agent（读写），用于跨重启保活 |
 | `logging.dir`（打包部署 `/var/log/c4/agent`） | `agent.json → logging.dir` | 结构化运行日志（NDJSON 每日文件） | Agent（写入，需 systemd 授权），运维人员（查看） |
@@ -2663,6 +2708,9 @@ Agent 启动时读取                Agent 运行时生成/修改           Agen
 | 旧命名格式兼容（2026-10-01） | 迁移映射 / 不兼容 | **不兼容，旧配置废弃重接** | pre-production 无包袱（用户裁定不考虑兼容性） |
 | 批量设备组接入（2026-10-03） | 逐台出方案确认 / 引导分台输入 / 设备组模板一次确认 | **设备组模板一次确认（§2.11，独立需求，用例 57~62，协议无关）**；纯两台（含）以下复合设备名维持用例 47 逐台口径 | 33 台逐台 = 33 次确认 + 33 次 Stop-Start 不可接受，分台输入信息重录成本最高；模板点表 + 参数化连接是风场原生形态（用户裁定独立需求，不并入 47） |
 | 偏移变体点 key（2026-10-03） | 模板相对地址（点名做 id）/ 全局地址 | **模板相对**（wt1_windspeed…wt33_windspeed，key 与 addr 解耦） | 用户裁定：点名做 id——同组同点名同 key 后缀，转发映射跨组统一，addr 按各台偏移落盘 |
+| 注册图标（2026-10-05） | 前端硬编码协议图标 / 注册 JSON 提供文件路径 / base64 内嵌 | **注册 JSON `icon` 文件路径（唯一形式）**，Web 层解析为 URL 并静态托管（immutable，换图须换文件名）；缺省前端生成默认徽标 | 协议无关——新增服务零 Agent 代码；Agent 不解释图标内容（L1 原样透传）；文件名即缓存键 |
+| 场站初始化（2026-10-05） | 对话内询问 / Web 引导层强制补填 | **Web 引导层（不可跳过）+ 对话内绑定并存**，写入口共用 site_config.ts | 首次部署即建立归属判定基准；缩写 LLM（15s）→ 名称派生 → 422 手填三级兜底，初始化不被 LLM 可用性卡死（web.md §3.6） |
+| 场站修改（2026-10-05） | 绑定后一律不可变 / Web 顶栏编辑 | **对话内不可变 + Web 顶栏改名**（原缩写回传，不触发重新生成）；改名经 `rebindSite` 回灌运行中编排器，**即时生效、无需重启**（2026-10-06 用户指令） | 站点更名属正常运维；数据不搬家——已接入设备/点 key 不迁移，仅归属判定基准与新设备缩写受影响（web.md §3.6.4） |
 
 ---
 

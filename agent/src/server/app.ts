@@ -16,6 +16,7 @@ import { createServicesRouter } from "./routes/services.js";
 import { createStateRouter } from "./routes/state.js";
 import { createSiteRouter } from "./routes/site.js";
 import type { AgentStateWriter } from "./types.js";
+import type { SiteInfo } from "../site_config.js";
 import type { Router } from "express";
 
 // ── Application Options ───────────────────────────────────
@@ -34,7 +35,7 @@ export interface AppOptions {
     servicesPath?: string;
     /** Mount path for state router. Default: "/api/state" */
     statePath?: string;
-    /** Mount path for site router. Default: "/api/site"；提供 agentConfigPath 时挂载 */
+    /** Mount path for site router. Default: "/api/site"；提供 agentConfigPath 与 stateWriter 时挂载 */
     sitePath?: string;
     /**
      * agent.json 权威配置路径（§3.2.1.3a）：提供时挂载 GET/POST /api/site
@@ -45,6 +46,9 @@ export interface AppOptions {
     stateWriter?: AgentStateWriter;
     /** LLM 场站缩写生成回调（缩写缺省时使用；失败走名称派生兜底） */
     generateSiteAbbr?: (name: string) => Promise<string>;
+    /** 场站重绑定回调（2026-10-06 用户指令：场站修改后立即生效无需重启）——POST
+     *  /api/site 成功后回灌运行中编排器（agent.rebindSite） */
+    rebindSite?: (site: SiteInfo) => void;
     /** 对点核验显示路由（agent.md §3.6.5）：/api/points、/api/display、/api/display/stop */
     displayRouter?: Router;
     /**
@@ -114,6 +118,7 @@ export function createApp(options: AppOptions): express.Application {
         agentConfigPath,
         stateWriter,
         generateSiteAbbr,
+        rebindSite,
     } = options;
 
     // 1. CORS — Express v5: no `cors` npm package needed
@@ -133,7 +138,12 @@ export function createApp(options: AppOptions): express.Application {
     if (agentConfigPath && stateWriter) {
         app.use(
             sitePath,
-            createSiteRouter({ agentConfigPath, stateWriter, generateSiteAbbr }),
+            createSiteRouter({
+                agentConfigPath,
+                stateWriter,
+                generateSiteAbbr,
+                rebindSite,
+            }),
         );
     }
     if (displayRouter) {

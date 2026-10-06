@@ -1,6 +1,6 @@
 # C4 部署设计
 
-> **版本**：v0.1.0 | **最后更新**：2026-08-28 | **父文档**：[c4_architecture.md](c4_architecture.md)
+> **版本**：v0.1.1 | **最后更新**：2026-10-06 | **父文档**：[c4_architecture.md](c4_architecture.md)
 > **对应功能**：[C4_FUN_00081](../specification/c4_function.md), [C4_FUN_00035](../specification/c4_function.md), [C4_FUN_00064](../specification/c4_function.md)
 > **对应需求**：[C4_RS_00254](../specification/c4_requirement.md), [C4_RS_00220](../specification/c4_requirement.md), [C4_RS_00221](../specification/c4_requirement.md), [C4_RS_00222](../specification/c4_requirement.md), [C4_RS_00015](../specification/c4_requirement.md)
 
@@ -103,7 +103,7 @@ C4 由三类运行时组件组成：
 | c4-agent | `agent/` | `dist/` + `node_modules/` | `/usr/local/lib/c4/` |
 | Node.js LTS 运行时 | 官方预编译包 | `bin/node` | `/usr/local/lib/c4/agent/node/` |
 | Web 前端 | `agent/frontend/` | `dist/`（静态） | `/usr/local/lib/c4/frontend/` |
-| MCP 注册表 | `config/mcp-registry/` | `*.json` | `/usr/local/etc/c4/mcp-registry/` |
+| MCP 注册表 | `config/mcp-registry/` | `*.json` + `icons/`（注册图标子目录，随 JSON 一并暂存） | `/usr/local/etc/c4/mcp-registry/` |
 | 环境变量文件 | 手动生成 | `agent.env` | `/usr/local/etc/c4/agent.env` |
 
 ### 3.2 部署包格式
@@ -237,7 +237,8 @@ cd agent/frontend && npm ci && npm run build   # tsc --noEmit && vite build → 
         ├── c4_iec104_client.json
         ├── c4_asfp2_client.json
         ├── c4_asfp2_server.json
-        └── c4_influxdb_client.json
+        ├── c4_influxdb_client.json
+        └── icons/                   # 注册图标文件（Web 服务目录展示用，web.md §3.3）
         # 注：c4_shm_manager 不在此注册，由 agent.json 的 shm_manager.binary 直接指定
 
 ~/.local/c4/                         # 运行时数据（c4 专用账户可写）
@@ -485,6 +486,7 @@ sudo systemctl reset-failed c4-asfp2-client
 | `agent.json` | `~/.local/c4/agent.json` | c4 | Agent 权威配置，启动必读，缺失则 FATAL 退出 |
 | `*.service` | `/usr/lib/systemd/system/` | root:root | systemd 单元：`c4-agent.service` + 每个 MCP 服务一个单元（`c4-shm-manager` 等 6 个），定义见 §6.5 |
 | `mcp-registry/*.json` | `/usr/local/etc/c4/mcp-registry/` | root:c4 | MCP 服务注册信息（`binary_path` 指向 `/usr/local/bin/`） |
+| `mcp-registry/icons/*` | `/usr/local/etc/c4/mcp-registry/icons/` | root:c4 | MCP 注册图标文件（Agent 只读静态托管，immutable 长缓存——换图须换文件名） |
 | `agent.env` | `/usr/local/etc/c4/agent.env` | root:c4 | `ZHIPU_API_KEY` 等敏感环境变量，`chmod 640` |
 
 `agent.json` 结构（Zod schema，见 agent/src/index.ts）：

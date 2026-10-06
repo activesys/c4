@@ -24,6 +24,9 @@ export interface SiteRouterOptions {
     stateWriter: AgentStateWriter;
     /** LLM 缩写生成回调（index.ts 注入，内部自控超时；失败/缺省走派生兜底） */
     generateSiteAbbr?: (name: string) => Promise<string>;
+    /** 场站重绑定回调（2026-10-06 用户指令：修改后立即生效无需重启）——写入成功后
+     *  回灌运行中编排器（绑定基准与全部活草稿），归属判定立即使用新场站 */
+    rebindSite?: (site: SiteInfo) => void;
 }
 
 export function createSiteRouter(options: SiteRouterOptions): Router {
@@ -84,6 +87,7 @@ export function createSiteRouter(options: SiteRouterOptions): Router {
             return;
         }
         options.stateWriter.setSiteName(site.name);
+        options.rebindSite?.(site); // 回灌运行中编排器（2026-10-06 用户指令：即时生效）
         res.status(200).json({ success: true, site });
     });
 

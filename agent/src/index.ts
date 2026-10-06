@@ -621,6 +621,9 @@ async function main(): Promise<void> {
         agentConfigPath: configPath,
         stateWriter: stateTracker,
         generateSiteAbbr,
+        // 场站重绑定：POST /api/site 成功后回灌运行中编排器（2026-10-06 用户指令：
+        // 场站修改后后续工作立即生效，无需重启）
+        rebindSite: (site) => agent.rebindSite(site),
         // MCP 存活状态＝连接状态推导（c4_architecture.md §3.1.1，C4_RS_00060/00068）
         aliveProvider: () => mcpManager.aliveStates(),
     });

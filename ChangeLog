@@ -1,0 +1,278 @@
+2026-10-06  activesys  <activesys@sina.com>
+    Version 2.1.54
+    * agent: Fix — persist_site 落盘失败（agent.json 不可写）此前完全静默（不记日志、不推送、
+      会话照常以内存态场站继续）：失败分支补 agentLogger 错误日志，重启丢失风险对运维可见
+      （二轮评审 P2）。
+    * agent: Update — SiteSetupGate.tsx 文件头注释修正：编辑对话框影响面仅由主标题传达，
+      与 web.md §3.6.3 及实际渲染一致（二轮评审 P2，注释无行为变化）。
+    * docs: Update — agent.md §3.2.1.3a 三级兜底归属措辞修正（仅 Web 端存在，对话内 LLM
+      失败即保持追问）；§3.5 补 rebindSite 未注入时的降级形态与 persist_site 失败语义
+      （二轮评审 P3）。
+
+2026-10-06  activesys  <activesys@sina.com>
+    Version 2.1.53
+    * agent: Fix — 组接入场站绑定（group_bind_site）此前仅写会话内存、重启即丢失：改经
+      site_config.ts 落盘 agent.json，与单设备 persist_site、POST /api/site 共用同一写入口。
+    * agent: Support — POST /api/site 成功后经 C4Agent.rebindSite（新增接口方法）回灌运行中
+      编排器（绑定基准 boundSite 与全部活会话草稿）——场站修改（含首次填写）立即生效于归属
+      判定与新会话默认值，无需重启（2026-10-06 用户指令）。
+    * agent: Update — orchestrator 移除未使用的 writeFileSync 导入；agent.md / web.md /
+      c4_deployment.md 同步场站即时生效语义与注册表 icons/ 目录树（评审 P0/P1/P2 修正）。
+
+2026-10-05  activesys  <activesys@sina.com>
+    Version 2.1.52
+    * agent: Support — 场站信息全链路（2026-10-05 用户指令）：顶栏三栏展示场站名（落地页与
+      对话页均显示）、首次启动引导层 SiteSetupGate（不可跳过）、顶栏编辑对话框 SiteEditDialog。
+    * agent: Add — GET/POST /api/site：读/写/校验收敛到共享模块 site_config.ts（名称 2~20
+      非空白字符、缩写 2~12 位字母数字，与编排器口径一致）；缩写缺省三级兜底——LLM 生成
+      （15s 超时）→ 名称 ASCII 派生 → 422 手填，初始化不被 LLM 可用性卡死。
+    * agent: Support — AgentStateSummary 新增 siteName：启动时取 agent.json 权威配置初始化，
+      persist_site 绑定成功即推送，/api/state 1s 轮询内生效。
+    * agent: Fix — 编辑对话框「删字被填回」：对话框拉取/监听仅挂载时执行一次（onClose 经
+      ref 转发）、表单初值仅首次同步、App 回调 useCallback 稳定化。
+
+2026-10-05  activesys  <activesys@sina.com>
+    Version 2.1.41
+    * agent: Support — orchestrator 思考步骤流水线（按会话隔离，多会话并发不串台）：
+      note_step/note_result 逐步下发 tool_call/tool_result；埋点覆盖输入分析、7 类 LLM
+      结构化解析、点表解析、场站固化、方案装配、执行下发、批量组解析。
+    * agent: Update — 三种接入方案展示文本 Markdown 化（三级标题 + 基本信息表 + 采集点表 +
+      采集→转发对应表；分组方案含模板点表/成员设备表/分块转发地址段表）；确认句式原样保留。
+    * frontend: Support — ThinkingBlock 思考折叠块（进行中实时计时、默认展开、逐轮持久化，
+      历史思考块不消失）；ToolCallCard 详情默认展开；对话态视觉对齐 chat.deepseek.com
+      （用户气泡浅蓝、滚动容器上移、输入框 sticky 停靠）。
+    * test: thinking_block 新增 3 例、tool_card 重写；web 单测 64 过 / agent 单测 143 过。
+
+2026-10-05  activesys  <activesys@sina.com>
+    Version 2.1.36
+    * frontend: Support — Web 双形态外壳：未交互呈现落地页（eyebrow + 超大标题 + 居中输入框，
+      云雾网格纯 CSS 背景），首条消息/上传后切换对话页；输入框重构为 DeepSeek 式双层大圆角框；
+      C4 星芒品牌徽章（favicon）。
+    * frontend: Support — MCP 目录分组列表（采集/转发，组标题带计数；行图标 + 名称 +
+      service_type + 描述）+ 详情弹窗（协议/选择规则/点表字段/接入配置）；注册图标缺省或
+      加载失败时按 service_type FNV-1a 哈希生成稳定默认徽标（协议无关架构）。
+    * agent: Support — registry icon 字段（文件路径，唯一形式，Zod 校验、L1 透传）；
+      GET /api/services 解析为对外 URL 并新增 <servicesPath>/icons 只读静态托管
+      （immutable 长缓存，换图须换文件名）。
+    * packaging: build.sh 注册表暂存同步拷贝 icons/ 子目录；config 5 个服务 JSON 增 icon
+      字段（IEC104/Modbus/InfluxDB 真实协议图标，ASFP2 前端生成）。
+    * test: ServiceDashboard 用例改分组/描述/弹窗/图标断言；e2e 非 LLM 用例全绿。
+
+2026-10-05  activesys  <activesys@sina.com>
+    Version 2.1.18
+    * agent: Support — 多下游接入全量落地（agent.md §2.12）：新增 multi_target.ts（多设备/
+      多下游确定性声明解析、点集表达式文法、同参判定）；mt 会话态、四阶段问序（问句带目标名
+      消歧）、assemble_mt_plan 装配（前缀派生/keyed 配对/同参去重/覆盖性收缩）；必问下游
+      与目标级撤回。
+    * agent: Fix — abbr_registry 放行 prefix==="" 下游目标条目（此前每次加载被当损坏数据
+      静默丢弃，65/67 连环缺陷根因）；executor 删除下游收缩 pass；keyed 转发配对防
+      多设备×多目标错配。
+    * test: run_chain_multi.py（63~67 五链段）+ influx D4 链；十套件串行零失败。
+
+2026-10-04  activesys  <activesys@sina.com>
+    Version 2.1.17
+    * agent: Fix — 变更意图词表补「改(个)名/更名为」（「把…改个名字」掉进全新接入管线，
+      用例 56 路由缺口）；modify 路径补注册表 pointMap 换绑 upsert（登记新名→既有 key、
+      摘除旧名，随成功路径固化、失败回滚不写）。
+    * test: run_chain_extra（4/10/13/14/44/45/53/56）、run_chain_upload（用例 7）、
+      run_case15_float16（ASFPV211 f16 注入 mmap 位模式断言）、run_case46_selfcheck
+      （过程断言负向自检）；用例标注累计 56/57。
+
+2026-10-04  activesys  <activesys@sina.com>
+    Version 2.1.16
+    * agent: Support — 设备组批量接入实现（agent.md §2.11，用例 57~62）：组模式触发/组解析/
+      组级缺口流水线，一份组方案一次确认批量落盘 N 实例；点 key 模板相对；监听型共用端口
+      并入宿主；组级失败全组回滚；新增 group_access.ts（区间头切段/地址偏移/连接展开）。
+    * agent: Fix — glm-4.5-air 七套全量回归加固（v2.1.8~16）：转发意图词表补「送到/发到」
+      （用例 33）、协议别名补「规约」（用例 34）、连接 LLM null/空串守卫与 integer 收敛
+      （用例 35）、组模式枚举码确定性展开（用例 59）、加点「地址N:名称」确定性提取（用例 54）
+      等。
+    * test: run_chain_group.py 六链段；七套串行回归全部通过。
+
+2026-10-03  activesys  <activesys@sina.com>
+    Version 2.1.6
+    * agent: Fix — 首接无 .prev 在线执行失败回滚到空态（缺陷十二：restore_prev1 落空时
+      坏配置滞留、「已恢复原样」汇报失实；改写空壳 config + 空配置完整 Stop-Start）。
+    * agent: Fix — 非转发缺口应答语境 forward_intent 误判防护（缺陷十三：应答「2」被误判
+      转发意图致设备缺口绑定死循环）；纯类型词蒙混排除（「风机」不充当设备名，升压站除外）；
+      设备名系动词捕获修复（用例 47A/C/D、51A）。
+    * docs: agent.md §2.10 补首次接入空态回滚裁定（区分在线失败与崩溃重启两条无 .prev 路径）。
+    * test: run_chain_ind1.py 五链段（含空态回滚→重接→删除→注册表重建→水位降级全链）；
+      用例标注累计 39。
+
+2026-10-03  activesys  <activesys@sina.com>
+    Version 2.1.5
+    * agent: Fix — influxdb 用户点表描述提取优先（确定性骨架先行吞掉首轮语义，用例 38
+      十二轮死循环）；conn 文字键值应答绑定（url/token/org/bucket，用例 39）；入库再映射
+      同实例拦截（用例 41）；influxdb 点展示统一 measurement:field 形态。
+    * agent: Update — gap_question conn 短标签表补 url/token/org/bucket + description
+      截断残括号防御。
+    * test: run_chain_influx.py 三链段（本机 InfluxDB 1.8.10 数据面实测）；用例标注
+      累计 34。
+    * docs: AGENTS.md 规则 3 精确化——每次修改代码必须提升 packaging/VERSION 的 PATCH 位
+      （2026-10-03 用户指令）。
+
+2026-10-03  activesys  <activesys@sina.com>
+    Version 2.1.4
+    * agent: Fix — 设备名捕获收紧（「设备IP是x.x.x.x」宾语是连接参数不是设备名；新增
+      「接入X的数据」全名句式）；从站号缺口应答批量绑定（modbus 点级 uid 缺口永不开合，
+      用例 31 十二轮死循环）；点表校验缺口聚合单列（用例 32「逐项指出全部问题」）；连接
+      字段 schema 白名单采纳（「公共地址2」曾被默认值顶替，用例 37）；转发句作用域词表补
+      「送到|发到|送往|送至」（用例 33）。
+    * agent: Update — point_prompt 忠实转写原则：用户直接给出的编码数值原样转写，取值
+      合法性交校验层裁决。
+    * test: run_chain_mb104.py（A.2 → 30~37 → 50）；用例标注累计 30。
+
+2026-10-02  activesys  <activesys@sina.com>
+    Version 2.1.3
+    * agent: Fix — 同名消歧强仲裁：retrieve_device 增点表地址证据回调（addr 集一致 = 同一
+      设备重入，不一致 = 另一台同名），「另一台备用机」不再被静默并入既有设备。
+    * agent: Support — 同名坚持新增通路（§3.2.1.3a「坚持同名 → 前缀顺延」落地：name_conflict
+      追问给「就是新增一台，也叫X」通道，pendingNewDevice 应答语境）；同目标转发 addr 查重
+      方案期拦截（(ip, port) 跨实例聚合比对）。
+    * test: run_chain_b342.py 三链段；用例标注累计 21。
+
+2026-10-02  activesys  <activesys@sina.com>
+    Version 2.1.2
+    * agent: Fix — 共享宿主三缺陷：变更流设备身份由宿主实例 id 改为注册表前缀（多台同宿主时
+      devices.find(id=host) 永远命中首条，「删除3号风机」错删 wt1）；find_reader_for_writer
+      增设备前缀过滤（加点成对转发错落他机）；点级删除级联清空 Reader 点后空壳实例整体移除。
+    * test: run_chain_b1.py 五链段 fail-fast（同端口并入/共用加点/共用摘除/删空宿主）；
+      用例标注累计 18。
+
+2026-10-02  activesys  <activesys@sina.com>
+    Version 2.1.1
+    * agent: Fix — 场站首绑只问场站名称（显式「场站名称：X」确定性固化，缺口追问自由应答交
+      location_prompt first_access 提取 + LLM 拼音首字母缩写）；stage-6 转发点表三处落槽点
+      幂等防护（累积文本重复命中不清收摊计数，用例 52 十三轮追问死循环根因）；批量删除按
+      用例 28 现行口径落地。
+    * test: run_chain_v21.py A.0 主链 16 链步串行 fail-fast 全通过；功能用例 AI 自动化
+      首轮成立。
+
+2026-10-01  activesys  <activesys@sina.com>
+    Version 2.1.0
+    * agent: Support — 命名体系重构（agent.md §3.2.1.3，六轮评审闭环）：实例 id = channel{N}
+      顺序句柄（未用最小序号、高位水印持久化、用户不可见）；点 key = {设备前缀}_{裸id}
+      无条件前缀（实例内真重名拒绝、跨设备同名自然共存）；设备身份注册表 abbr_registry.json
+      重写（同名描述匹配仲裁/撞名顺延/匿名 dev{N}/可从 config.json 重建）。
+    * agent: Support — recv.device 必答缺口（场站→设备→协议→点表→连接依赖序）；同端口并入
+      （监听型，零交互 modify）；方案逐条「地址 ↔ 点名 → 点 key」展示；变更流虚拟设备视图与
+      同名多候选消歧锚状态机。
+    * mcp: c4_influxdb_client field 必填（无默认值、不推导，validate_points 与启动校验两
+      路径落地）+ 校验同源化 validation.go（三开关参数化）。
+    * docs: 十份设计文档同步回写；agent vitest 144 用例、Go 六服务构建+测试全过。
+    * packaging: build.sh/spec/verify.sh V3 对齐；prompts/ 提升至 src/ 级（super_worker/
+      目录删除）。
+
+2026-10-01  activesys  <activesys@sina.com>
+    Version 2.0.20
+    * agent: Fix — 删除操作 fail-safe 重构（整设备误删两连事故驱动）：deletion_pointish
+      分类反转——点级线索优先，设备级删除只在零线索纯表述下确定性返回；含线索而解析不出
+      交 LLM 兜底，不再短路成设备级。
+    * agent: Support — 点级删除形态适配（「N（点名）」括号 /「N:名称」与「名称:N」冒号 /
+      纯数字按地址）+ 点名-地址矛盾拒绝并给二选一指引；方案层交叉校验闸：整实例删除与
+      点级线索矛盾即不出方案改澄清——设备级误删在方案层成为不可能。
+    * agent: Fix — 变更分叉无方案出口统一 button_disarm（上一方案失效后前端残留确认按钮
+      落入死路）。
+
+2026-09-29  activesys  <activesys@sina.com>
+    Version 2.0.16
+    * agent: Fix — 协议缺口死锁循环修复（用例 11「使用 abc 协议接入」四轮不收敛）：裸协议名
+      快捷命中（整条消息恰为支持列表协议名直接置协议）；L1/L2 门放宽（无效 protocolRaw
+      不再关死提取器，有效声明可顶掉）；混合声明保留（「接收和转发都是用asfp2协议」不再被
+      串侧过滤吞掉）；协议缺口返回具体文案（「abc」暂不支持 + 支持列表）。
+
+2026-09-29  activesys  <activesys@sina.com>
+    Version 2.0.15
+    * agent: Fix — 转发必答缺口（c4_shm_manager 要求 writer/reader 成对，纯采集方案必然
+      执行失败）：无转发意向且无可沿用链路时方案期主动追问/兜底拦截；「不需要转发」应答
+      确定性解释平台约束。
+    * agent: Fix — 点表文件跨轮复用（file_data 回合局部变量致协议闸门后拿不到已上传点表）；
+      转发侧文件通道（仅限本回合新上传）；解析器无表头检测（首行数据曾被当表头吞掉）。
+    * docs: AGENTS.md 行为规则新增「修改代码之后必须自动部署」。
+    * test: doc_parsers 无表头/有表头回归；用例 11 三种路径线上复测通过。
+
+2026-09-27  activesys  <activesys@sina.com>
+    Version 2.0.12
+    * agent: Support — 变更流草稿化：追加草稿单调累积（已确认字段不被后续轮次覆盖）；裸值
+      应答绑定四键（追问后纯值应答零 LLM 秒回）；中文点名 id 自动翻译（干净上下文微翻译，
+      撞名换名连带重翻）；评估检查序与双侧占用预检前置（方案期拦截「地址已被占用」）。
+    * agent: Fix — LLM 连续空响应降级（3 连空记 error 并显式告知用户，不再静默跌落接入
+      管线）；assistant_text 事件全量落盘（对话全程可追溯）。
+    * agent: Fix — userTexts catch-up 补提取（按侧别分句防串味）；pendingChangeAsk 强制
+      变更分叉；同名点「追加序号去重改名」废止为「禁止重名拒绝」。
+
+2026-09-27  activesys  <activesys@sina.com>
+    Version 2.0.8
+    * agent: Fix — 接收点表提取漏译英文 id 触发语义重试（与空提取同路径，提取层补翻译，
+      不违反「系统不自动生成点名」裁定）。
+    * agent: Fix — handle_confirm fatal 透出：回复「方案无法执行：〈具体原因〉」替代通用
+      文案（此前 fatal 被吞，用户无从得知端口未监听的原因）。
+
+2026-09-27  activesys  <activesys@sina.com>
+    Version 2.0.7
+    * agent: Fix — point_prompt 9a 条（forward 侧禁抄规则）改为 {{side_rules}} 按侧别注入
+      （此前污染 receive 侧，消息触发词致接收点表提取为空）；receive 侧空提取且消息含
+      addr:点名 形态时语义重试。
+    * agent: Support — 转发点表等价应答受理（「与接入点表一致」→ pointsMirror 跳过缺口，
+      方案层确定性推导承接）；纯值片段跳过场站归属判定；裸值解析支持「起始地址+点数」。
+    * test: e2e 用例 4（转发点表等价应答驱动）；gap_question 单测 +6（86/86）。
+
+2026-09-26  activesys  <activesys@sina.com>
+    Version 2.0.5
+    * agent: Support — 单缺口顺序提问取代聚合提问（agent.md §1.4/§2.3/§2.6）：每回合只问
+      依赖序最靠前的一个缺口，问题文本由 registry schema 生成（gap_question 模块）；裸值
+      兜底绑定（用例 3/4 由 8 轮收敛为 4 轮）。
+    * agent: Support — AgentLogger 第二层 NDJSON 运行日志（按天分文件：user_input/llm_call/
+      llm_text/tool_call/tool_result/phase 全事件埋点，重构后丢失的对话日志恢复）；
+      zh_numeral 中文数字起始地址模块。
+    * agent: Update — 死代码清理：删除 super_worker.ts、subagents.ts、turn_rules.ts 及其
+      测试（orchestrator 重构后无调用方）。
+
+2026-09-25  activesys  <activesys@sina.com>
+    Version 2.0.3
+    * agent: Fix — 转发意图治本：阶段 5-7 激活改关键词快路 + forward_intent_prompt LLM
+      语义兜底（FORWARD_ON_RE 不认识去向表述时曾静默降级为纯采集方案，用例 4）；意图解析
+      前移——意图为真时消息中的地址归转发目标。
+    * agent: Support — 补全设计中有而实现缺失的阶段 4：接收侧 connection_prompt LLM 兜底
+      （治「端口使用9001」类长尾表述，仅填缺失字段不覆盖确定性捕获）；阶段 7 转发目标
+      ip:port 确定性捕获与协议门解耦。
+
+2026-09-25  activesys  <activesys@sina.com>
+    Version 2.0.2
+    * agent: Fix — 场站归属校验回归修复：归属判定改用消息原文比对（提取出的编号设备名会剥掉
+      场站前缀，异站资料在比对前即丢失线索，用例 3 稳定复现）；阶段 1 接线 location_prompt
+      LLM 语义判定，出口与确定性地名比对仲裁取更保守方；新增 site_check.ts 纯函数
+      （deterministic_site_tag/llm_site_tag/arbitrate_site_tags，单测 14 例）。
+
+2026-09-25  activesys  <activesys@sina.com>
+    Version 2.0.1
+    * packaging: Release — 版本 2.1.0 → 2.0.1（用户裁定：DeepSeek 换肤随重建包走 patch 号，
+      不升次版本）。
+
+2026-09-25  activesys  <activesys@sina.com>
+    Version 2.1.0
+    * frontend: Update — Web 界面 DeepSeek 风格视觉换肤：styles.css 全量令牌重写
+      （chat.deepseek.com 浅色主题实测值：主色 #3964fe、侧栏 #f9fafb、文本 #0f1115、
+      错误 #f25a5a 家族）；用户气泡 22px 圆角、AI 回复无气泡纯文本、消息列居中 840px、
+      输入框 24px 胶囊；服务目录/PDP/工具卡/确认按钮同步换肤；frontend 版本 0.1.2 → 0.2.0。
+    * docs: web.md v0.3.0——新增 §4.4 视觉令牌表（注明实测来源）。
+    * packaging: VERSION 2.0.0 → 2.1.0（随后按用户裁定回退为 2.0.1，见上）。
+
+2026-09-25  activesys  <activesys@sina.com>
+    Version 2.0.0
+    * agent: Support — 点名规则落地（§3.2.1.3b 不自动生成）：derive_point_id 点名→英文标识
+      推导（提供英文标识优先，其次合规英文点名原样用作 id，否则报错交上游追问）；
+      generate_point_id（p_ 自动生成）退役。
+    * agent: Fix — 会话草稿按 conversationId 隔离（LRU 上限 32），修复跨会话接入草稿串台；
+      场站实例级绑定全局共享，新会话草稿继承绑定场站；设备名支持「1号风机」编号形态。
+    * agent: Fix — merge 裁定：modify 同名不同址新点去重改名 _N 并传播 reader key；成对
+      删除容忍同批次 writer 删除引用。
+    * mcp: asfp2_server/iec104_client/modbus_client registry point_schema 增 name 必填
+      字段（点名原样保存，不自动生成）。
+    * packaging: 版本 1.0.0 → 2.0.0；build.sh/spec/verify.sh V3 对齐多 prompt 打包。
+
+2026-08-29  activesys  <activesys@sina.com>
+    Version 1.0.0
+    * packaging: Add — C4 自动打包（rpm/deb/tar.gz）+ 生命周期脚本 + systemd 单元；
+      packaging/VERSION 建档。

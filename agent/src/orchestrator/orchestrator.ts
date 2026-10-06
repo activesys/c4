@@ -7,7 +7,7 @@
 //   确认消息内嵌 changes/devices JSON 时走确定性直通路径（测试与高级用户通道）。
 // 本文件实现 server/types.ts 的 C4Agent 接口——server 层零改动。
 
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import * as path from "node:path";
 import type {
     C4Agent,
@@ -930,6 +930,22 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
         // 落盘与 /api/site 初始化向导共用同一实现（site_config.ts 单处维护）
         if (write_site_config(cfg.agentConfigPath, site)) {
             stateWriter.setSiteName(site.name); // 顶栏中央实时更新（2026-10-05）
+        } else {
+            // 落盘失败不可静默：会话仍以内存态场站继续，重启即丢（二轮评审 P2）
+            cfg.agentLogger.error(
+                conversation,
+                "场站落盘失败（agent.json 不可写）——本次绑定重启后将丢失",
+            );
+        }
+    }
+
+    // 场站重绑定（2026-10-06 用户指令：场站修改后后续工作立即生效，无需重启）：
+    // Web 顶栏改名（POST /api/site）成功后经 index.ts 回灌——更新绑定基准与全部
+    // 活会话草稿，归属判定与新会话默认值立即切到新场站（agent.json 仍为权威持久化）
+    function rebind_site(site: SiteInfo): void {
+        boundSite = site;
+        for (const d of drafts.values()) {
+            d.site = site;
         }
     }
 
@@ -3614,10 +3630,12 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
         if (siteName === "" || siteAbbr === "") return false;
         state.site = { name: siteName, abbr: siteAbbr };
         boundSite = state.site;
-        stateWriter.setSiteName(siteName); // 顶栏中央实时更新（2026-10-05）
         for (const d of drafts.values()) {
             if (d !== state) d.site = boundSite;
         }
+        // 落盘 agent.json + 推送顶栏（与单设备流同一写入口；2026-10-06 修补：组接入
+        // 此前仅内存态，重启丢失场站绑定）
+        persist_site(state.site, conversation);
         return true;
     }
 
@@ -6922,6 +6940,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
 
     return {
         invoke: invoke_with_logging,
+        rebindSite: rebind_site,
     };
 
     async function* invoke_turn(

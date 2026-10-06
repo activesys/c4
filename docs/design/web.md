@@ -1,9 +1,10 @@
 # C4 Web 界面设计
 
-> **版本**：v0.3.0 | **最后更新**：2026-10-04 | **父文档**：[agent.md](agent.md)
+> **版本**：v0.4.0 | **最后更新**：2026-10-06 | **父文档**：[agent.md](agent.md)
 >
 > **设计范围**：C4 Web 界面的页面、组件与交互设计，**仅覆盖后端已就绪的功能**——
-> 对话式数据接入、文件上传、已接入 MCP 服务目录展示、Agent 工作状态展示。
+> 对话式数据接入、文件上传、已接入 MCP 服务目录展示（含注册图标）、Agent 工作状态展示、
+> 场站信息初始化与修改（§3.6）。
 > 用户身份认证、告警通知、操作审计日志等后端未就绪的功能不在本次设计范围；
 > MCP 服务的运行期热注册（免重启动态发现）不在本次设计范围（注册为部署期操作：root 安装单元，注册后重启 Agent 识别，见 §3.3）。
 >
@@ -41,8 +42,9 @@ Web 界面依赖的 HTTP API（当前 `src/server/app.ts` 已挂载）：
 |------|------|------|:--:|
 | `/api/chat` | POST | 自然语言对话，SSE 流式 | ✅ |
 | `/api/upload` | POST | 文件上传（multer），SSE 流式返回解析结果 | ✅（实际可解析 xlsx/csv/txt，见 §3.2） |
-| `/api/services` | GET | 返回已接入 MCP 服务目录（L1 摘要） | ✅ |
-| `/api/state` | GET | 返回 Agent 状态 `{ phase, hasAccessPlan, lastError }` | ✅ |
+| `/api/services` | GET | 返回已接入 MCP 服务目录（L1 摘要，`icon` 为解析后的图标对外 URL）；`GET <servicesPath>/icons/<file>` 只读静态托管图标文件 | ✅（§3.3） |
+| `/api/state` | GET | 返回 Agent 状态 `{ phase, hasAccessPlan, lastError, siteName }` | ✅（§3.4） |
+| `/api/site` | GET / POST | 场站信息读取 / 绑定（首次启动引导与顶栏编辑共用；写入落盘 `agent.json` 并推送状态） | ✅（§3.6） |
 | `/api/points` | GET | 点位发现：已接入点列表，`?filter=` 按设备/关键词筛选 | ❌（C4_FUN_00085，§3.5） |
 | `/api/display` | GET | 活跃显示会话状态（前端按 `intervalMs` 轮询，见 §3.5） | ❌（C4_FUN_00082/00083/00084，§3.5） |
 | `/api/display` | POST | 创建显示会话 `{ pointKeys[], mode?, intervalMs?, durationMinutes?, refreshCount? }`——重新订阅按钮使用（§3.5.3） | ❌（C4_FUN_00084，§3.5） |
@@ -64,18 +66,18 @@ Web 界面依赖的 HTTP API（当前 `src/server/app.ts` 已挂载）：
 
 ```
 ┌────────────────────────────────────────────────────────────┐
-│                    React SPA（浏览器）                       │
+│          React SPA（浏览器）                                │
 │                                                            │
-│   ChatView       FileUpload       ServiceDashboard         │
-│      │               │                  │                  │
-│      │ SSE           │ HTTP+SSE        │ HTTP              │
-└──────┼───────────────┼──────────────────┼──────────────────┘
-       │               │                  │
-       ▼               ▼                  ▼
+│  ChatView   FileUpload   ServiceDashboard   SiteSetupGate  │
+│      │          │              │                │          │
+│      │ SSE      │ HTTP+SSE     │ HTTP           │ HTTP     │
+└──────┼──────────┼──────────────┼────────────────┼──────────┘
+       │          │              │                │
+       ▼          ▼              ▼                ▼
 ┌────────────────────────────────────────────────────────────┐
 │                 Express Server（已实现）                     │
 │  POST /api/chat      POST /api/upload                      │
-│  GET  /api/services  GET  /api/state                       │
+│  GET  /api/services  GET  /api/state    GET/POST /api/site │
 └────────────────────────┬───────────────────────────────────┘
                          │
                          ▼
@@ -84,11 +86,13 @@ Web 界面依赖的 HTTP API（当前 `src/server/app.ts` 已挂载）：
 
 ### 2.2 页面结构
 
-采用**单页应用（SPA）+ 顶部状态栏**布局，两个主视图通过侧边导航切换：
+采用**单页应用（SPA）+ 顶部状态栏**布局，双形态外壳——未交互时呈现落地页（居中大输入框），
+首条消息/上传后切换为对话页（侧边导航 + 消息列），「开启新对话」回到落地页；对话接入与
+服务目录两个主视图通过侧边导航切换：
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│  顶栏：C4 · 场站名（可选）         [工作阶段徽标]  [错误提示]  │
+│ 顶栏三栏：[C4 品牌]    场站名（点击可改，§3.6）   [错误][徽标] │
 ├───────────────┬──────────────────────────────────────────────┤
 │               │                                              │
 │  导航          │   对话接入（主视图，默认）                     │
@@ -108,8 +112,10 @@ Web 界面依赖的 HTTP API（当前 `src/server/app.ts` 已挂载）：
 └───────────────┴──────────────────────────────────────────────┘
 ```
 
-**工作阶段徽标**（来自 `GET /api/state` 的 `phase`，见 §3.4）始终位于顶栏，对话过程中随
-Agent 阶段变化刷新。
+**工作阶段徽标**（来自 `GET /api/state` 的 `phase`，见 §3.4）始终位于顶栏右侧，对话过程中随
+Agent 阶段变化刷新。顶栏中央展示当前绑定场站名（纯文字，落地页与对话页均显示），点击弹出
+编辑对话框（§3.6.3）；`siteName` 为空（首次部署未绑定场站）时，全屏引导层强制初始化
+（§3.6.2），不可跳过。
 
 ---
 
@@ -267,6 +273,7 @@ interface ServiceCatalogEntry {
     service_type: string;              // 如 "c4_modbus_client"
     display_name: string;              // 如 "Modbus 数据采集"
     role: string;                      // 后端为 string；语义上仅 "writer"(采集) / "reader"(转发)
+    icon?: string;                     // 图标对外 URL（注册 JSON 的相对路径已由后端解析；缺省=未提供图标）
     protocols: Array<{
         protocol: string;
         description: string;
@@ -277,15 +284,28 @@ interface ServiceCatalogEntry {
 }
 ```
 
-> 后端 `role` 字段类型为 `string`（未约束为联合类型），前端按 `"writer"`/`"reader"` 取值渲染，
-> 但对未知值需做兜底展示（不崩溃）。
+> **role 取值**：Registry 加载期 Zod 已约束为 `"writer"`/`"reader"`（agent.md §3.3，非法值
+> 加载即报错）；L1 摘要的 TS 类型保留 `string`，前端对未知值做兜底展示（不崩溃）。
+
+> **图标（协议无关架构，2026-10-05）**：注册 JSON 的 `icon` 字段为相对注册目录 `icons/`
+> 子目录的文件路径（agent.md §3.3），后端解析为对外 URL——`GET /api/services/icons/<basename>`
+> 只读静态托管，`Cache-Control: immutable` 长缓存（**换图标须换文件名**，文件名即缓存键）。
+> 前端只引用 URL、不解释内容；字段缺省或文件加载失败（404/网络错误）时由前端动态生成
+> 默认徽标（§3.3.2），目录永不出现空白图标。
 
 #### 3.3.2 前端处理
 
-- 以卡片列表展示每个服务：`display_name` 为主标题，`service_type` 为副标题，
-  `role` 以「采集 / 转发」徽标区分（未知值显示原值）。
-- 每张卡片展示该服务支持的 `protocols`（协议名 + 描述）与 `point_fields`（点表字段）。
-  `plan_fields` 以「必填 / 可选」标注，供用户了解接入前需准备的信息。
+- 按 `role` 分组的列表（ZCode 子智能体设置页样式）：`writer` → 「采集」组、`reader` → 「转发」组、
+  其他 role 值 → 以原值为标题的独立分组（纯前端防御：role 在 Registry 加载期已约束为
+  writer/reader，合法数据不会出现其他值）；组标题带「N 项」计数。每组内每个 MCP 一行——
+  **行图标 + `display_name` + `service_type` 副标题 + 一句话描述**（取各协议
+  `protocol — description` 拼接；无协议时按 role 给通用说明）。
+- 点击任意行弹出**详情弹窗**：通信协议（协议名 + 描述 + 选择规则）、点表字段表（名称/类型/
+  说明）、接入配置表（名称/类型/必填/默认值/说明）；× / 遮罩 / Esc 关闭，打开期间锁定页面滚动。
+- **行图标**：优先以 `<img>` 引用 `icon` URL（§3.3.1）；缺省或加载失败时动态生成默认徽标——
+  深色圆角矩形 + 浅色英文缩写（`service_type` 去 `c4_` 前缀取前两个字母，如 asfp2→AS）。
+  底色按 `service_type` 的 FNV-1a 哈希从深色调色板取色——同一服务稳定不变、不同服务呈现
+  差异；前端不维护任何协议专属图标知识。
 - 加载中显示骨架屏；`503` 时提示「Agent 启动中，请稍候」并支持手动重试。
 
 ### 3.4 工作状态展示（顶栏徽标）
@@ -304,6 +324,7 @@ interface StateResponse {
         phase: "idle" | "collecting" | "planning" | "confirmed" | "executing";
         hasAccessPlan: boolean;        // 是否存在待执行的 AccessPlan（等价 accessPlan !== null；回滚后为 true，执行成功后为 false）
         lastError: string | null;      // 最近一次错误（非技术语言，已翻译）
+        siteName: string | null;       // 当前绑定场站名（agent.json 权威配置；未绑定为 null，§3.6）
     };
 }
 ```
@@ -320,6 +341,9 @@ interface StateResponse {
 
 - 顶栏徽标通过**短间隔轮询**（如 1s）+ 对话流开始/结束时强制刷新来更新。
 - `lastError` 非空时，在顶栏显示可关闭的错误条（文案已由后端错误翻译层转为非技术语言）。
+- `siteName` 随同一轮询更新：顶栏中央纯文字展示当前场站名（落地页与对话页均显示）。
+  从 null 变为有值（首次启动引导完成，或对话内场站绑定固化）即顶栏即时出现场站名；
+  点击可进入编辑对话框（§3.6.3）。`siteName` 为 null 时触发全屏引导层（§3.6.2）。
 
 > **轮询滞后与 phase 残留（如实告知，避免实现误判）**：
 > - `phase` 在**流进行中**被后端写入，1s 轮询必然滞后；`confirmed → executing → idle` 可能在
@@ -395,11 +419,90 @@ LLM 调用 `display_points` 建立显示会话，ChatView 消息流**顶部**插
 
 ---
 
+### 3.6 场站信息（SiteSetupGate / SiteEditDialog，2026-10-05 新增）
+
+场站（site）是归属判定的根基——一个 C4 实例属于一个场站，接入资料按场站归属校验
+（agent.md §3.2.1.3a）。2026-10-05 起：**首次部署（`agent.json` 无 `site`）必须先由用户
+提供场站信息方可使用**（Web 引导层，不可跳过）；绑定后允许经顶栏修改场站名称。
+对话内的场站语义不变：不询问、归属校验照旧（§3.6.4）。
+
+#### 3.6.1 接口契约
+
+`GET /api/site` → 当前绑定；`POST /api/site` → 校验 + 落盘 `agent.json` + 状态推送。
+读/写/校验收敛在后端共享模块 `site_config.ts`，与对话内绑定 `persist_site` 共用同一实现：
+
+```typescript
+// GET 200
+interface SiteGetResponse {
+    success: true;
+    site: { name: string; abbr: string } | null;   // 未绑定为 null
+}
+// POST 请求体
+interface SiteBindRequest { name: string; abbr?: string }   // abbr 可选（缺省自动生成）
+// POST 200
+interface SiteBindResponse { success: true; site: { name: string; abbr: string } }
+// 400：名称/缩写校验失败；422：缩写自动生成失败；500：agent.json 不可写
+interface SiteError { success: false; error: string }       // error 为用户可读中文
+```
+
+**校验口径**（与对话内绑定一致）：名称 2~20 个非空白/非分隔字符（不含空格、逗号、句号）；
+缩写 2~12 位字母或数字（缩写用作点 key / 写入标识，如 InfluxDB measurement）。
+
+**缩写缺省时的生成链**（初始化不被 LLM 可用性卡死）：
+1. LLM 生成（拼音首字母组合或名称中已有英文词，单次调用 15s 超时，失败返回空）；
+2. 失败/超时 → 名称 ASCII 派生（取首个 2~12 位字母数字序列并小写，如「HN-阿拉善」→ hn；
+   纯中文名称无 ASCII 序列 → 派生不出）；
+3. 仍为空 → **422** 要求用户手填（前端渐进露出缩写输入框）。
+
+#### 3.6.2 SiteSetupGate（首次启动引导层，不可跳过）
+
+- **触发**：`GET /api/state` 轮询返回 `siteName === null`（首轮 `phase === "unknown"` 时不渲染，
+  防接口未就绪闪现）。渲染于所有视图之上——落地页云雾背景先渲染，引导卡片浮于其上
+  （透明浮层拦截点击，背景不可交互）；
+- **表单**：只收集**场站名称**——主文案「初次见面，告诉我你在哪里」，占位「例如：华能阿拉善一区」；
+  **不展示缩写输入**（缩写由后端自动生成）；422 时渐进露出手填输入（占位「2~12 位字母/数字，
+  留空自动生成」）；
+- **无取消/跳过入口**：场站是归属判定基准，初始化只需一次——POST 成功落盘 `agent.json` 后，
+  `/api/state` 轮询（1s）内 `siteName` 到位，引导层卸载并触发状态立即刷新；
+- 表单 `autoComplete` 关闭（含非标准 `name` 属性，防 Chrome 字段启发式自动填充）。
+
+#### 3.6.3 SiteEditDialog（顶栏编辑对话框）
+
+- **触发**：点击顶栏中央场站名（§3.4.2）。与引导层同风格同尺寸，主文案「场站有变？数据不搬家」；
+- **关闭**：Esc / 点击遮罩 / 取消按钮（与引导层的关键差异——编辑可放弃）；
+- **不展示缩写输入**：表单内部持有原缩写，保存时**原值随请求回传**——改名不触发缩写重新生成
+  （既有设备的点 key / measurement 前缀不受影响）；前端不提供缩写修改入口；
+- **影响面传达**：框内仅主标题「场站有变？数据不搬家」一句传达不迁移语义（无详细说明
+  文案）——改名仅影响归属判定基准与新设备缩写生成，已接入设备不迁移；
+- **实现约束**（防「删字被填回」）：App 每秒状态轮询会重渲染并生成新的回调引用——对话框的
+  数据拉取/键盘监听仅在挂载时执行一次（`onClose` 经 ref 转发），表单初始值仅在服务器值首次
+  到达时同步一次；不得随父组件重渲染反复 fetch / 覆盖受控输入。
+
+#### 3.6.4 与对话内绑定的关系（agent.md §3.2.1.3a 修订）
+
+| 通道 | 时机 | 行为 |
+|------|------|------|
+| Web 引导层（§3.6.2） | 首次部署未绑定 | 强制补填名称，缩写自动生成；落盘 `agent.json` |
+| 对话内绑定（persist_site / group_bind_site） | 首次提取到场站信息时即固化（先于方案确认，取消接入不回滚场站） | 单设备与组接入均经 `site_config.ts` 落盘 + 推送顶栏；对话内此后不询问、不可变更（agent.md §3.2.1.3a） |
+| Web 顶栏编辑（§3.6.3） | 绑定后任意时刻 | 允许改名（原缩写回传，不触发重新生成）；已接入设备不迁移 |
+
+三个写入口（对话内 `persist_site` / `group_bind_site` 与 `POST /api/site`）共用
+`site_config.ts` 读改写实现（单处维护防漂移），绑定成功均经 `AgentStateWriter.setSiteName`
+推送（`/api/state` 1s 轮询内生效，顶栏即时更新）。**场站修改（含首次填写）立即生效于后续
+工作、无需重启**（2026-10-06 用户指令）：`POST /api/site` 成功后经 `rebindSite` 回灌运行中
+编排器（绑定基准与全部活会话草稿），归属判定与新会话默认值即刻切换新场站；`agent.json`
+为权威持久化，重启后同样生效。
+
+---
+
 ## 4. 交互流程
 
 ### 4.1 端到端接入流程（多轮）
 
 > 注意：接入是**多轮对话**，各 phase 分布在多轮中，**单次 SSE 流内不会走完整流程**。
+>
+> **前置（首次部署）**：`agent.json` 未绑定场站时，全屏引导层（§3.6.2）先行——完成场站
+> 初始化（POST /api/site）后方可进入对话；后续部署/重启直接进入主界面（顶栏显示场站名）。
 
 ```
 ┌─ 轮 1：上传 + 描述 ─────────────────────────────────────────────┐
@@ -504,27 +607,37 @@ LLM 调用 `display_points` 建立显示会话，ChatView 消息流**顶部**插
 ## 5. 文件结构（前端）
 
 ```
-c4/agent/frontend/                      # React SPA（待实现）
+c4/agent/frontend/                      # React SPA
 ├── package.json                        # react, react-dom, typescript, vite
 ├── vite.config.ts                      # proxy: /api → http://localhost:9988
+├── index.html                          # Vite 入口（favicon：C4 星芒徽章）
 └── src/
     ├── main.tsx                        # 入口
-    ├── App.tsx                         # SPA 布局 + 侧边导航 + 顶栏
+    ├── App.tsx                         # 双形态外壳（落地页↔对话页）+ 顶栏三栏 + 场站引导/编辑挂载
     ├── api/
     │   ├── chat.ts                     # POST /api/chat（SSE 解析）
     │   ├── upload.ts                   # POST /api/upload
-    │   ├── services.ts                 # GET /api/services
-    │   └── state.ts                    # GET /api/state
+    │   ├── services.ts                 # GET /api/services（含 icon URL）
+    │   ├── state.ts                    # GET /api/state（含 siteName）
+    │   ├── site.ts                     # GET/POST /api/site（§3.6，2026-10-05）
+    │   └── sse.ts                      # SSE 解析公共层
     ├── hooks/
     │   ├── useChatStream.ts            # SSE 流状态机（§4.2）
     │   ├── useConfirmDetect.ts         # 确认/取消消息前缀常量（CONFIRM_KEYWORD / CANCEL_KEYWORD，§3.1.3）
-    │   └── useAgentState.ts            # 顶栏 phase 轮询
+    │   └── useAgentState.ts            # 顶栏 phase/siteName 轮询（§3.4）
+    ├── assets/
+    │   └── c4-icon.svg                 # C4 星芒徽章（顶栏品牌 + favicon，Vite 指纹化）
     └── components/
-        ├── ChatView.tsx                # 对话消息流 + 输入区
+        ├── ChatView.tsx                # 对话消息流 + 输入区（落地形态渲染 hero）
+        ├── LandingHero.tsx             # 落地页首屏（eyebrow + 超大标题 + 免责声明）
         ├── ConfirmButtons.tsx          # 方案确认按钮（结构化消息，§3.1.3）
-        ├── ToolCallCard.tsx            # 工具调用进度卡片（折叠，仅展示 name）
+        ├── ToolCallCard.tsx            # 工具调用进度卡片（折叠）
+        ├── ThinkingBlock.tsx           # 思考过程折叠块
+        ├── Markdown.tsx                # Markdown 渲染（方案文本等）
         ├── FileUpload.tsx              # 文件上传（拖拽 + 按钮）
-        ├── ServiceDashboard.tsx        # 服务目录卡片列表
+        ├── ServiceDashboard.tsx        # MCP 目录：分组列表 + 行图标 + 详情弹窗（§3.3）
+        ├── SiteSetupGate.tsx           # 首次启动引导层 SiteSetupGate + 编辑对话框 SiteEditDialog（§3.6，2026-10-05）
+        ├── PointDisplayPanel.tsx       # 点位显示卡片（§3.5）
         └── PhaseBadge.tsx              # 工作阶段徽标
 ```
 
@@ -543,3 +656,6 @@ c4/agent/frontend/                      # React SPA（待实现）
 | 解析格式提示 | 全量展示 / 标注不支持 | 标注不支持（pdf/docx/图片） | 后端缺解析器，避免误导用户 |
 | 确认判定 | ~~单词/累积句式匹配~~ → **后端状态事件**（button_arm/disarm，agent.md §2.8） | 后端状态事件 | token 可能跨事件拆分；句式匹配废除（「执行/好的」等单词易误触发） |
 | 视觉基准 | 自绘工业风 / 对齐 DeepSeek 浅色主题 | DeepSeek 浅色令牌（§4.4） | 主流 AI 界面心智，清爽易读；纯 CSS 令牌替换，DOM/测试零改动（2026-09-25） |
+| MCP 目录图标（2026-10-05） | 前端按协议硬编码图标 / 注册 JSON 提供文件（Agent 解析为 URL）/ base64 内嵌 | **注册提供文件路径（唯一形式）**：后端解析为对外 URL 并静态托管（immutable 长缓存，换图须换文件名）；缺省/加载失败由前端按 service_type 哈希生成稳定默认徽标 | 协议无关架构——新增服务零前端代码；Agent 与前端均不解释图标内容；注册即有图标，未注册也不空白 |
+| 场站初始化（2026-10-05） | 对话内询问 / Web 引导层强制补填 | **Web 引导层（不可跳过）**，只收集名称；缩写 LLM 生成（15s）→ 名称派生 → 422 手填三级兜底 | 首次部署即建立归属判定基准；初始化不被 LLM 可用性卡死；对话内绑定语义不变（agent.md §3.2.1.3a） |
+| 场站修改（2026-10-05） | 绑定后一律不可变 / Web 顶栏编辑 | **对话内不可变 + Web 顶栏编辑**（原缩写回传，不触发重新生成）；改名经 `rebindSite` 回灌运行中编排器，即时生效、无需重启（2026-10-06 用户指令） | 站点更名属正常运维；数据不搬家——已接入设备/点 key 不迁移，仅归属判定基准与新设备缩写受影响 |

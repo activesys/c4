@@ -3,6 +3,7 @@
 // The actual implementation is orchestrator/orchestrator.ts (Workflow 编排器).
 
 import type { AgentPhase } from "../types/index.js";
+import type { SiteInfo } from "../site_config.js";
 
 // ── Agent Invoke Input ────────────────────────────────────
 export interface AgentInvokeInput {
@@ -32,6 +33,11 @@ export type AgentStreamEvent =
 export interface C4Agent {
   /** Invoke the agent with messages, yielding a stream of events. */
   invoke(input: AgentInvokeInput): AsyncGenerator<AgentStreamEvent>;
+
+  /** 场站重绑定（2026-10-06 用户指令：场站修改后后续工作立即生效，无需重启）：
+   *  Web 顶栏改名（POST /api/site）成功后由 index.ts 回灌运行中编排器——更新
+   *  绑定基准与全部活会话草稿，归属判定与新会话默认值立即使用新场站。 */
+  rebindSite(site: SiteInfo): void;
 }
 
 // ── Agent State (for GET /api/state) ──────────────────────
