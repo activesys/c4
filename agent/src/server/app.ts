@@ -134,7 +134,7 @@ export function createApp(options: AppOptions): express.Application {
     app.use(chatPath, createChatRouter(agent));
     app.use(uploadPath, createUploadRouter(agent));
     app.use(servicesPath, createServicesRouter({ aliveProvider, iconsDir, servicesPath }));
-    app.use(statePath, createStateRouter(stateProvider));
+    app.use(statePath, createStateRouter(stateProvider, stateWriter));
     if (agentConfigPath && stateWriter) {
         app.use(
             sitePath,

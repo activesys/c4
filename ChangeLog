@@ -1,4 +1,93 @@
 2026-10-06  activesys  <activesys@sina.com>
+    Version 2.1.65
+    * frontend: Fix — 每次新会话背景不变（2026-10-05 用户反馈）：随机仅在页面
+      加载时执行一次，「开启新对话」不重摇。现每次回到落地页重新摇取且避开
+      当前张（0~6 中均匀取其余 6 张）——连续两次会话背景必不相同。
+
+2026-10-06  activesys  <activesys@sina.com>
+    Version 2.1.64
+    * frontend: Fix — 落地页背景缺失（v2.1.63 引入）：CSS 选择器为复合类
+      `.app--landing.bg-N`，而 JSX 生成的是单类 `app--landing-bgN`，永远
+      匹配不上；改为生成 `app--landing bg-N` 双类，背景恢复。
+
+2026-10-06  activesys  <activesys@sina.com>
+    Version 2.1.63
+    * frontend: Support — 落地页背景 7 张同形式变体（2026-10-05 用户指令）：
+      形式统一（双层正交网格线 + 5 团低饱和云雾 + 浅色纵向底色），变体间色相
+      （蓝雾/青碧/紫藤/苔绿/暖砂/灰玫/石板青）、网格间距（68~104px）与云雾
+      位置各异，饱和度压低不艳丽；每次启动随机选择一张（App bgIndex，
+      不持久化）。
+
+2026-10-06  activesys  <activesys@sina.com>
+    Version 2.1.62
+    * frontend: Update — 侧栏收起按钮改置于顶栏 C4 图标右侧（与品牌同组，远离
+      右侧导航区；2026-10-05 用户指令）；折叠态胶囊首位的展开按钮紧随其后，
+      两态按钮位置对称。
+    * frontend: Update — 进入对话页默认隐藏左侧栏（2026-10-05 用户指令）：
+      初始态即折叠、去除 localStorage 持久化（每次进入均呈胶囊形态），会话内
+      仍可随时展开/收起。
+    * test: phase_badge mock 补 siteName 字段（v2.1.42 类型新增后的测试工程
+      遗漏，仅类型层）。
+
+2026-10-06  activesys  <activesys@sina.com>
+    Version 2.1.61
+    * frontend: Update — 侧栏折叠交互三处调整（2026-10-05 用户反馈）：① 收起
+      按钮移至顶栏右侧组最左（紧邻场站名，靠近其所控制的左侧侧栏；MCP 导航
+      保持最外缘）；② 折叠后与对话页品牌均只显示图标、标语仅落地页显示；
+      ③ 折叠胶囊组在 MCP 前新增「接入对话」气泡图标（对话/ MCP 当前视图
+      高亮），胶囊序为 [展开侧栏][接入对话][MCP][+新对话]。
+
+2026-10-06  activesys  <activesys@sina.com>
+    Version 2.1.60
+    * frontend: Support — 侧边栏折叠（DeepSeek 式，2026-10-05 用户指令）：顶栏
+      右侧新增收起按钮（面板图标），折叠后品牌右侧出现胶囊组 [展开侧栏][MCP]
+      [+新对话]（原两图中的搜索位替换为 MCP）；折叠状态持久化到 localStorage，
+      落地页不受影响。
+    * frontend: Update — 侧栏「开启新对话」按钮改 DeepSeek 式：白底描边大圆角
+      （12px）+ ⊕ 圆圈加号图标 + 居中文字，替换原 ＋ 字符蓝底样式。
+
+2026-10-06  activesys  <activesys@sina.com>
+    Version 2.1.59
+    * agent: Fix — 客户端断开后旧回合仍在服务端跑完并把 phase 改回「收集信息中」
+      （开新对话后徽标不复位的真正根因，v2.1.58 的 reset 被旧回合写入覆盖）：
+      chat/upload 路由监听 res close——AbortSignal 透传编排器，llm_json 在途
+      模型调用立即中断并上抛终止回合（不再重试/降级/写 phase），同时终止流
+      拉取与配额空耗；AgentInvokeInput 新增 signal 字段。
+    * frontend: Update — 品牌标识（图标+标题）点击不再跳回主页（2026-10-05
+      用户指令），改为纯展示；「开启新对话」入口保留于侧栏按钮。
+
+2026-10-06  activesys  <activesys@sina.com>
+    Version 2.1.58
+    * agent: Add — POST /api/state/reset：「开启新对话」复位全局会话状态
+      （phase → idle、撤销方案武装）——上一会话可能仍在收集信息/待确认，
+      新对话后徽标应回「空闲」（2026-10-05 用户指令）；旧会话草稿按
+      conversationId 隔离留存（LRU 上限内），新会话自然以全新草稿开始。
+    * frontend: Fix — useChatStream 组件卸载（「开启新对话」重挂载）时中断
+      在途 SSE 流——否则流继续拉取、状态更新落在已卸载实例上。
+    * test: state_poll 新增 4.4.3 reset 复位断言；全套 78 过。
+
+2026-10-06  activesys  <activesys@sina.com>
+    Version 2.1.57
+    * frontend: Fix — 双视图常驻挂载包装层破坏主页布局（v2.1.56 引入）：包装 div
+      高度 auto 截断 .chat-view--landing 的 min-height:100% 百分比链，落地页垂直
+      居中失效。包装层改 display:contents（不生成盒子，.app__main 直排几何与
+      原条件渲染完全一致），[hidden] 显式规则实现隐藏。
+    * frontend: Support — MCP 页切换回对话页时滚动容器（app__main）默认钉到底部：
+      会话常驻挂载后滚动位置会被 MCP 视图的滚动改写，返回对话视图恢复到最新
+      消息处（2026-10-05 用户指令）。
+
+2026-10-06  activesys  <activesys@sina.com>
+    Version 2.1.56
+    * frontend: Fix — 对话页「对话接入」按钮点击后闪回落地页且对话内容残留（2026-10-05
+      用户报告）：原实现切视图为条件渲染——切 MCP 即卸载 ChatView（会话丢失），返回
+      对话时强制重置 started 致落地页闪现；在对话页直接点击时根容器切为落地背景而消息
+      区未清，「首页外观 + 残留内容」混杂。改为双视图常驻挂载（hidden 切换显示），
+      ChatView 不再因切 MCP 卸载，切换不再重置 started——「对话接入」为纯返回动作，
+      进行中会话（消息/流式/思考块）原样保留。
+    * docs: Update — packaging/VERSION 对齐 2.1.56（承接 2.1.55；此前本地误写 2.1.53，
+      与 v2.1.54/55 提交序冲突，已纠正）。
+
+2026-10-06  activesys  <activesys@sina.com>
     Version 2.1.55
     * agent: Fix — 场站归属语义判定（location_prompt）对「场站名直接前缀于设备编号」形态
       （如「华能阿拉善6号风机」）提取失效：glm-4.5-air 把场站名当设备名一部分丢弃、

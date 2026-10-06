@@ -128,6 +128,15 @@ export function useChatStream(): UseChatStreamReturn {
   // 会话 ID 持久化：跨轮复用同一会话，后端才能恢复完整跨轮上下文（含工具证据）
   const conversationIdRef = useRef<string>("");
 
+  // 组件卸载（「开启新对话」重挂载）时中断在途流——否则 SSE 继续拉取、
+  // 状态更新落在已卸载实例上（2026-10-05 随开新对话复位一并加固）
+  useEffect(
+    () => () => {
+      abortRef.current?.abort();
+    },
+    [],
+  );
+
   // 上传解析结果是纯文本回显（web.md §3.2.2 一次性解析、结果回显）：流式累积进单个
   // agent 气泡（解析结果是 Agent 的输出，须按 agent 样式渲染，不得用 user 样式），
   // 不触发任何 /api/chat 轮次；气泡仍进入 messages，随 history 以 assistant 角色回传。

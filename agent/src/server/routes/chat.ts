@@ -115,13 +115,29 @@ export function createChatRouter(agent: C4Agent): Router {
 
         // 使用 promise chain 而非 async/for-await，规避 Express v5 在 async
         // handler 返回 pending Promise 时关闭连接的问题。
-        const stream = agent.invoke({ messages, conversationId });
+        //
+        // 客户端断开（关页/开新对话/前端 abort）→ 取消信号触发在途 LLM 调用
+        // 立即中断 + 终止流拉取：dying 回合不再空耗模型配额、也不再产生
+        // phase 写入把徽标改回「收集信息中」（2026-10-05 用户实测根因）
+        const controller = new AbortController();
+        let closed = false;
+        const stream = agent.invoke({
+            messages,
+            conversationId,
+            signal: controller.signal,
+        });
+        res.on("close", () => {
+            closed = true;
+            controller.abort();
+            void stream.return(undefined as never).catch(() => undefined);
+        });
 
         function processNext(
             result: IteratorResult<AgentStreamEvent>,
         ): void {
-            if (result.done) {
-                res.end();
+            // 断开后剩余事件不再下发（stream.return 已在 close 中触发）
+            if (closed || result.done) {
+                if (!closed) res.end();
                 return;
             }
 
@@ -199,6 +215,8 @@ export function createChatRouter(agent: C4Agent): Router {
         }
 
         function handleError(err: unknown): void {
+            // 断开引发的取消错误不下发（连接已关）
+            if (closed) return;
             const message =
                 err instanceof Error ? err.message : String(err);
             sendSSE(res, "error", { message, conversationId });

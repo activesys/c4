@@ -40,4 +40,17 @@ describe("状态轮询（真实后端）", () => {
     // 徽标只反映最近读到的 phase；所有采样值合法即通过（web.md §3.4.2）
     expect(seen.size).toBeGreaterThanOrEqual(1);
   });
+
+  it("4.4.3 POST /api/state/reset 复位全局状态：phase → idle、撤销方案", async () => {
+    // 前置随意（可能是 collecting 等）：reset 后必须回 idle
+    await fetchState();
+    const res = await fetch("/api/state/reset", { method: "POST" });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { success: boolean };
+    expect(body.success).toBe(true);
+
+    const state = await fetchState();
+    expect(state.phase).toBe("idle");
+    expect(state.hasAccessPlan).toBe(false);
+  });
 });

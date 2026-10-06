@@ -10,6 +10,12 @@ export interface AgentInvokeInput {
   messages: Array<{ role: string; content: string }>;
   /** 会话 ID（用于运行日志关联；由 chat 路由生成并传入） */
   conversationId?: string;
+  /**
+   * 取消信号（客户端断开/SSE 中止时触发）：编排器透传给在途 LLM 调用——
+   * 立即中断而非跑完，dying 回合不再产生后续事件与 phase 写入
+   * （2026-10-05：开新对话后徽标被旧回合改回「收集信息中」的根因）
+   */
+  signal?: AbortSignal;
 }
 
 // ── Agent Stream Events ───────────────────────────────────

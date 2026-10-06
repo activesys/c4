@@ -186,8 +186,56 @@ input {
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  justify-self: start;
   border-radius: var(--radius-md);
+}
+
+/* 顶栏左栏：品牌 + 侧栏折叠态胶囊组（DeepSeek 式，2026-10-05 用户指令） */
+.app__topbar-left {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  justify-self: start;
+  min-width: 0;
+}
+
+/* 折叠态胶囊组：白底描边圆角胶囊 [展开侧栏][MCP][+新对话] */
+.app__topbar-pill {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px 5px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.05);
+}
+
+/* 顶栏圆形图标按钮（侧栏切换/胶囊内动作） */
+.app__icon-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  color: var(--text-muted);
+  transition: background var(--transition), color var(--transition);
+}
+.app__icon-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+.app__icon-btn--text {
+  width: auto;
+  padding: 0 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+}
+/* 胶囊组内当前视图高亮（对话/ MCP） */
+.app__icon-btn--active {
+  background: var(--primary-tint);
+  color: var(--primary);
 }
 
 /* 顶栏中央：当前绑定场站（落地页/对话页均展示，纯文字无底色） */
@@ -404,19 +452,27 @@ input {
 }
 
 /* 「开启新对话」：chat.deepseek.com 侧栏首项样式 */
+/* 开启新对话（DeepSeek 式：白底描边大圆角按钮 + ⊕ 图标，2026-10-05 用户指令） */
 .app__nav-new {
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: var(--space-2);
   margin: 0 var(--space-1) var(--space-3);
-  padding: 10px 14px;
+  padding: 11px 14px;
   text-align: left;
   font-size: 14px;
   font-weight: 500;
-  color: var(--primary);
-  background: var(--primary-tint);
-  border-radius: var(--radius-md);
-  transition: background var(--transition);
+  color: var(--text);
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04);
+  transition: box-shadow var(--transition), background var(--transition);
+}
+.app__nav-new:hover {
+  background: var(--bg-hover);
+  box-shadow: 0 2px 8px rgba(15, 23, 42, 0.08);
 }
 
 .app__nav-new:hover {
@@ -447,6 +503,16 @@ input {
   padding: var(--space-5);
   overflow: auto;
   min-width: 0;
+}
+
+/* 双视图常驻挂载的包装层（App 视图切换）：display:contents 使包装层不生成
+   盒子——.chat-view 等子元素的 min-height:100%/margin:auto 几何链与直接
+   排在 .app__main 下完全一致；[hidden] 显式压过 contents 实现隐藏 */
+.app__view {
+  display: contents;
+}
+.app__view[hidden] {
+  display: none;
 }
 
 /* ─── Phase badge ─────────────────────────────────────────────── */
@@ -1394,7 +1460,11 @@ input {
 
 /* 背景：淡蓝云雾团 + 细网格（www.deepseek.com 首屏观感，纯 CSS 绘制）。
    网格两层 1px 线性渐变平铺，云雾为多层大尺度径向渐变。 */
-.app--landing {
+/* 落地页背景：7 张同形式变体（云雾团 + 网格线），每次启动随机选择
+   （App.tsx bgIndex）；形式一致——双层正交网格 + 5 团低饱和雾彩 + 浅色
+   纵向底色，变体间仅色相/网格间距/云雾位置不同，饱和度压低不艳丽 */
+.app--landing.bg-0 {
+  /* 蓝雾 */
   background:
     linear-gradient(rgba(99, 125, 197, 0.055) 1px, transparent 1px),
     linear-gradient(90deg, rgba(99, 125, 197, 0.055) 1px, transparent 1px),
@@ -1405,6 +1475,84 @@ input {
     radial-gradient(460px 360px at 52% 52%, rgba(196, 209, 240, 0.28), transparent 70%),
     linear-gradient(180deg, #f3f5fb 0%, #eaeef8 52%, #eef1f8 100%);
   background-size: 88px 88px, 88px 88px, auto, auto, auto, auto, auto, auto;
+}
+.app--landing.bg-1 {
+  /* 青碧 */
+  background:
+    linear-gradient(rgba(96, 158, 165, 0.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(96, 158, 165, 0.05) 1px, transparent 1px),
+    radial-gradient(600px 440px at 20% 6%, rgba(125, 190, 192, 0.42), transparent 65%),
+    radial-gradient(560px 420px at 88% 22%, rgba(140, 200, 198, 0.38), transparent 65%),
+    radial-gradient(660px 500px at 70% 78%, rgba(120, 185, 185, 0.4), transparent 65%),
+    radial-gradient(480px 360px at 12% 88%, rgba(160, 205, 205, 0.34), transparent 68%),
+    radial-gradient(420px 340px at 46% 46%, rgba(180, 215, 214, 0.28), transparent 70%),
+    linear-gradient(180deg, #f1f7f7 0%, #e7f0f0 52%, #eaf2f1 100%);
+  background-size: 76px 76px, 76px 76px, auto, auto, auto, auto, auto, auto;
+}
+.app--landing.bg-2 {
+  /* 紫藤 */
+  background:
+    linear-gradient(rgba(140, 125, 190, 0.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(140, 125, 190, 0.05) 1px, transparent 1px),
+    radial-gradient(620px 460px at 78% 8%, rgba(168, 152, 214, 0.42), transparent 65%),
+    radial-gradient(540px 420px at 8% 34%, rgba(178, 164, 220, 0.4), transparent 65%),
+    radial-gradient(680px 520px at 92% 70%, rgba(160, 145, 210, 0.4), transparent 65%),
+    radial-gradient(500px 380px at 30% 92%, rgba(190, 178, 226, 0.32), transparent 68%),
+    radial-gradient(440px 340px at 50% 50%, rgba(206, 196, 234, 0.28), transparent 70%),
+    linear-gradient(180deg, #f5f3fa 0%, #ece9f5 52%, #efedf7 100%);
+  background-size: 96px 96px, 96px 96px, auto, auto, auto, auto, auto, auto;
+}
+.app--landing.bg-3 {
+  /* 苔绿 */
+  background:
+    linear-gradient(rgba(110, 150, 125, 0.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(110, 150, 125, 0.05) 1px, transparent 1px),
+    radial-gradient(600px 440px at 24% 8%, rgba(140, 185, 158, 0.4), transparent 65%),
+    radial-gradient(560px 420px at 90% 36%, rgba(150, 192, 168, 0.38), transparent 65%),
+    radial-gradient(640px 500px at 66% 74%, rgba(132, 180, 152, 0.38), transparent 65%),
+    radial-gradient(480px 360px at 10% 90%, rgba(165, 200, 178, 0.32), transparent 68%),
+    radial-gradient(420px 330px at 44% 44%, rgba(190, 214, 198, 0.26), transparent 70%),
+    linear-gradient(180deg, #f2f7f3 0%, #e9f1ea 52%, #ecf2ed 100%);
+  background-size: 68px 68px, 68px 68px, auto, auto, auto, auto, auto, auto;
+}
+.app--landing.bg-4 {
+  /* 暖砂 */
+  background:
+    linear-gradient(rgba(178, 150, 108, 0.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(178, 150, 108, 0.05) 1px, transparent 1px),
+    radial-gradient(620px 460px at 70% 6%, rgba(214, 188, 142, 0.4), transparent 65%),
+    radial-gradient(560px 420px at 10% 30%, rgba(219, 196, 152, 0.38), transparent 65%),
+    radial-gradient(680px 500px at 96% 62%, rgba(206, 178, 130, 0.36), transparent 65%),
+    radial-gradient(500px 380px at 28% 92%, rgba(222, 202, 162, 0.32), transparent 68%),
+    radial-gradient(430px 340px at 54% 48%, rgba(230, 214, 180, 0.26), transparent 70%),
+    linear-gradient(180deg, #f9f6f0 0%, #f2ede2 52%, #f4efe6 100%);
+  background-size: 104px 104px, 104px 104px, auto, auto, auto, auto, auto, auto;
+}
+.app--landing.bg-5 {
+  /* 灰玫 */
+  background:
+    linear-gradient(rgba(178, 122, 138, 0.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(178, 122, 138, 0.05) 1px, transparent 1px),
+    radial-gradient(600px 440px at 18% 10%, rgba(212, 152, 168, 0.38), transparent 65%),
+    radial-gradient(560px 420px at 86% 30%, rgba(216, 160, 175, 0.36), transparent 65%),
+    radial-gradient(660px 500px at 72% 76%, rgba(204, 144, 160, 0.36), transparent 65%),
+    radial-gradient(480px 360px at 14% 86%, rgba(220, 172, 185, 0.32), transparent 68%),
+    radial-gradient(430px 340px at 48% 48%, rgba(230, 192, 202, 0.26), transparent 70%),
+    linear-gradient(180deg, #f9f3f5 0%, #f2e8ec 52%, #f5edf0 100%);
+  background-size: 82px 82px, 82px 82px, auto, auto, auto, auto, auto, auto;
+}
+.app--landing.bg-6 {
+  /* 石板青 */
+  background:
+    linear-gradient(rgba(102, 132, 162, 0.055) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(102, 132, 162, 0.055) 1px, transparent 1px),
+    radial-gradient(620px 460px at 60% 6%, rgba(138, 164, 196, 0.46), transparent 65%),
+    radial-gradient(560px 420px at 4% 44%, rgba(146, 170, 200, 0.44), transparent 65%),
+    radial-gradient(700px 520px at 96% 60%, rgba(128, 156, 190, 0.4), transparent 65%),
+    radial-gradient(520px 380px at 36% 96%, rgba(160, 182, 208, 0.34), transparent 68%),
+    radial-gradient(460px 360px at 50% 46%, rgba(188, 202, 222, 0.28), transparent 70%),
+    linear-gradient(180deg, #f2f4f8 0%, #e9edf3 52%, #edf0f6 100%);
+  background-size: 92px 92px, 92px 92px, auto, auto, auto, auto, auto, auto;
 }
 
 /* hero + 输入框 + 免责声明整组垂直居中，营造官网首页的留白感。

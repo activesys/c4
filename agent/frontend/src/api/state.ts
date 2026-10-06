@@ -44,3 +44,11 @@ export async function fetchState(): Promise<AgentState> {
   }
   return body.state;
 }
+
+/** 开启新对话：复位全局会话状态（phase → idle、撤销方案） */
+export async function resetSessionState(): Promise<void> {
+  const res = await fetch("/api/state/reset", { method: "POST" });
+  if (!res.ok) {
+    throw new Error(`状态重置失败: HTTP ${res.status}`);
+  }
+}

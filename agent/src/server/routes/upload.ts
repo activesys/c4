@@ -159,16 +159,26 @@ export function createUploadRouter(agent: C4Agent): Router {
                 res.socket.setTimeout(0);
             }
 
+            // 客户端断开 → 取消在途 LLM 调用并终止流拉取（与 /api/chat 同构，
+            // 2026-10-05：dying 回合不再空耗配额/写 phase）
+            const controller = new AbortController();
+            let closed = false;
             const stream = agent.invoke({
                 messages: [{ role: "user", content: prompt }],
                 conversationId,
+                signal: controller.signal,
+            });
+            res.on("close", () => {
+                closed = true;
+                controller.abort();
+                void stream.return(undefined as never).catch(() => undefined);
             });
 
             function processNext(
                 result: IteratorResult<AgentStreamEvent>,
             ): void {
-                if (result.done) {
-                    res.end();
+                if (closed || result.done) {
+                    if (!closed) res.end();
                     return;
                 }
 
@@ -209,6 +219,8 @@ export function createUploadRouter(agent: C4Agent): Router {
             }
 
             function handleError(err: unknown): void {
+                // 断开引发的取消错误不下发（连接已关）
+                if (closed) return;
                 const message =
                     err instanceof Error ? err.message : String(err);
                 sendSSE(res, "error", { message });

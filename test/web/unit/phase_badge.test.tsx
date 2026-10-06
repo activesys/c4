@@ -91,6 +91,7 @@ describe("PhaseBadge — top-bar lastError banner (web.md §3.4.2)", () => {
       phase: "idle",
       hasAccessPlan: false,
       lastError: "权限不足，请联系管理员",
+      siteName: null,
     };
 
     const { rerender } = render(<TopBar state={state} onClose={() => undefined} />);

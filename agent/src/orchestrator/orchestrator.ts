@@ -697,7 +697,10 @@ function friendly_exec_error(raw: string): string {
 
 export interface OrchestratorConfig {
     model: {
-        invoke(msgs: Array<{ role: string; content: string }>): Promise<{ content: unknown }>;
+        invoke(
+            msgs: Array<{ role: string; content: string }>,
+            options?: { signal?: AbortSignal },
+        ): Promise<{ content: unknown }>;
     };
     registry: McpServiceRegistry;
     mcpManager: import("../mcp/client.js").C4McpManager;
@@ -747,6 +750,12 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
     // ── LLM 调用 ───────────────────────────────────────────
     // 本轮 LLM 提取调用序号（invoke_with_logging 每轮清零；仅作日志排序用）
     let turnLlmRound = 0;
+
+    // 回合取消信号（按会话隔离）：invoke_with_logging 登记路由层传入的
+    // AbortSignal，llm_json 透传给在途模型调用——客户端断开（开新对话/
+    // 刷新页面）时在途调用立即中断并上抛，dying 回合不再继续写 phase/
+    // 产出事件（2026-10-05：旧回合把徽标改回「收集信息中」的根因）
+    const turnSignals = new Map<string, AbortSignal>();
 
     // 思考步骤收集器（web 前端思考块数据源，按会话隔离——多会话并发互不串台）：
     // 阶段开始 note_step 入队并唤醒 SSE 竞速循环（卡片呈「执行中」），阶段完成
@@ -874,6 +883,8 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             { role: "user", content: `<user_input>\n${user_input}\n</user_input>` },
         ]);
         let sawNonEmpty = false;
+        // 回合取消信号：客户端断开时在途调用立即中断（AbortError 上抛终止回合）
+        const signal = turnSignals.get(conversation);
         for (let attempt = 0; attempt < 4; attempt++) {
             if (attempt > 0) {
                 // 退避重试：429 速率限制（账户级 RPM/TPM，长会话密集调用实测
@@ -882,12 +893,16 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 await new Promise((r) =>
                     setTimeout(r, [0, 5000, 15000, 45000][attempt]),
                 );
+                if (signal?.aborted) throw new Error("回合已取消", { cause: "aborted" });
             }
             try {
-                const res = await model.invoke([
-                    { role: "system", content: rendered },
-                    { role: "user", content: `<user_input>\n${user_input}\n</user_input>` },
-                ]);
+                const res = await model.invoke(
+                    [
+                        { role: "system", content: rendered },
+                        { role: "user", content: `<user_input>\n${user_input}\n</user_input>` },
+                    ],
+                    signal ? { signal } : undefined,
+                );
                 const text = extract_text(res);
                 cfg.agentLogger.llm_text(conversation, text);
                 if (text.trim() !== "") sawNonEmpty = true;
@@ -897,6 +912,11 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                     return parsed;
                 }
             } catch (err) {
+                // 回合取消（客户端断开）：上抛终止回合——不再重试、不再走
+                // 降级路径、不再产生任何后续 phase 写入
+                if (signal?.aborted) {
+                    throw err;
+                }
                 const msg = err instanceof Error ? err.message : String(err);
                 if (attempt === 3) {
                     cfg.agentLogger.error(
@@ -6891,6 +6911,9 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
         }
         turnLlmRound = 0;
         turnStepsByConv.delete(conversation); // 本轮步骤队列清零
+        if (input.signal !== undefined) {
+            turnSignals.set(conversation, input.signal);
+        }
         const it = invoke_turn(input, conversation);
         // next() 的 Promise 跨竞速迭代保持——步骤通知赢得竞速时不能丢弃在途事件
         let pendingNext: Promise<IteratorResult<AgentStreamEvent>> | null = null;
@@ -6934,6 +6957,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             cfg.agentLogger.done(conversation);
             turnStepsByConv.delete(conversation);
             stepWaiters.delete(conversation);
+            turnSignals.delete(conversation);
             await it.return(undefined as never).catch(() => undefined);
         }
     }
