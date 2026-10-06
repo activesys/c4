@@ -26,7 +26,7 @@ MSG63 = (
     "2号风机10个点从1100到1109，点名跟1号风机一样对应1100~1109，使用端口9002。"
     "1号风机的数据转发到II区服务器，转发采用asfp2协议，点表5000~5009；"
     "1号风机的数据也转发到II区备份服务器，转发采用asfp2协议，目标地址是127.0.0.1:9900，点表同样5000~5009；"
-    "2号风机的数据写入计算库，写入地址http://127.0.0.1:18086，token是hnals-influx-2026，org是activesys，"
+    "2号风机的数据写入计算库，写入地址http://127.0.0.1:8086，token是hnals-influx-2026，org是activesys，"
     "10个点全部写进turbine_compute，字段名跟点名对应，类型统一float。"
 )
 MSG63_ADDR = "127.0.0.1:9900"
@@ -41,10 +41,10 @@ MSG64_DOWN = "转发到II区服务器，转发采用asfp2协议，目标地址�
 
 MSG65 = (
     "再写一份统计库：1号风机的前5个点、2号风机的后5个点，1号风机和2号风机的风速/功率；"
-    "写入地址http://127.0.0.1:18086，token是hnals-influx-2026，org是activesys，bucket是stats，"
+    "写入地址http://127.0.0.1:8086，token是hnals-influx-2026，org是activesys，bucket是stats，"
     "measurement按设备名，字段名跟点名对应，类型统一float。"
 )
-MSG65_VAR = "再写一份明细库：1号风机的1000~1004 1002~1006，写入地址http://127.0.0.1:18086，token是hnals-influx-2026，org是activesys，bucket是stats_detail，measurement按设备名，字段名跟点名对应，类型统一float。"
+MSG65_VAR = "再写一份明细库：1号风机的1000~1004 1002~1006，写入地址http://127.0.0.1:8086，token是hnals-influx-2026，org是activesys，bucket是stats_detail，measurement按设备名，字段名跟点名对应，类型统一float。"
 
 MSG66_1 = (
     "现在需要接入1号风机的数据，第三方厂家通过asfp2协议给我们转来1#风机数据，12个点，从1000到1011，"
@@ -60,7 +60,7 @@ MSG67_0 = (
     "10个点分别是1000:风速、1001:功率、1002:风向、1003:桨叶角度、1004:发电机转速、1005:齿轮箱油温、"
     "1006:塔筒温度、1007:空气温度、1008:空气湿度、1009:大气压强，使用端口9001。"
     "1号风机的数据转发到II区服务器，转发采用asfp2协议，目标地址是127.0.0.1:9900，点表5000~5009；"
-    "同时这10个点写入计算库，写入地址http://127.0.0.1:18086，token是hnals-influx-2026，org是activesys，"
+    "同时这10个点写入计算库，写入地址http://127.0.0.1:8086，token是hnals-influx-2026，org是activesys，"
     "bucket是compute，10个点全部写进turbine_compute，字段名跟点名对应，类型统一float。"
 )
 MSG67_1 = "删除II区服务器转发。"
