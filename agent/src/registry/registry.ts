@@ -254,6 +254,8 @@ export class McpServiceRegistry {
       config_schema: entry.config_schema,
       binary_path: entry.binary_path,
       prompt_hints: entry.prompt_hints ? { ...entry.prompt_hints } : undefined,
+      // 管道机读归一化规格（agent.md §2.13.2(b)）——透传给确定性归一化引擎
+      point_normalization: entry.point_normalization,
       error_mappings: entry.error_mappings,
     };
   }

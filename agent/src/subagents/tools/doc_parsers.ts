@@ -152,3 +152,141 @@ export function parse_any_file(filePath: string): string {
     }
     return fs.readFileSync(filePath, "utf-8");
 }
+
+// ── 点表文件结构化解析（agent.md §2.13.3，2026-10-07）────────
+// 面向真实厂家点表：多 sheet 全量解析、GBK 解码、数值单元格按存储值转写、
+// 文档序保序、非数据行（段标题）识别。产出结构化文件块供分块提取与两遍法转录。
+
+export interface ParsedPointBlock {
+    /** 逻辑块标题：sheet 名 / "csv" / "text" */
+    title: string;
+    kind: "table" | "text";
+    /** 表头行（无表头为 null——首行即数据） */
+    header: string[] | null;
+    /** 非数据行（段标题等）：row = 该行之后首个数据行的行号（1 起） */
+    nonData: Array<{ row: number; text: string }>;
+    /** 数据行（保序；单元格为存储值字符串化，空单元格为 ""） */
+    rows: string[][];
+}
+
+export interface ParsedPointFile {
+    /** 原始文件名（上传原名，语境行与同名替换判定用） */
+    name: string;
+    blocks: ParsedPointBlock[];
+}
+
+function decode_bytes(buf: Buffer): string {
+    // 按字节探测：utf-8 严格解码失败（GBK 厂家文件）→ 回退 GB18030（超集兼容 GBK）
+    try {
+        return new TextDecoder("utf-8", { fatal: true }).decode(buf);
+    } catch {
+        try {
+            return new TextDecoder("gb18030").decode(buf);
+        } catch {
+            return buf.toString("latin1");
+        }
+    }
+}
+
+function is_pure_int(s: string): boolean {
+    return /^\d+$/.test(s);
+}
+
+/** 表头判定：前 min(3, 宽度) 个单元格都不是纯整数 → 表头（点号/序号列值几乎必为数字） */
+function detect_header(cells: string[]): boolean {
+    const width = Math.min(3, cells.length);
+    for (let i = 0; i < width; i++) {
+        if (cells[i] !== "" && is_pure_int(cells[i]!)) return false;
+    }
+    return cells.some((c) => c !== "");
+}
+
+/** 单元格存储值 → 字符串（数值 String 化：0.00E+00 显示串的存储值 0 → "0"） */
+function cell_str(v: unknown): string {
+    if (v === undefined || v === null) return "";
+    if (typeof v === "number") return Number.isInteger(v) ? String(v) : String(v);
+    if (typeof v === "boolean") return v ? "1" : "0";
+    return String(v).trim();
+}
+
+function rows_from_matrix(matrix: unknown[][]): {
+    header: string[] | null;
+    nonData: Array<{ row: number; text: string }>;
+    rows: string[][];
+} {
+    const nonData: Array<{ row: number; text: string }> = [];
+    const rows: string[][] = [];
+    let header: string[] | null = null;
+    // 单有效单元格行（表头前后均可能：文档标题/段标题）→ 非数据行，挂到其后
+    // 首个数据行；首个多列行按 detect_header 判表头；其余为数据行，保序
+    let headerDone = false;
+    let pendingTitle: string | null = null;
+    for (const raw of matrix) {
+        const cells = (raw ?? []).map(cell_str);
+        const filled = cells.filter((c) => c !== "");
+        if (filled.length === 0) continue;
+        if (filled.length === 1) {
+            pendingTitle = filled[0]!;
+            continue;
+        }
+        if (!headerDone) {
+            if (detect_header(cells)) {
+                header = cells;
+                headerDone = true;
+                continue;
+            }
+            headerDone = true;
+        }
+        rows.push(cells);
+        if (pendingTitle !== null) {
+            nonData.push({ row: rows.length, text: pendingTitle });
+            pendingTitle = null;
+        }
+    }
+    return { header, nonData, rows };
+}
+
+export function parse_point_file(filePath: string, originalName: string): ParsedPointFile {
+    const buf = fs.readFileSync(filePath);
+    if (filePath.endsWith(".xlsx") || filePath.endsWith(".xls")) {
+        const XLSX = require_("xlsx");
+        const wb = XLSX.read(buf, { type: "buffer" });
+        const blocks: ParsedPointBlock[] = [];
+        for (const title of wb.SheetNames) {
+            const matrix = XLSX.utils.sheet_to_json(wb.Sheets[title], {
+                header: 1,
+                raw: true,
+            }) as unknown[][];
+            const { header, nonData, rows } = rows_from_matrix(matrix);
+            if (rows.length === 0) continue; // 空 sheet 跳过
+            blocks.push({ title, kind: "table", header, nonData, rows });
+        }
+        return { name: originalName, blocks };
+    }
+    if (filePath.endsWith(".csv")) {
+        const text = decode_bytes(buf);
+        const lines = text.split(/\r?\n/).filter((l) => l.trim().length > 0);
+        const matrix = lines.map((l) => l.split(",").map((c) => c));
+        const { header, nonData, rows } = rows_from_matrix(matrix);
+        return {
+            name: originalName,
+            blocks: [{ title: "csv", kind: "table", header, nonData, rows }],
+        };
+    }
+    // txt 及其他：自由文本块（走 LLM 文本通道，不强行结构化）
+    return {
+        name: originalName,
+        blocks: [
+            {
+                title: "text",
+                kind: "text",
+                header: null,
+                nonData: [],
+                rows: decode_bytes(buf)
+                    .split(/\r?\n/)
+                    .filter((l) => l.trim().length > 0)
+                    .map((l) => [l]),
+            },
+        ],
+    };
+}

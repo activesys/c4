@@ -26,6 +26,11 @@
         "name": "addr",
         "type": "integer",
         "description": "信息对象地址（IOA）"
+      },
+      {
+        "name": "point_type",
+        "type": "string",
+        "description": "点类型，必填：遥信/遥测/遥脉（中文或拼音缩写均可），取自点表分组语境"
       }
     ],
     "identity_fields": [
@@ -147,8 +152,25 @@
     },
     "point_field_hints": {
       "addr": {
-        "description": "信息对象地址（IOA）",
-        "range": "0-16777215（ioa_size=3 字节，默认）；ioa_size=1/2 时为 0-255/0-65535"
+        "description": "信息对象地址（IOA）——原值忠实转写，换算由管道按 point_normalization 执行",
+        "identification": "地址列名多样（点号/信息体地址/IOA/遥信地址等），列名不必然可信——名为「地址」的列可能是装置地址（板卡样本恒 101）；按值形态判别：整列连续递增且起点符合绝对地址分区（或 0/1 起偏移）者为 IOA，恒值/小基数离散列（装置地址/组号/条目号/发送编号/网关编号/RTU 号/装置信号地址）不是 IOA；表头与数据列数错位或无表头时按数据行值形态定位地址列；无任何地址列时，序号列即该类点的地址偏移"
+      },
+      "point_type": {
+        "enum": {
+          "yx": "遥信",
+          "yc": "遥测",
+          "ym": "遥脉"
+        },
+        "identification": "类型通常不是逐点列，而是分组语境，载体不限（xlsx/csv/txt/纯文字）：依次查 sheet 名（含前缀，如 104遥信）、文件名（如 遥信2.xls、yxTagTable.csv）、表内或文字中的段标题（如「遥测数据定义」「遥测4001H（4001开始）」「遥信：」）、用户说明文字；中文与拼音缩写大小写不限（遥信/YX/yx、遥测/YC/yc、遥脉/YM/ym），「电度」「脉冲」视作遥脉语境；输入中没有任何类型语境、但点的地址明确落在某类型分区（遥信 1~16384、遥测 16385~25600、遥脉 25601 起）内时，按分区直接归类（绝对地址形态）；完全无法归类时省略 point_type 字段。类型集合是任意非空子集——只出现遥信、只出现遥脉或任意组合均合法，不要求三类齐备"
+      },
+      "excluded_groups": {
+        "patterns": [
+          "遥控",
+          "遥调",
+          "YK",
+          "YT"
+        ],
+        "note": "遥控/遥调为下行控制类点，不属于数据采集，不接入"
       }
     },
     "connection_hints": [
@@ -158,5 +180,31 @@
       "k/w/t0/t1/t3/ioa_size/modules 等字段有默认值，无需向用户询问"
     ],
     "display": "IEC 60870-5-104 数据采集端（客户端）：从远动装置读取遥测/遥信等数据写入共享内存"
+  },
+  "point_normalization": {
+    "type_field": "point_type",
+    "per_type": {
+      "yx": {
+        "start": 1
+      },
+      "yc": {
+        "start": 16385,
+        "hex_start_alias": 4001
+      },
+      "ym": {
+        "start": 25601,
+        "hex_start_alias": 6401
+      }
+    },
+    "on_first_value": {
+      "start": "asis",
+      "0": "+start",
+      "1": "+start-1"
+    },
+    "otherwise": "asis_with_reason",
+    "hex_markers": [
+      "0x",
+      "H"
+    ]
   }
 }

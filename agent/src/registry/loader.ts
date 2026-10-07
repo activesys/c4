@@ -63,7 +63,9 @@ const RegistryEntrySchema = z.object({
   point_schema: PointSchemaSchema,
   config_schema: RegistryConfigSchemaSchema,
   binary_path: z.string(),
-  // prompt_hints 四节结构化对象（agent.md §3.3）——各节可省略；存在时校验为对象
+  // prompt_hints 四节结构化对象（agent.md §3.3）——各节可省略；存在时校验为对象。
+  // 注意：z.object 默认剥离未知键——prompt_hints 的扩展键（如 excluded_groups）必须
+  // 嵌套在 point_field_hints（自由 record）内透传，agent.md §2.13.2(c)
   prompt_hints: z
     .object({
       protocol_match: z.record(z.string(), z.any()).optional(),
@@ -72,6 +74,9 @@ const RegistryEntrySchema = z.object({
       display: z.union([z.string(), z.array(z.string()), z.record(z.string(), z.any())]).optional(),
     })
     .optional(),
+  // 管道机读归一化规格（agent.md §2.13.2(b)，2026-10-07）：结构化放行，
+  // 由确定性归一化引擎消费（不进提示词）
+  point_normalization: z.any().optional(),
   error_mappings: z.record(z.string(), z.string()),
 });
 

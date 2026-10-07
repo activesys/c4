@@ -58,7 +58,7 @@ class V21Agent(rc.Agent):
                 "thinking": "disabled",
                 "base_url": "https://open.bigmodel.cn/api/paas/v4",
                 "temperature": 0,
-                "max_tokens": 4096,
+                "max_tokens": 16384,  # 2026-10-07: RP 真实点表分块提取/批量翻译需 10k+ 输出
                 "api_key_env": "ZHIPU_API_KEY",
             },
             "server": {"host": "127.0.0.1", "port": 19720, "cors_origin": "*"},

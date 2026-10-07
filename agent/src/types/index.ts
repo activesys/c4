@@ -121,6 +121,9 @@ export interface RegistryEntry {
       display?: string | string[] | Record<string, unknown>;
     };
     error_mappings: Record<string, string>;
+    /** 管道机读归一化规格（agent.md §2.13.2(b)，2026-10-07）：确定性归一化引擎消费，
+     *  不进提示词；按（类型 × 文件）序列整段换算 */
+    point_normalization?: unknown;
 }
 
 export interface RegistryL1Summary {

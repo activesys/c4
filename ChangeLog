@@ -1,3 +1,63 @@
+2026-10-07  activesys  <activesys@sina.com>
+    Version 2.1.67
+    * agent: Add — agent.md §2.13 真实点表解析管道（RP-01~RP-13 真实厂家点表
+      实测驱动）：新增 orchestrator/point_pipeline.ts——两遍法管道（LLM 结构
+      识别 identify_block + 确定性逐行转录 transcribe_block，转录不依赖 LLM
+      忠实度）、merge_and_normalize（按「类型 × 来源文件」重构有序序列、序列
+      回落检测（多设备分段/吞址 fail-visible）、全记录一致去重、首值判定确定
+      性归一化（原样/+start/+start−1/16 进制别名，与回落检测同一解读）、
+      excluded 跨块聚合）、批量英文标识翻译 translate_ids（fixup_raw_id 确定
+      性修复：数字开头补 p 前缀、非 ASCII 剔除、超长段边界截断、撞名顺延）。
+      doc_parsers.ts 新增点表文件结构化解析：多 sheet 全量解析、utf-8 严格
+      解码失败回退 GB18030、数值单元格按存储值转写（0.00E+00 显示串不入提
+      取值）、表头判定与文档序保序、非数据行（段标题）锚定。orchestrator.ts
+      集成 fileBlocks 管道：异名分次上传累积、同名重传替换重开草稿、数量对
+      账（口径含排除组）、回落/翻译失败/字段缺失 fail-visible 追问、excluded
+      回报渲染。registry 透传 point_normalization 机读归一化规格
+      （loader/registry/types）；zh_numeral「从 10000 号开始」量词容错；
+      新增 point_identify_prompt.txt（结构识别）与
+      id_translate_batch_prompt.txt（批量翻译）。
+    * agent: Fix — RP 实测六项缺陷：① translate_ids 单批 500 名长数组输出
+      可靠性劣化（RP-02 实测 13/493 空串）→ 批次降至 64 并对失败项逐轮收窄
+      重试（整批→16→单条，重试仍为 LLM 翻译非代码生成），空串条款收紧为
+      「中文名必须尽力翻译」；② 厂家占位点名（「空」「备用」整词）模型确定
+      性拒译（RP-03 实测 13/256）→ 代码侧闭集映射 spare，撞名顺延；③
+      transcribe_block 段类型仅在边界行生效、中间行落空（RP-04 单 sheet 五段
+      全部无类型致假性序列回落）→ 段上下文向前携带，并修正排除段跳转
+      off-by-one（原 i=end 吞掉下一段边界行）；④ 识别层把文件行数幻觉为用户
+      声明（RP-03 幻觉 256＝遥信行数触发虚假对账追问）→ declared_count 增
+      用户文字数字守卫 + 识别 prompt 明确「文件内容不是声明」；⑤ hex 别名
+      进制判定不随回落追问可见（RP-06）→ ResetInfo.alias 携带「首值 4001H =
+      16385」事实并渲染进追问文案；⑥ 逐块 LLM 转写对 excluded 锚定与 JSON
+      合法性不可靠 → 表格块一律两遍法（识别与转写分离，LLM 只做语义识别）。
+    * config: Update — c4_iec104_client.json：points 增加 point_type 字段
+      （点类型，取自分组语境），point_field_hints 补地址列消歧（identification：
+      列名不必然可信、按值形态判别、干扰列小基数离散判别）与 yx/yc/ym 枚举
+      映射、excluded_groups 分组排除声明，注入 point_normalization 归一化
+      规格（yx 起点 1、yc 起点 16385、ym 起点 25601；hex 别名 4001/6401）。
+    * test: Add — func_case_e2e/run_chain_real_points.py：真实点表接入用例
+      RP-01~RP-13 串行驱动器（断言唯一来源 func_test_case_real_points.md
+      附录 A 基准数据；真实点表位于仓库外 points/iec104/，缺失整组 SKIP）；
+      过程断言 PH 按用例重置（修复 confirm 计数跨用例累积假违例）。
+      run_cases.py LLM max_tokens 4096→16384（RP 分块提取/批量翻译单次输出
+      达 10k+ token，原值会截断 JSON）。新增 point_pipeline 单测 33 例
+      （归一化/回落/去重/excluded/转录/翻译/真实文件抽查）。
+
+2026-10-07  activesys  <activesys@sina.com>
+    Version 2.1.66
+    * agent: Update — point_prompt.txt 去协议化（agent.md §2.13.1 追溯项，
+      2026-10-07 评审）：提取规则与示例中的 modbus/iec104/asfp2 专属字样全部
+      泛化——全局声明示例（原「全是功能码3」「从站号都是1」）、枚举映射示例
+      （原 type=10、fun=3）、跨字段规则示例（原线圈/浮点组合）、0 值示例
+      （原 swap=0）、地址字段说明（原寄存器地址/IOA）改协议中立措辞；示例段
+      改用合成协议 demo/demo2/demo3（字段与映射虚构，仅演示提取行为）。随
+      agent.md §2.13 契约补模板侧通用措辞：分组语境识别（identification）
+      注入说明、数值字段原值转写不做换算（归一化归管道）、按输入行序输出、
+      excluded_groups 分组排除与输出顶层 excluded 数组（无命中省略）。同日随
+      第三轮设计评审精化 4b 措辞：匹配语义显式化（不区分大小写的子串）与计数
+      口径（本块内该组点数，对齐 §2.13.2(c) 跨块聚合计数）。
+      无行为语义变化——实际字段与映射仍以本阶段参数注入为准。
+
 2026-10-06  activesys  <activesys@sina.com>
     Version docs
     * docs: Update — 功能文档实现状态全量对齐（仅文档，无代码变更，版本不变）：

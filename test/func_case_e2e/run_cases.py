@@ -260,7 +260,9 @@ class Agent:
                 "thinking": "disabled",
                 "base_url": "https://open.bigmodel.cn/api/paas/v4",
                 "temperature": 0,
-                "max_tokens": 4096,
+                # 16384（2026-10-07）：RP 真实点表用例的分块提取/批量翻译单次输出
+                # 达 10k+ token，4096 会截断 JSON（原 4096 为早期小点表用例设定）
+                "max_tokens": 16384,
                 "api_key_env": "ZHIPU_API_KEY",
             },
             "server": {"host": "127.0.0.1", "port": 19720, "cors_origin": "*"},

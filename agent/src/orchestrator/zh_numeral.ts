@@ -73,7 +73,7 @@ export function zh_start_address(text: string): number | null {
         const n = zh_convert(zhM[1]);
         if (n !== null) return n;
     }
-    const arM = text.match(/(?:从|自|使用从)[\s，,]*(\d{2,7})(?:开始|起)/);
+    const arM = text.match(/(?:从|自|使用从)[\s，,]*(\d{2,7})\s*号?\s*(?:开始|起)/);
     if (arM) return Number(arM[1]);
     return null;
 }

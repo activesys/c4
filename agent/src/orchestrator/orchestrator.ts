@@ -81,7 +81,17 @@ import {
     ConfigBusyError,
     CONFIG_BUSY_MESSAGE,
 } from "../executor/single_flight.js";
-import { parse_any_file } from "../subagents/tools/doc_parsers.js";
+import { parse_any_file, parse_point_file, type ParsedPointFile } from "../subagents/tools/doc_parsers.js";
+import {
+    extract_file_block,
+    merge_and_normalize,
+    translate_ids,
+    canonicalize_types,
+    type ExcludedGroup,
+    type NormSpec,
+    type RawPoint,
+    type ResetInfo,
+} from "./point_pipeline.js";
 import type { ServiceStep } from "../types/index.js";
 import {
     detect_group_access,
@@ -109,6 +119,14 @@ interface SideDraft {
     conn: Record<string, unknown>;
     /** 转发点表等价应答已受理（「与接收侧一致」）→ 不设缺口，方案层确定性推导=采集地址 */
     pointsMirror: boolean;
+    /** 排除分组聚合（agent.md §2.13.2(c)：跨块按组语境名聚合；数量对账口径含排除组） */
+    excluded: ExcludedGroup[] | null;
+    /** 序列回落（agent.md §2.13.5：多设备分段形态，本期不静默接入 → 追问） */
+    resetInfo: ResetInfo | null;
+    /** 已并入草稿的文件块名（异名分次上传只增量提取新块） */
+    extractedFiles: string[];
+    /** 提取层异常（识别失败等）——side_gaps 呈现为可读缺口 */
+    extractError: string | null;
 }
 
 function fresh_side(): SideDraft {
@@ -121,6 +139,10 @@ function fresh_side(): SideDraft {
         declared: null,
         conn: {},
         pointsMirror: false,
+        excluded: null,
+        resetInfo: null,
+        extractedFiles: [],
+        extractError: null,
     };
 }
 
@@ -174,6 +196,9 @@ interface SessionState {
     /** 会话内最近一次上传文件的解析结果（2026-09-29 用例11 缺陷B）：file_data 原为回合
      *  局部变量，协议等闸门后到时补提取拿不到已上传的点表，导致重复追问。新上传覆盖 */
     fileTable: string | null;
+    /** 会话文件语境（agent.md §2.13.4 fileBlocks）：按文件名保序累积的结构化点表块——
+     *  异名追加（草稿不动）、同名替换（重开草稿）、删除单块、方案执行后清空 */
+    fileBlocks: Array<{ name: string; data: ParsedPointFile }> | null;
     /** 变更流程追问中（缺点名/缺转发地址/待选设备）——应答回合强制走变更分叉 */
     pendingChangeAsk: boolean;
     /** 同名多候选消歧应答语境（§3.2.1.3a「以点 key 前缀指认目标」）——应答回合
@@ -220,6 +245,7 @@ function fresh_state(): SessionState {
         pendingGap: null,
         userTexts: [],
         fileTable: null,
+        fileBlocks: null,
         pendingChangeAsk: false,
         pendingDisambig: false,
         disambigHostId: null,
@@ -299,6 +325,8 @@ function md_cell(v: unknown): string {
         .replace(/\|/g, "\\|")
         .replace(/\r?\n/g, " ");
 }
+
+
 
 // catch-up 句级作用域筛选（2026-09-27 用例6）：逐轮提取只看当前消息，闸门后到的
 // 信息需对累积文本补提取——但累积文本常同时含接收表与转发表，9a/规则9 的提示词
@@ -513,6 +541,9 @@ interface FileParseResult {
     port: number | null;
     points: Array<Record<string, unknown>>;
     raw: string;
+    /** 规范表头含点名/名称列（agent.md §2.13 快路门控：无点名列的真实厂家点表
+     *  不得走确定性映射——点名全空会静默丢点名，交 §2.13 管道处理） */
+    hasName: boolean;
 }
 
 function parse_file_table(raw: string): FileParseResult {
@@ -523,6 +554,7 @@ function parse_file_table(raw: string): FileParseResult {
         port: null,
         points: [],
         raw,
+        hasName: false,
     };
     // parse_any_file 对 xlsx/csv 返回 TabularData JSON（{headers, rows, rowCount}）——
     // 归一化回「表头行 + 数据行」形态供列映射；txt 等原始文本走 CSV 启发式
@@ -559,6 +591,7 @@ function parse_file_table(raw: string): FileParseResult {
         if (idx === undefined) return "";
         return row[table.header[idx]] ?? "";
     };
+    out.hasName = colOf["name"] !== undefined;
     for (const row of table.rows) {
         const pointName = get(row, "name");
         const addrRaw = get(row, "addr");
@@ -866,6 +899,8 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
         "point_prompt.txt": "AI 解析点表信息",
         "change_prompt.txt": "AI 解析变更请求",
         "id_translate_prompt.txt": "AI 换算点位编号",
+        "point_identify_prompt.txt": "AI 识别点表结构",
+        "id_translate_batch_prompt.txt": "AI 批量翻译点名",
     };
 
     async function llm_json(
@@ -1110,6 +1145,27 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
         return { svc, entry: registry.get_entry(svc) };
     }
 
+    // excluded_groups.note 文案（agent.md §2.13.2(c)：说明文字来自注册信息）
+    function excluded_note_text(side: SideDraft, role: "writer" | "reader"): string {
+        const hit = entry_of_side(side, role);
+        const eg = (hit?.entry?.prompt_hints as Record<string, unknown> | undefined)?.[
+            "point_field_hints"
+        ] as Record<string, unknown> | undefined;
+        const note = (eg?.["excluded_groups"] as { note?: unknown } | undefined)?.["note"];
+        return typeof note === "string" ? note : "";
+    }
+
+    // 点类型枚举映射（code→中文，如 yx→遥信；取自注册信息 point_field_hints）
+    function type_enum_of(side: SideDraft, role: "writer" | "reader"): Record<string, string> {
+        const hit = entry_of_side(side, role);
+        const pt = ((hit?.entry?.prompt_hints as Record<string, unknown> | undefined)?.[
+            "point_field_hints"
+        ] as Record<string, unknown> | undefined)?.["point_type"] as
+            | { enum?: Record<string, string> }
+            | undefined;
+        return pt?.enum ?? {};
+    }
+
     function required_config_fields(side: SideDraft, role: "writer" | "reader"): string[] {
         const hit = entry_of_side(side, role);
         const fields = hit?.entry?.config_schema?.fields ?? {};
@@ -1173,11 +1229,14 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 ? null
                 : llm_json("forward_intent_prompt.txt", {}, semantic, conversation).catch(() => null);
 
-        // 文件点表确定性列映射——设备级信息直接落位（协议列属用户显式声明）
+        // 文件点表确定性列映射——设备级信息直接落位（协议列属用户显式声明）。
+        // 快路门控（agent.md §2.13.1 追溯）：仅规范表头（含点名列）走确定性映射；
+        // 真实厂家点表（无点名列/多 sheet/GBK）交 §2.13 fileBlocks 管道，防止
+        // 点名全空的静默丢名与单 sheet 截断
         let filePoints: Array<Record<string, unknown>> | null = null;
         if (file_data !== null) {
             const parsed = parse_file_table(file_data);
-            if (parsed.points.length > 0) {
+            if (parsed.points.length > 0 && parsed.hasName) {
                 filePoints = parsed.points;
                 progress = true;
                 note_step(conversation, "解析点表文件", `${parsed.points.length} 个点位`);
@@ -1643,48 +1702,32 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             }
         }
 
-        // 阶段3 接入点表（协议就绪后；LLM 提取，文件数据经 <file_data> 注入）
-        if (state.recv.protocol && !state.recv.points) {
+        // 阶段3 接入点表（协议就绪后）：fileBlocks 管道（agent.md §2.13）优先——
+        // 分块提取/两遍法识别转录 → 序列回落检测 → 全记录一致去重 → 确定性归一化；
+        // 无文件块时回落纯文字单次提取（既有路径，点也入管道做回落检测与归一化）
+        if (state.recv.protocol && (!state.recv.points || (state.fileBlocks ?? []).some((b) => !state.recv!.extractedFiles.includes(b.name)))) {
             const hit = entry_of_side(state.recv, "writer");
             if (hit) {
                 const fields = (hit.entry?.point_schema?.fields ?? []).map(
                     (f: { name: string }) => f.name,
                 );
-                const hints = JSON.stringify(
-                    (hit.entry?.prompt_hints as Record<string, unknown> | undefined)?.[
-                        "point_field_hints"
-                    ] ?? {},
-                );
-                // 文件数据通道（2026-09-29 用例11 缺陷B）：本回合新上传优先，否则复用
-                // 会话内已解析文件（行737 的草稿重置仍只由当回合新文件触发）——协议等
-                // 闸门后到时，补提取不再丢已上传的点表
-                const fileTable = file_data ?? state.fileTable;
-                const input_text =
-                    (fileTable !== null && filePoints === null
-                        ? `<file_data>\n${fileTable.slice(0, 4000)}\n</file_data>\n`
-                        : "") +
-                    // catch-up（2026-09-27 用例6）：协议后到时对接收侧句子补提取，
-                    // 不把含转发关键词的句子喂给 receive 提取器（防串侧）
-                    (recvScoped.trim() !== "" ? recvScoped : semanticAll);
+                const hintsObj = ((hit.entry?.prompt_hints as Record<string, unknown> | undefined)?.[
+                    "point_field_hints"
+                ] ?? {}) as Record<string, unknown>;
+                const hints = JSON.stringify(hintsObj);
+                const normSpec = (hit.entry as Record<string, unknown> | undefined)?.[
+                    "point_normalization"
+                ] as NormSpec | undefined;
+                const enumMap = (hintsObj["point_type"] as { enum?: Record<string, string> })
+                    ?.enum;
                 const protocol = state.recv.protocol;
-                const extract = () =>
-                    llm_json(
-                        "point_prompt.txt",
-                        {
-                            side: "receive",
-                            protocol,
-                            point_fields: JSON.stringify(fields),
-                            point_field_hints: hints,
-                            side_rules: RECEIVE_SIDE_RULES,
-                        },
-                        input_text,
-                        conversation,
-                    );
-                let r = await extract();
-                // 语义重试兜底（llm_json 只重试解析失败）：①空提取但消息含点表形态
-                // （9a 串味，2026-09-26 用例4 实测，temperature=0 仍出现）；②点缺点名或
-                // 英文标识 id——两者均由提取层提供（非 schema 强制字段），模型偶发遗漏，
-                // 方案层会因缺 id/缺点名拒绝执行（2026-09-27 用例5/用例6 线上实测）
+                const call = (
+                    pf: string,
+                    params: Record<string, string>,
+                    input: string,
+                ): Promise<Record<string, unknown> | null> =>
+                    llm_json(pf, params, input, conversation);
+                // 落槽门禁：点名/英文标识缺失的点不落槽位（§3.2.1.3b 由缺口向用户追问）
                 const incomplete = (
                     pts: Array<Record<string, unknown>> | null,
                 ): boolean =>
@@ -1696,31 +1739,167 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                             typeof p["id"] !== "string" ||
                             p["id"].trim() === "",
                     );
-                let pts =
-                    r && Array.isArray(r["points"])
-                        ? (r["points"] as Array<Record<string, unknown>>)
-                        : null;
-                if (
-                    ((!pts || pts.length === 0) &&
-                        /\d{2,7}\s*[:：是]/.test(semantic)) ||
-                    incomplete(pts)
-                ) {
-                    r = await extract();
-                    pts =
+                const blocks = state.fileBlocks ?? [];
+                const blockSig = blocks.map((b) => `${b.name}#${b.data.blocks.length}`).join("|");
+                const pending = blocks.filter(
+                    (b) => !state.recv!.extractedFiles.includes(b.name),
+                );
+                // 回落复用守卫：同一批块已判定回落时不重跑提取（新上传会改签名/重开草稿）
+                const resetStale = state.recv.resetInfo?.sig !== blockSig;
+                if (pending.length > 0 && (state.recv.resetInfo === null || resetStale)) {
+                    const rawPoints: RawPoint[] = [];
+                    const perExcluded: Array<ExcludedGroup[] | null> = [];
+                    let declared: number | null = null;
+                    let extractError: string | null = null;
+                    for (const b of pending) {
+                        try {
+                            note_step(conversation, "解析点表文件", `${b.name}`);
+                            for (const blk of b.data.blocks) {
+                                const res = await extract_file_block(
+                                    b.data,
+                                    blk,
+                                    {
+                                        side: "receive",
+                                        protocol,
+                                        point_fields: JSON.stringify(fields),
+                                        point_field_hints: hints,
+                                        side_rules: RECEIVE_SIDE_RULES,
+                                    },
+                                    recvScoped.trim() !== "" ? recvScoped : semanticAll,
+                                    call,
+                                );
+                                canonicalize_types(
+                                    res.rows,
+                                    normSpec?.type_field ?? "point_type",
+                                    enumMap,
+                                );
+                                rawPoints.push(...res.rows);
+                                perExcluded.push(res.excluded.length > 0 ? res.excluded : null);
+                                if (declared === null && res.declared !== null) {
+                                    declared = res.declared;
+                                }
+                            }
+                            state.recv.extractedFiles.push(b.name);
+                        } catch (e) {
+                            extractError = e instanceof Error ? e.message : String(e);
+                            break;
+                        }
+                    }
+                    if (extractError !== null) {
+                        state.recv.extractError = extractError;
+                        cfg.agentLogger.error(conversation, `[RP诊断] extractError: ${extractError}`);
+                    } else if (rawPoints.length > 0) {
+                        const merged = merge_and_normalize(rawPoints, perExcluded, normSpec);
+                        cfg.agentLogger.error(conversation, `[RP诊断] raw=${rawPoints.length} reset=${merged.reset ? merged.reset.seqKey + "@" + merged.reset.at + ":" + merged.reset.from + "->" + merged.reset.to : "null"} asis=${merged.asisCount} spec=${normSpec ? "有" : "无"}`);
+                        if (merged.reset) {
+                            // 序列回落（多设备分段/吞址脏数据）：不静默接入，追问；
+                            // 已在草稿中的既有点保留不动（回落缺口阻断方案）
+                            state.recv.resetInfo = { ...merged.reset, sig: blockSig };
+                            if (state.recv.excluded === null) {
+                                state.recv.excluded = merged.excluded;
+                            }
+                            progress = true;
+                        } else {
+                            // 两遍法转写的点缺英文标识 → 批量翻译（提取层职责，§2.13.1）
+                            await translate_ids(merged.points, call);
+                            if (!incomplete(merged.points)) {
+                                // 异名分次上传：新块归一化结果拼接到既有草稿（§2.13.4）
+                                state.recv.points = [...(state.recv.points ?? []), ...merged.points];
+                                const exMap = new Map<string, number>();
+                                for (const g of state.recv.excluded ?? []) {
+                                    exMap.set(g.name, (exMap.get(g.name) ?? 0) + g.count);
+                                }
+                                for (const g of merged.excluded) {
+                                    exMap.set(g.name, (exMap.get(g.name) ?? 0) + g.count);
+                                }
+                                state.recv.excluded =
+                                    exMap.size > 0
+                                        ? [...exMap.entries()].map(([name, count]) => ({ name, count }))
+                                        : null;
+                                state.recv.resetInfo = null;
+                                if (state.recv.declared === null && declared !== null) {
+                                    state.recv.declared = declared;
+                                }
+                                progress = true;
+                            } else {
+                                // 落槽门禁 fail-visible（RP-02 实测）：翻译后仍缺点名/
+                                // 英文标识的点不落槽，但必须记解析缺口向用户展示——
+                                // 静默丢弃会让后续回合死锁在泛化追问（extractedFiles
+                                // 已标记不再重提，同名重传 = 重开草稿重试）
+                                const bad = merged.points.filter(
+                                    (p) =>
+                                        String(p["name"] ?? "").trim() === "" ||
+                                        String(p["id"] ?? "").trim() === "",
+                                );
+                                state.recv.extractError = `${bad.length} 个点缺点名或英文标识（如：${bad
+                                    .slice(0, 3)
+                                    .map((p) => String(p["name"] || p["addr"] || "?"))
+                                    .join("、")}）。请核对点表后重新上传，或回复「取消」结束本次接入。`;
+                                progress = true;
+                            }
+                        }
+                    }
+                } else if (blocks.length === 0) {
+                    // 纯文字路径（既有单次提取；点入管道做回落检测与归一化）
+                    const input_text = recvScoped.trim() !== "" ? recvScoped : semanticAll;
+                    const extract = () =>
+                        llm_json(
+                            "point_prompt.txt",
+                            {
+                                side: "receive",
+                                protocol,
+                                point_fields: JSON.stringify(fields),
+                                point_field_hints: hints,
+                                side_rules: RECEIVE_SIDE_RULES,
+                            },
+                            input_text,
+                            conversation,
+                        );
+                    let r = await extract();
+                    let pts =
                         r && Array.isArray(r["points"])
                             ? (r["points"] as Array<Record<string, unknown>>)
                             : null;
-                }
-                // 验收：点缺点名/缺 id 不落槽位（§3.2.1.3b 由缺口向用户追问），
-                // 防止空名点/错侧点流入方案（2026-09-27 用例6 实测：错侧点表
-                // 5000~5009 空名流入方案，确认时才 fatal）
-                if (pts && pts.length > 0 && !incomplete(pts)) {
-                    state.recv.points = pts;
-                    state.recv.declared =
-                        typeof r?.["declared_count"] === "number"
-                            ? (r?.["declared_count"] as number)
-                            : null;
-                    progress = true;
+                    if (
+                        ((!pts || pts.length === 0) &&
+                            /\d{2,7}\s*[:：是]/.test(semantic)) ||
+                        incomplete(pts)
+                    ) {
+                        r = await extract();
+                        pts =
+                            r && Array.isArray(r["points"])
+                                ? (r["points"] as Array<Record<string, unknown>>)
+                                : null;
+                    }
+                    if (pts && pts.length > 0) {
+                        canonicalize_types(
+                            pts as RawPoint[],
+                            normSpec?.type_field ?? "point_type",
+                            enumMap,
+                        );
+                        const merged = merge_and_normalize(
+                            pts as RawPoint[],
+                            [
+                                Array.isArray(r?.["excluded"])
+                                    ? (r["excluded"] as ExcludedGroup[])
+                                    : null,
+                            ],
+                            normSpec,
+                        );
+                        if (merged.reset) {
+                            state.recv.resetInfo = { ...merged.reset, sig: blockSig };
+                            state.recv.excluded = merged.excluded;
+                            progress = true;
+                        } else if (!incomplete(merged.points)) {
+                            state.recv.points = merged.points;
+                            state.recv.excluded = merged.excluded;
+                            state.recv.declared =
+                                typeof r?.["declared_count"] === "number"
+                                    ? (r?.["declared_count"] as number)
+                                    : null;
+                            progress = true;
+                        }
+                    }
                 }
             }
         }
@@ -2030,6 +2209,36 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             return { gaps, recap };
         }
         recap.push(`${label}协议：${side.protocol}`);
+        // 提取层异常（agent.md §2.13：识别失败等）——可读缺口，优先呈现
+        if (side.extractError !== null) {
+            gaps.push(
+                mk(
+                    `${keyPrefix}.points.extract`,
+                    `${label}点表解析失败：${side.extractError}`,
+                ),
+            );
+            return { gaps, recap };
+        }
+        // 序列回落（agent.md §2.13.5：多设备分段/吞址脏数据形态，本期不静默接入）
+        if (side.resetInfo !== null) {
+            const ri = side.resetInfo;
+            const extraTxt = ri.extra.length > 0 ? `；${ri.extra.join("；")}` : "";
+            // hex 别名事实随追问可见（RP-06：4001 → 16385 的进制形态判定）
+            const aliasTxt =
+                ri.alias !== undefined
+                    ? `；该段地址以 16 进制书写（首值 ${ri.alias.hex}H = ${ri.alias.dec}）`
+                    : "";
+            gaps.push(
+                mk(
+                    `${keyPrefix}.points.reset`,
+                    `${label}点表「${ri.seqKey}」的地址序列在第 ${ri.at} 行出现回落` +
+                        `（${ri.from} → ${ri.to}，共 ${ri.drops} 处下降）${extraTxt}${aliasTxt}` +
+                        `——疑似多台设备分段或数据异常。本期不支持一次接入多设备分段点表：` +
+                        `请按设备拆分文件后分别上传，或每台设备单独接入。`,
+                ),
+            );
+            return { gaps, recap };
+        }
         if (!side.points || side.points.length === 0) {
             if (side.pointsMirror) {
                 // 等价应答已受理：不设缺口，方案层确定性推导（转发=采集地址，方案中标注）
@@ -2073,10 +2282,42 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 `${label}点表字段不完整：${missing.slice(0, 3).join("；")}${missing.length > 3 ? "等" : ""}`,
             );
         }
-        if (side.declared !== null && side.declared !== side.points.length) {
+        if (side.declared !== null && side.declared !== side.points.length + (side.excluded?.reduce((a, g) => a + g.count, 0) ?? 0)) {
+            const exclTotal = side.excluded?.reduce((a, g) => a + g.count, 0) ?? 0;
+            const exclTxt = exclTotal > 0 ? ` + 不接入组 ${exclTotal} 个` : "";
             problems.push(
-                `${label}点表数量与声明不符：声明 ${side.declared} 个，实际 ${side.points.length} 个`,
+                `${label}点表数量与声明不符：声明 ${side.declared} 个，实际接入 ${side.points.length} 个${exclTxt}`,
             );
+        }
+        // 身份查重按注册信息 identity_fields 通用执行（agent.md §2.7/§2.13.6；
+        // iec104 为 ["addr"]）——重复即 readable 拒绝，多文件块时附修正操作提示
+        const idFields = entry?.point_schema?.identity_fields;
+        const legacyTrio =
+            Array.isArray(idFields) &&
+            idFields.length === 3 &&
+            ["uid", "fun", "addr"].every((f) => (idFields as string[]).includes(f));
+        if (Array.isArray(idFields) && idFields.length > 0 && !legacyTrio) {
+            const seen = new Map<string, number[]>();
+            side.points.forEach((p, i) => {
+                const parts = idFields.map((f) => {
+                    const v = p[f];
+                    return v === undefined || v === null || v === "" ? null : String(v).trim();
+                });
+                if (parts.some((v) => v === null)) return;
+                const key = parts.join("|");
+                seen.set(key, [...(seen.get(key) ?? []), i]);
+            });
+            const dups = [...seen.entries()].filter(([, idx]) => idx.length > 1);
+            for (const [key, idx] of dups.slice(0, 5)) {
+                problems.push(
+                    `${label}点表地址重复：${key} 出现 ${idx.length} 次（` +
+                        `${idx.slice(0, 3).map((i) => `「${String(side.points![i]!["name"] || "?")}」`).join("、")}` +
+                        `${idx.length > 3 ? "等" : ""}）` +
+                        (side.extractedFiles.length > 1
+                            ? `——多文件同址冲突：若为修正版请同名重新上传替换，或要求删除旧文件块`
+                            : `——请核对点表`),
+                );
+            }
         }
         if (svc) {
             const issues = validate_point_table(side.points as never[], {
@@ -2094,6 +2335,11 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 .map(pt_label)
                 .join("、")}${side.points.length > 5 ? "等" : ""}`,
         );
+        if (side.excluded && side.excluded.length > 0) {
+            recap.push(
+                `${label}不接入组：${side.excluded.map((g) => `${g.name}（${g.count} 点）`).join("、")}`,
+            );
+        }
         return { gaps, recap };
     }
 
@@ -2855,8 +3101,11 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             lines.push("");
             lines.push("| 地址 | 点名 | 点 key |");
             lines.push("| --- | --- | --- |");
-            for (const p of db.points) {
+            for (const p of db.points.slice(0, 50)) {
                 lines.push(`| ${md_cell(p.addr)} | ${md_cell(p.name)} | \`${md_cell(p.id)}\` |`);
+            }
+            if (db.points.length > 50) {
+                lines.push(`| … | … |（其余 ${db.points.length - 50} 点略，全量以配置文件为准） |`);
             }
         }
         for (const ft of fts) {
@@ -2878,7 +3127,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             lines.push("");
             lines.push(`| 采集地址 | 采集点名 | 点 key | ${isDb ? "写入标签" : "转发地址"} |`);
             lines.push("| --- | --- | --- | --- |");
-            for (const p of pts) {
+            for (const p of pts.slice(0, 50)) {
                 const pid = String(p["_pairId"] ?? "");
                 const src = devBuilds.flatMap((d) => d.points).find((q) => q.id === pid);
                 const fwdLabel = isDb
@@ -3104,6 +3353,9 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             seenKeys.add(key);
             const out: Record<string, unknown> = { ...p, id: key };
             delete out["_derived"];
+            delete out["_src"];
+            delete out["_row"];
+            delete out["_norm_reason"];
             writerPoints.push(out);
             if (nameRaw !== "") {
                 pointMap[nameRaw] = key;
@@ -3517,11 +3769,38 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
         lines.push("");
         lines.push(`**采集点表**（${writerPoints.length} 个点）`);
         lines.push("");
-        lines.push("| 地址 | 点名 | 点 key |");
-        lines.push("| --- | --- | --- |");
-        for (const p of writerPoints) {
+        if (state.recv.excluded && state.recv.excluded.length > 0) {
+            const excNote = excluded_note_text(state.recv, "writer");
             lines.push(
-                `| ${md_cell(p["addr"])} | ${md_cell(p["name"] || "（未命名）")} | \`${md_cell(p["id"])}\` |`,
+                `> 以下点表组不接入：${state.recv.excluded.map((g) => `${g.name}（${g.count} 点）`).join("、")}` +
+                    `${excNote ? `——${excNote}` : ""}`,
+            );
+            lines.push("");
+        }
+        const asisN = writerPoints.filter((p) => p["_norm_reason"] !== undefined).length;
+        if (asisN > 0) {
+            lines.push(`> 注：${asisN} 个点未做归一化换算，按原值接入（序列首值不在起点/0/1 形态）。`);
+            lines.push("");
+        }
+        const hasType = writerPoints.some((p) => p["point_type"] !== undefined);
+        const typeEnum = type_enum_of(state.recv, "writer");
+        const typeName = (p: Record<string, unknown>): string =>
+            hasType ? String(typeEnum[String(p["point_type"])] ?? String(p["point_type"] ?? "")) : "";
+        const SHOW_MAX = 50;
+        lines.push(hasType ? "| 类型 | 地址 | 点名 | 点 key |" : "| 地址 | 点名 | 点 key |");
+        lines.push("| --- | --- | --- |" + (hasType ? " --- |" : ""));
+        for (const p of writerPoints.slice(0, SHOW_MAX)) {
+            lines.push(
+                hasType
+                    ? `| ${md_cell(typeName(p))} | ${md_cell(p["addr"])} | ${md_cell(p["name"] || "（未命名）")} | \`${md_cell(p["id"])}\` |`
+                    : `| ${md_cell(p["addr"])} | ${md_cell(p["name"] || "（未命名）")} | \`${md_cell(p["id"])}\` |`,
+            );
+        }
+        if (writerPoints.length > SHOW_MAX) {
+            lines.push(
+                hasType
+                    ? `| … | … | … |（其余 ${writerPoints.length - SHOW_MAX} 点略，全量以配置文件为准） |`
+                    : `| … | … |（其余 ${writerPoints.length - SHOW_MAX} 点略，全量以配置文件为准） |`,
             );
         }
         for (const ft of forward_targets) {
@@ -3554,7 +3833,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             lines.push("");
             lines.push(`| 采集地址 | 采集点名 | 点 key | ${isDbFt ? "写入标签" : "转发地址"} |`);
             lines.push("| --- | --- | --- | --- |");
-            for (let i = 0; i < pts.length; i++) {
+            for (let i = 0; i < Math.min(pts.length, SHOW_MAX); i++) {
                 const fp = pts[i];
                 const sp = keyedFt
                     ? (writerByKey.get(String(fp["_pairId"] ?? "")) ?? {})
@@ -3568,6 +3847,11 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                         : `${String(fp["measurement"] ?? "")}:${String(fp["field"] ?? "?")}`;
                 lines.push(
                     `| ${md_cell(sp["addr"] ?? "?")} | ${md_cell(sp["name"] ?? "") || "（未命名）"} | \`${md_cell(sp["id"] ?? "")}\` | ${md_cell(fwdLabel)}${derived} |`,
+                );
+            }
+            if (pts.length > SHOW_MAX) {
+                lines.push(
+                    `| … | … | … |（其余 ${pts.length - SHOW_MAX} 点按序对应，略） |`,
                 );
             }
         }
@@ -6807,6 +7091,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 state.changeAddPoints = null;
                 state.userTexts = [];
                 state.fileTable = null;
+                state.fileBlocks = null;
                 state.group = null;
                 stateWriter.setAccessPlan(false);
                 stateWriter.setPhase("idle");
@@ -7004,6 +7289,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 state.changeAddPoints = null;
                 state.userTexts = [];
                 state.fileTable = null;
+                state.fileBlocks = null;
                 state.group = null;
                 stateWriter.setPhase("idle");
                 cfg.agentLogger.phase(conversation, "idle");
@@ -7216,13 +7502,44 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             let file_data: string | null = null;
             let file_error = false;
             const pathM = userText.match(/path=([^\s,，]+)/);
+            const nameM = userText.match(/name=([^\n]+)/);
             if (pathM) {
+                const originalName = (nameM?.[1] ?? pathM[1]).trim();
                 cfg.agentLogger.tool_call(conversation, "parse_any_file", { path: pathM[1] });
                 if (existsSync(pathM[1])) {
                     try {
                         const parsed = parse_any_file(pathM[1]);
                         file_data = parsed.length > 8000 ? parsed.slice(0, 8000) : parsed;
                         state.fileTable = file_data;
+                        // fileBlocks 会话文件语境（agent.md §2.13.4）：同名替换重开草稿、
+                        // 异名追加不动草稿（分次上传多文件合成一个接入草稿）
+                        try {
+                            const pf = parse_point_file(pathM[1], originalName);
+                            const blocks = state.fileBlocks ?? [];
+                            const sameIdx = blocks.findIndex((b) => b.name === originalName);
+                            if (sameIdx >= 0) {
+                                blocks[sameIdx] = { name: originalName, data: pf };
+                                // 同名再传 = 替换该文件块并重开接入草稿（保留场站与记忆库）
+                                state.recv = fresh_side();
+                                state.fwd = fresh_side();
+                                state.forwardIntent = false;
+                                state.accessPlan = null;
+                                cfg.agentLogger.phase(conversation, "draft-reopened");
+                            } else {
+                                blocks.push({ name: originalName, data: pf });
+                                // 回落在途时任何新上传 = 全量重开（回落未受理任何点，
+                                // 新块/拆分文件与旧块一起重新提取）
+                                if (state.recv.resetInfo !== null) {
+                                    state.recv = fresh_side();
+                                }
+                            }
+                            state.fileBlocks = blocks;
+                        } catch (e) {
+                            cfg.agentLogger.error(
+                                conversation,
+                                `点表结构化解析失败（回退 LLM 文本通道）: ${e instanceof Error ? e.message : String(e)}`,
+                            );
+                        }
                         cfg.agentLogger.tool_result(conversation, "parse_any_file", {
                             success: true,
                             bytes: parsed.length,
