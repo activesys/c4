@@ -2,15 +2,16 @@
 // 设计归一化规则，不依赖 LLM）
 import { describe, it, expect } from "vitest";
 import {
+    assign_point_ids,
     merge_and_normalize,
     parse_addr_value,
     transcribe_block,
-    translate_ids,
-    is_compliant_id,
     extract_file_block,
+    DEFAULT_PLACEHOLDER_NAMES,
     type NormSpec,
     type RawPoint,
 } from "../../src/orchestrator/point_pipeline.js";
+import { is_safe_point_key, normalize_point_name } from "../../src/executor/point_key.js";
 import { parse_point_file } from "../../src/subagents/tools/doc_parsers.js";
 import { zh_start_address } from "../../src/orchestrator/zh_numeral.js";
 
@@ -287,157 +288,94 @@ describe("transcribe_block（两遍法转录）", () => {
     });
 });
 
-describe("translate_ids（批量英文标识）", () => {
-    it("合规英文名直接派生；中文名批量翻译；撞名确定性顺延", async () => {
+describe("assign_point_ids（id 赋配：归一化 + 顺延/拒收）", () => {
+    const ph = [...DEFAULT_PLACEHOLDER_NAMES];
+
+    it("中文名/英文名归一化作裸 id；ASCII 小写、忽略提取层 id", () => {
         const pts: RawPoint[] = [
-            { name: "DT_CGFJU_FJ00100001", addr: "16385" },
-            { name: "主变油温", addr: "16500" },
-            { name: "风速", addr: "1" },
-            { name: "风速", addr: "2" },
+            { name: "1#风机风速", addr: "1", id: "llm_invented" },
+            { name: "Windspeed", addr: "2" },
         ];
-        const call = async (_pf: string, _p: Record<string, string>, input: string) => {
-            const names = JSON.parse(input) as string[];
-            return { ids: names.map((n) => (n === "主变油温" ? "oil_temp" : "wind_speed")) };
-        };
-        const r = await translate_ids(pts, call);
+        const r = assign_point_ids(pts);
         expect(r.failed).toBe(0);
-        expect(pts[0]!["id"]).toBe("dt_cgfju_fj00100001");
-        expect(pts[1]!["id"]).toBe("oil_temp");
-        // 同名撞名：第二个风速顺延 _2
-        const ids = [pts[2]!["id"], pts[3]!["id"]];
-        expect(new Set(ids).size).toBe(2);
-        expect(String(ids[1])).toMatch(/^wind_speed_2$/);
+        expect(r.conflicts).toEqual([]);
+        expect(pts[0]!["id"]).toBe("1#风机风速");
+        expect(pts[1]!["id"]).toBe("windspeed");
     });
-    it("合规判定", () => {
-        expect(is_compliant_id("DT_CGFJU_FJ00100001")).toBe(true);
-        expect(is_compliant_id("主变油温")).toBe(false);
-        expect(is_compliant_id("1abc")).toBe(false);
-    });
-    it("批量翻译响应数字开头 id 确定性补 p 前缀（RP-02：35kV/66kV 设备名）", async () => {
+
+    it("设备语境并入：裸 id = 设备_点名，跨设备同名不撞", () => {
         const pts: RawPoint[] = [
-            { name: "35kV线路一弹簧未储能", addr: "100" },
-            { name: "66kV线路断路器合位", addr: "101" },
-            { name: "风速", addr: "1" },
+            { name: "有功功率", addr: "1", _device: "1#逆变器" },
+            { name: "有功功率", addr: "2", _device: "2#逆变器" },
         ];
-        const call = async (_pf: string, _p: Record<string, string>, input: string) => {
-            const names = JSON.parse(input) as string[];
-            // 模拟 RP-02 实测：LLM 无视禁令回数字开头的合规英文 id
-            return {
-                ids: names.map((n) =>
-                    n.startsWith("35kV")
-                        ? "35kv_line1_spring_not_charged"
-                        : n.startsWith("66kV")
-                          ? "66kv_line_breaker_closed"
-                          : "wind_speed",
-                ),
-            };
-        };
-        const r = await translate_ids(pts, call);
-        expect(r.failed).toBe(0);
-        expect(pts[0]!["id"]).toBe("p35kv_line1_spring_not_charged");
-        expect(pts[1]!["id"]).toBe("p66kv_line_breaker_closed");
-        expect(pts[2]!["id"]).toBe("wind_speed");
-        // 补前缀后必须全部合规（不合规会在 orchestrator 触发解析缺口而非静默丢点）
-        for (const p of pts) expect(is_compliant_id(String(p["id"]))).toBe(true);
+        const r = assign_point_ids(pts);
+        expect(r.conflicts).toEqual([]);
+        expect(pts[0]!["id"]).toBe("1#逆变器_有功功率");
+        expect(pts[1]!["id"]).toBe("2#逆变器_有功功率");
     });
-    it("批量翻译响应超长 id 截断进 62 内、截断撞名顺延（RP-02：长保护告警名 63 个）", async () => {
+
+    it("占位白名单撞名顺延：最小未占用后缀 + existing 种子", () => {
         const pts: RawPoint[] = [
-            { name: "#1主变测控CSI200EA主变非电量保护装置异常告警", addr: "25" },
-            { name: "#1主变测控CSI200EA主变非电量保护装置直流消失", addr: "26" },
+            { name: "备用", addr: "10" },
+            { name: "备用", addr: "11" },
+            { name: "备用", addr: "12" },
         ];
-        const long1 = "main_transformer1_csi200ea_non_electrical_protection_device_abnormal_alarm";
-        const long2 = "main_transformer1_csi200ea_non_electrical_protection_device_dc_loss";
-        const call = async (_pf: string, _p: Record<string, string>, input: string) => {
-            const names = JSON.parse(input) as string[];
-            return { ids: names.map((n) => (n.endsWith("异常告警") ? long1 : long2)) };
-        };
-        const r = await translate_ids(pts, call);
-        expect(r.failed).toBe(0);
-        const id1 = String(pts[0]!["id"]);
-        const id2 = String(pts[1]!["id"]);
-        expect(id1.length).toBeLessThanOrEqual(62);
-        expect(id2.length).toBeLessThanOrEqual(62);
-        expect(id1).not.toBe(id2); // 段边界截断后同基名 → 顺延 _2 保持唯一
-        for (const id of [id1, id2]) expect(is_compliant_id(id)).toBe(true);
+        const r = assign_point_ids(pts, { existing: new Set(["备用", "备用_2"]), placeholderNames: ph });
+        expect(r.filled).toBe(3);
+        expect(pts[0]!["id"]).toBe("备用_3");
+        expect(pts[1]!["id"]).toBe("备用_4");
+        expect(pts[2]!["id"]).toBe("备用_5");
     });
-    it("批量翻译响应夹带中文的 id 确定性剔除非 ASCII（RP-02：non电量）", async () => {
+
+    it("业务点名撞名 → conflicts（拒收路径），首点占位、余点不赋 id", () => {
         const pts: RawPoint[] = [
-            { name: "#1主变测控CSI200EA主变非电量保护装置异常告警", addr: "25" },
-            { name: "35kV所变CSC241C非电量4跳闸", addr: "185" },
+            { name: "A相功率因数", addr: "100" },
+            { name: "A相功率因数", addr: "101" },
         ];
-        const call = async () => ({
-            ids: [
-                "main_transformer1_csi200ea_non电量_protection_device_abnormal_alarm",
-                "35kv_transformer_csc241c_non电量4_trip",
-            ],
-        });
-        const r = await translate_ids(pts, call);
-        expect(r.failed).toBe(0);
-        expect(pts[0]!["id"]).toBe("main_transformer1_csi200ea_non_protection_device_abnormal");
-        expect(pts[1]!["id"]).toBe("p35kv_transformer_csc241c_non_4_trip");
-        for (const p of pts) expect(is_compliant_id(String(p["id"]))).toBe(true);
+        const r = assign_point_ids(pts);
+        expect(r.conflicts).toEqual([
+            { name: "A相功率因数", addrs: ["100", "101"] },
+        ]);
+        expect(pts[1]!["id"]).toBeUndefined();
     });
-    it("首轮空串收窄重试补齐（RP-02：近 400 名单批 13 个空串 → 重试仍是翻译非生成）", async () => {
+
+    it("设备语境化解跨设备同名后，同装置内同名仍判 conflicts", () => {
         const pts: RawPoint[] = [
-            { name: "主变非电量保护装置异常告警", addr: "25" },
-            { name: "主变非电量保护装置直流消失", addr: "26" },
-            { name: "35kV所变非电量4跳闸", addr: "185" },
+            { name: "高压熔断器A", addr: "6", _device: "ZRR300AOLD" },
+            { name: "高压熔断器A", addr: "49", _device: "ZRR300AOLD" },
         ];
-        let calls = 0;
-        const call = async (_pf: string, _p: Record<string, string>, input: string) => {
-            calls++;
-            const names = JSON.parse(input) as string[];
-            // 模拟 RP-02 实测：首轮大批次对复杂名回空串，小批次重试可译
-            return {
-                ids: names.map((n) => (calls === 1 ? "" : `trans_${names.indexOf(n)}`)),
-            };
-        };
-        const r = await translate_ids(pts, call);
-        expect(r.failed).toBe(0);
-        expect(calls).toBeGreaterThan(1); // 发生了收窄重试
-        for (const p of pts) expect(is_compliant_id(String(p["id"]))).toBe(true);
+        const r = assign_point_ids(pts);
+        expect(r.conflicts).toHaveLength(1);
+        expect(r.conflicts[0]!.addrs).toEqual(["6", "49"]);
     });
-    it("重试穷尽仍空 → failed 计数准确（批次 64/16/1 三轮收窄后交追问）", async () => {
+
+    it("空名/纯符号 → failed（追问路径）", () => {
         const pts: RawPoint[] = [
-            { name: "无名语义甲", addr: "1" },
-            { name: "无名语义乙", addr: "2" },
-            { name: "无名语义丙", addr: "3" },
+            { name: "", addr: "1" },
+            { name: "·。·", addr: "2" },
         ];
-        let calls = 0;
-        const call = async (_pf: string, _p: Record<string, string>, input: string) => {
-            calls++;
-            const names = JSON.parse(input) as string[];
-            return { ids: names.map(() => "") };
-        };
-        const r = await translate_ids(pts, call);
-        expect(r.failed).toBe(3);
-        // 三轮收窄：整批 1 次 + 16 批 1 次 + 单条 3 次
-        expect(calls).toBe(5);
-        // 穷尽仍失败：id 不被写入（保持缺失，由 orchestrator fail-visible 追问）
+        const r = assign_point_ids(pts);
+        expect(r.failed).toBe(2);
         for (const p of pts) expect(p["id"]).toBeUndefined();
     });
-    it("占位点名闭集确定性翻译 spare + 撞名顺延（RP-03：高力板镇 13 个「空」）", async () => {
-        const pts: RawPoint[] = [
-            { name: "空", addr: "36" },
-            { name: "空", addr: "37" },
-            { name: "备用", addr: "62" },
-            { name: "风速", addr: "1" },
-        ];
-        const seen: string[][] = [];
-        const call = async (_pf: string, _p: Record<string, string>, input: string) => {
-            const names = JSON.parse(input) as string[];
-            seen.push(names);
-            return { ids: names.map(() => "wind_speed") };
-        };
-        const r = await translate_ids(pts, call);
-        expect(r.failed).toBe(0);
-        // 占位名不经 LLM：翻译请求只含「风速」
-        expect(seen).toEqual([["风速"]]);
-        expect(pts[0]!["id"]).toBe("spare");
-        expect(pts[1]!["id"]).toBe("spare_2");
-        expect(pts[2]!["id"]).toBe("spare_3");
-        expect(pts[3]!["id"]).toBe("wind_speed");
-        for (const p of pts) expect(is_compliant_id(String(p["id"]))).toBe(true);
+});
+
+describe("normalize_point_name / is_safe_point_key（字符白名单制）", () => {
+    it("全半角折叠、危险字符替换、收拢修剪、小写", () => {
+        expect(normalize_point_name("１＃风机风速")).toBe("1#风机风速");
+        expect(normalize_point_name("电流.1")).toBe("电流_1");
+        expect(normalize_point_name("  U A B 电压 ")).toBe("u_a_b_电压");
+        expect(normalize_point_name("功率（kW）")).toBe("功率(kw)");
+    });
+    it("纯符号/空白 → 空串；纯数字保留", () => {
+        expect(normalize_point_name("·。·")).toBe("");
+        expect(normalize_point_name("123")).toBe("123");
+    });
+    it("安全判定：等于自身归一化；点号/空白不安全", () => {
+        expect(is_safe_point_key("1#风机风速")).toBe(true);
+        expect(is_safe_point_key("a.b")).toBe(false);
+        expect(is_safe_point_key("a b")).toBe(false);
+        expect(is_safe_point_key("")).toBe(false);
     });
 });
 

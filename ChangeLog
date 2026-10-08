@@ -1,3 +1,29 @@
+2026-10-08  activesys  <activesys@sina.com>
+    Version 2.1.68
+    * agent: Add — 点 id 归一化机制落地（agent.md §3.2.1.3b 2026-10-07/08 裁定，
+      C4_RS_00204 达标路径：接入管道零 LLM 翻译）：新增 executor/point_key.ts——
+      字符白名单制归一化 normalize_point_name（NFC/全半角折叠/白名单外替换
+      _/收拢修剪/ASCII 小写/960B 截断）与安全判定 is_safe_point_key、
+      point_key_error；point_pipeline.ts 新增 assign_point_ids（裸 id = 设备语境
+      值_点名，占位白名单撞名最小未占用后缀顺延、业务点名撞名 conflicts 整表
+      拒收、空名/纯符号 failed 追问）与 device_col 设备语境列（BlockIdent/识别/
+      转录携带 _device）。
+    * agent: Update — 翻译机制退役：删除 translate_ids（批次/收窄重试/占位闭集
+      映射全删）、id_translate_prompt.txt、id_translate_batch_prompt.txt 及编排
+      器三处变更流微翻译调用（改归一化补 id）；identify/转录 prompt 增
+      device_col 识别规则；agent.json 配置增 point_id.placeholder_names/base
+      （schema + OrchestratorConfig.pointId 传递）。
+    * agent: Fix — field 派生存量缺陷（2026-10-01 裁定违例）：编排器 5 处
+      mirrorAll/expr「从 id 剥前缀派生 field」改为 influxdb 目标拒装并提示
+      「field 必填、不推导，请提供逐点含 field 的入库点表」；闸门改安全 key：
+      executor 点 id 校验换 point_key_error（instance id 仍 IDENTIFIER_RE）、
+      derive_point_id 改归一化语义（显式 id 安全校验/归一化截断/纯符号报错）、
+      gap_question 变更应答绑定换 is_safe_point_key（中文 id 合法）。
+    * test: Update — point_pipeline 单测 translate 段重写为 assign_point_ids 6 例
+      + point_key 3 例；point_id/gap_question 测试对齐新语义（中文 id 合法、
+      安全校验）；回归 179/179 全绿、lint 0 issues、tsc 通过、构建部署 9988 冒烟
+      通过。功能测试（e2e/RP 套件）按用户指示暂缓。
+
 2026-10-07  activesys  <activesys@sina.com>
     Version 2.1.67
     * agent: Add — agent.md §2.13 真实点表解析管道（RP-01~RP-13 真实厂家点表

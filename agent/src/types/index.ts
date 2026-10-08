@@ -162,6 +162,10 @@ export interface AgentConfig {
     frontend?: { dir: string };
     site?: { name: string; abbr: string };
     /** 对点核验显示服务（agent.md §3.6），缺省阈值 60s */
+    point_id?: {
+        placeholder_names?: string[];
+        placeholder_base?: string;
+    };
     display?: { stale_threshold_ms?: number };
 }
 

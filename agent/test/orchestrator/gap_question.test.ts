@@ -226,11 +226,11 @@ describe("is_forward_mirror_answer", () => {
 });
 
 describe("bind_change_answer（变更流应答绑定，2026-09-27 用例10）", () => {
-    it("点名应答：中文词 → 落 name，不落 id", () => {
+    it("点名应答：中文词 → 落 name 且落归一化 id（2026-10-07 裁定）", () => {
         const draft = [{ addr: 2000 }];
         expect(bind_change_answer("change.name", "风速2", draft)).toBe(true);
         expect(draft[0]["name"]).toBe("风速2");
-        expect(draft[0]["id"]).toBeUndefined();
+        expect(draft[0]["id"]).toBe("风速2");
     });
 
     it("点名应答：英文形态 → name 与 id 同时落（用户原文提供）", () => {
@@ -240,12 +240,13 @@ describe("bind_change_answer（变更流应答绑定，2026-09-27 用例10）", 
         expect(draft[0]["id"]).toBe("vibration");
     });
 
-    it("点名应答：撞名换名场景 → 覆盖已拒绝的旧名，且旧名派生的 id 一并作废", () => {
+    it("点名应答：撞名换名场景 → 覆盖已拒绝的旧名，旧 id 作废并以新名归一化为 id", () => {
         const draft = [{ addr: 1010, name: "功率", id: "power" }];
         expect(bind_change_answer("change.name", "角度", draft)).toBe(true);
         expect(draft[0]["name"]).toBe("角度");
-        // 旧 id 残留会被 id 重复比对误判重名（「角度 vs 功率」死循环实测）
-        expect(draft[0]["id"]).toBeUndefined();
+        // 旧 id 残留会被 id 重复比对误判重名（「角度 vs 功率」死循环实测）——
+        // 新 id = 新点名归一化（2026-10-07 裁定），同样不得残留旧 id
+        expect(draft[0]["id"]).toBe("角度");
     });
 
     it("点名应答：换名为英文形态 → 旧 id 作废并以新名原文为 id", () => {
@@ -266,9 +267,10 @@ describe("bind_change_answer（变更流应答绑定，2026-09-27 用例10）", 
         expect(draft[0]["id"]).toBe("power_2");
     });
 
-    it("英文标识应答：非法标识 → 拒绝绑定", () => {
-        expect(bind_change_answer("change.id", "2power", [{ addr: 2000 }])).toBe(false);
-        expect(bind_change_answer("change.id", "功率", [{ addr: 2000 }])).toBe(false);
+    it("英文标识应答：含点号/空白等不安全形态 → 拒绝绑定（2026-10-08 安全 key 口径）", () => {
+        expect(bind_change_answer("change.id", "a.b", [{ addr: 2000 }])).toBe(false);
+        expect(bind_change_answer("change.id", "a b", [{ addr: 2000 }])).toBe(false);
+        expect(bind_change_answer("change.id", "功率(备用)", [{ addr: 2000 }])).toBe(true);
     });
 
     it("转发地址应答：恰一点缺失 + 纯数字 → 落 forward_addr（用例10「6000」场景）", () => {

@@ -13,6 +13,7 @@ import type {
 import type { C4McpManager } from "../mcp/client.js";
 import { restore_prev1, atomic_write_raw } from "./transaction.js";
 import { check_duplicate_points, check_fun_codes, check_shm_overlap } from "./point_rules.js";
+import { point_key_error } from "./point_key.js";
 import { SHM_SERVICE_TYPE } from "../mcp/client.js";
 
 // ── Point 匹配辅助 ────────────────────────────────────────
@@ -586,7 +587,10 @@ async function handle_add(
         if (typeof id !== "string" || id.length === 0) {
             continue;
         }
-        validate_identifier(id, "point.id");
+        const kerr = point_key_error(id, "point.id");
+        if (kerr !== null) {
+            throw new Error(kerr);
+        }
         if (point_ids.has(id)) {
             throw new Error(
                 `point.id "${id}" 在 ${step.service_type}.${effective_id} 中重复`,
@@ -742,7 +746,10 @@ function handle_modify(
             }
             const id = rec["id"];
             if (typeof id === "string" && id.length > 0) {
-                validate_identifier(id, "point.id");
+                const kerr = point_key_error(id, "point.id");
+                if (kerr !== null) {
+                    throw new Error(kerr);
+                }
             }
             // 撞名裁定（func_test_case 用例 10/18，与 handle_add 同语义）：携带的
             // 新点 id 与既有点相同、但业务地址不同 → 新点改名（windspeed_2）并

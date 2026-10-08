@@ -27,6 +27,7 @@ import {
     type AbbrEntry,
     type AbbrRegistry,
 } from "../registry/abbr_registry.js";
+import { is_safe_point_key, normalize_point_name } from "../executor/point_key.js";
 import { validate_point_table, derive_point_id } from "../executor/point_rules.js";
 import { write_site_config } from "../site_config.js";
 import {
@@ -85,7 +86,9 @@ import { parse_any_file, parse_point_file, type ParsedPointFile } from "../subag
 import {
     extract_file_block,
     merge_and_normalize,
-    translate_ids,
+    assign_point_ids,
+    DEFAULT_PLACEHOLDER_BASE,
+    DEFAULT_PLACEHOLDER_NAMES,
     canonicalize_types,
     type ExcludedGroup,
     type NormSpec,
@@ -739,6 +742,7 @@ export interface OrchestratorConfig {
     mcpManager: import("../mcp/client.js").C4McpManager;
     configPath: string;
     agentConfigPath: string;
+    pointId?: { placeholder_names?: string[]; placeholder_base?: string } | null;
     instanceId: string;
     site: SiteInfo | null;
     state: {
@@ -750,6 +754,10 @@ export interface OrchestratorConfig {
     agentLogger: import("../logging/agent_logger.js").AgentLogger;
     displayTools?: unknown;
 }
+
+/** 入库 field 派生存量修正（2026-10-08）：field 必填、不推导——统一拒装话术 */
+const FIELD_ISSUE =
+    'field 必填、不推导（2026-10-01 裁定）——本目标的入库点表未逐点提供 field，无法装配：请提供逐点含 field 的入库点表后重试。';
 
 export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
     // 会话草稿按 conversationId 隔离（web.md §3.1.2：conversationId 是会话主键）——
@@ -898,9 +906,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
         "connection_prompt.txt": "AI 解析连接信息",
         "point_prompt.txt": "AI 解析点表信息",
         "change_prompt.txt": "AI 解析变更请求",
-        "id_translate_prompt.txt": "AI 换算点位编号",
         "point_identify_prompt.txt": "AI 识别点表结构",
-        "id_translate_batch_prompt.txt": "AI 批量翻译点名",
     };
 
     async function llm_json(
@@ -1800,9 +1806,28 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                             }
                             progress = true;
                         } else {
-                            // 两遍法转写的点缺英文标识 → 批量翻译（提取层职责，§2.13.1）
-                            await translate_ids(merged.points, call);
-                            if (!incomplete(merged.points)) {
+                            // id 赋配（2026-10-07 裁定：翻译退役，id = 点名/设备语境
+                            // 确定性归一化；业务名撞名拒收，空名追问汇总）
+                            const pid = assign_point_ids(merged.points, {
+                                existing: new Set(
+                                    (state.recv.points ?? []).map((q) =>
+                                        String(q["id"] ?? "").toLowerCase(),
+                                    ),
+                                ),
+                                placeholderNames: cfg.pointId?.placeholder_names ?? DEFAULT_PLACEHOLDER_NAMES,
+                                placeholderBase: cfg.pointId?.placeholder_base ?? DEFAULT_PLACEHOLDER_BASE,
+                            });
+                            if (pid.conflicts.length > 0) {
+                                // 业务点名撞名 → 整表拒收（§3.2.1.3b 裁决 2，禁用「顺延」字样）
+                                const list = pid.conflicts
+                                    .slice(0, 5)
+                                    .map((c) => `「${c.name}」×${c.addrs.length}（addr ${c.addrs.filter(Boolean).join("/") || "见点表"}）`)
+                                    .join("；");
+                                state.recv.extractError =
+                                    `业务点名必须唯一：${pid.conflicts.length} 组同名点（${list}${pid.conflicts.length > 5 ? " 等" : ""}）` +
+                                    `——同名点是否为不同物理点需设备厂家确认。请按装置拆分文件分别接入，或修正点名后重传；回复「取消」结束本次接入。`;
+                                progress = true;
+                            } else if (!incomplete(merged.points)) {
                                 // 异名分次上传：新块归一化结果拼接到既有草稿（§2.13.4）
                                 state.recv.points = [...(state.recv.points ?? []), ...merged.points];
                                 const exMap = new Map<string, number>();
@@ -1822,19 +1847,18 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                                 }
                                 progress = true;
                             } else {
-                                // 落槽门禁 fail-visible（RP-02 实测）：翻译后仍缺点名/
-                                // 英文标识的点不落槽，但必须记解析缺口向用户展示——
-                                // 静默丢弃会让后续回合死锁在泛化追问（extractedFiles
-                                // 已标记不再重提，同名重传 = 重开草稿重试）
+                                // 落槽门禁 fail-visible：空名点不落槽，汇总一次追问
+                                // （2026-10-08 空名必须追问裁定；extractedFiles 已标记
+                                // 不再重提，同名重传 = 重开草稿重试）
                                 const bad = merged.points.filter(
                                     (p) =>
                                         String(p["name"] ?? "").trim() === "" ||
                                         String(p["id"] ?? "").trim() === "",
                                 );
-                                state.recv.extractError = `${bad.length} 个点缺点名或英文标识（如：${bad
+                                state.recv.extractError = `${bad.length} 个点缺点名或名字无效（纯符号无法构成标识），如：${bad
                                     .slice(0, 3)
-                                    .map((p) => String(p["name"] || p["addr"] || "?"))
-                                    .join("、")}）。请核对点表后重新上传，或回复「取消」结束本次接入。`;
+                                    .map((p) => `addr ${p["addr"] ?? "?"}`)
+                                    .join("、")}。请提供这些点的点名（可汇总给出，按行序对应），或回复「取消」结束本次接入。`;
                                 progress = true;
                             }
                         }
@@ -2826,39 +2850,17 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             points: [] as Array<{ addr: number; name: string; id: string }>,
             pointMap: {} as Record<string, string>,
         }));
-        const nameId = new Map<string, string>();
-        const pendingNames: string[] = [];
-        for (const db of devBuilds) {
-            for (const p of db.decl.points) {
-                if (IDENTIFIER_RE.test(p.name)) nameId.set(p.name, p.name);
-                else if (!nameId.has(p.name) && !pendingNames.includes(p.name)) pendingNames.push(p.name);
-            }
-        }
-        if (pendingNames.length > 0) {
-            const results = await Promise.all(
-                pendingNames.map((nm) =>
-                    llm_json(
-                        "id_translate_prompt.txt",
-                        { existing_points: "", name: nm },
-                        nm,
-                        conversation,
-                    ).catch(() => null),
-                ),
-            );
-            results.forEach((r, i) => {
-                const tid = r ? String(r["id"] ?? "").trim() : "";
-                if (tid !== "" && IDENTIFIER_RE.test(tid)) nameId.set(pendingNames[i], tid);
-            });
-        }
+        // id 组成（2026-10-07 裁定：翻译退役）——裸 id = 点名确定性归一化；
+        // 同设备内业务点名撞名 → 拒装（不提供顺延通道）；空名/纯符号 → 追问
         for (const db of devBuilds) {
             db.writerId = alloc_channel();
             for (const p of db.decl.points) {
-                const id = nameId.get(p.name) ?? "";
+                const id = normalize_point_name(p.name);
                 if (id === "") {
                     return {
                         plan: {},
                         display: "",
-                        issue: `点「${p.name}」缺少英文标识且无法翻译——请提供合规英文标识（字母开头，仅字母/数字/下划线）后重试。`,
+                        issue: `点「${p.name || p.addr}」点名缺失或为纯符号（无法构成标识）——请提供点名后重试。`,
                     };
                 }
                 const key = `${db.prefix}_${id}`;
@@ -2866,7 +2868,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                     return {
                         plan: {},
                         display: "",
-                        issue: `点「${p.name}」在设备「${db.decl.name}」内重复出现（多个地址同名）——请为重复点名提供不同英文标识。`,
+                        issue: `点「${p.name}」在设备「${db.decl.name}」内重复出现（多个地址同名）——同名点是否为不同物理点需设备厂家确认，请修正点名后重试。`,
                     };
                 }
                 db.pointMap[p.name] = key;
@@ -2938,6 +2940,9 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                     _pairId: flat[i].p.id,
                 }));
             } else if (t.pointsMode === "mirrorAll") {
+                if (t.protocol === "influxdb") {
+                    return { plan: {}, display: "", issue: `「${t.name}」的入库点表未逐点提供 field——${FIELD_ISSUE}` };
+                }
                 const tu = typeUniformOf(t);
                 for (const { p } of flat) {
                     const bare = p.id.slice(p.id.indexOf("_") + 1);
@@ -2961,18 +2966,11 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                         issue: `「${t.name}」的点集表达式无法解析：${r.error ?? "结果为空"}。`,
                     };
                 }
-                const tu = typeUniformOf(t);
+                if (t.protocol === "influxdb") {
+                    return { plan: {}, display: "", issue: `「${t.name}」的入库点表未逐点提供 field——${FIELD_ISSUE}` };
+                }
                 for (const rp of r.points) {
-                    ftPoints.push(
-                        t.protocol === "influxdb"
-                            ? {
-                                  measurement: String(t.conn["measurement"] ?? rp.device),
-                                  field: rp.id.slice(rp.id.indexOf("_") + 1),
-                                  type: tu,
-                                  _pairId: rp.id,
-                              }
-                            : { addr: rp.addr, _pairId: rp.id },
-                    );
+                    ftPoints.push({ addr: rp.addr, _pairId: rp.id });
                 }
             } else {
                 continue; // 点表缺口层已拦
@@ -3505,6 +3503,9 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 }
                 mtPts = t.points.map((p, i) => ({ addr: Number(p["addr"]), _pairId: flat[i].id }));
             } else if (t.pointsMode === "mirrorAll") {
+                if (t.protocol === "influxdb") {
+                    return { plan: {}, display: "", issue: `「${t.name}」的入库点表未逐点提供 field——${FIELD_ISSUE}` };
+                }
                 for (const fp of flat) {
                     mtPts.push({
                         measurement: String(t.conn["measurement"] ?? state.site?.abbr ?? "data"),
@@ -3528,12 +3529,11 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 if (r.error !== null || r.points.length === 0) {
                     return { plan: {}, display: "", issue: `「${t.name}」的点集表达式无法解析：${r.error ?? "结果为空"}` };
                 }
+                if (t.protocol === "influxdb") {
+                    return { plan: {}, display: "", issue: `「${t.name}」的入库点表未逐点提供 field——${FIELD_ISSUE}` };
+                }
                 for (const rp of r.points) {
-                    mtPts.push(
-                        t.protocol === "influxdb"
-                            ? { measurement: rp.device, field: rp.id.slice(rp.id.indexOf("_") + 1), type: typeUniform, _pairId: rp.id }
-                            : { addr: rp.addr, _pairId: rp.id },
-                    );
+                    mtPts.push({ addr: rp.addr, _pairId: rp.id });
                 }
             } else {
                 continue;
@@ -5770,25 +5770,17 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                                     `（同一实例内重复引用会使数据点配置无效）。`,
                             };
                         }
-                        // Writer 补建（源点不在宿主上 → modify 追加，中文名微翻译）
+                        // Writer 补建（源点不在宿主上 → modify 追加；2026-10-07 裁定：
+                        // id = 点名归一化，不再微翻译）
                         const newSrc = srcPts.filter((p) => p.key === "");
                         if (newSrc.length > 0) {
                             for (const p of newSrc) {
-                                const tr = await llm_json(
-                                    "id_translate_prompt.txt",
-                                    { existing_points: "", name: p.name },
-                                    p.name,
-                                    conversation,
-                                ).catch(() => null);
-                                const tid = tr ? String(tr["id"] ?? "").trim() : "";
-                                p.key =
-                                    tid !== "" && IDENTIFIER_RE.test(tid)
-                                        ? `${dev.prefix}_${tid}`
-                                        : "";
+                                const nid = normalize_point_name(p.name);
+                                p.key = nid !== "" ? `${dev.prefix}_${nid}` : "";
                                 if (p.key === "") {
                                     return {
                                         steps: [],
-                                        display: `点「${p.name}」无法生成英文标识——请提供合规英文标识（字母开头）后重试。`,
+                                        display: `点「${p.name}」点名缺失或为纯符号（无法构成标识）——请提供点名后重试。`,
                                     };
                                 }
                             }
@@ -5920,22 +5912,11 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                                         ask: true,
                                     };
                                 }
-                                const perDev = /measurement按设备名/.test(semantic);
-                                const tu =
-                                    semantic.match(/类型统一\s*([a-zA-Z]+)/i)?.[1]?.toLowerCase() ??
-                                    "float";
-                                for (const rp of r.points) {
-                                    const dev = devices.find((d) => String(d["name"]) === rp.device);
-                                    const key = rp.id;
-                                    const bare = key.slice(key.indexOf("_") + 1);
-                                    newPts.push({
-                                        measurement: perDev ? rp.device : String(draft.conn["measurement"] ?? state.site?.abbr ?? "data"),
-                                        field: bare,
-                                        type: tu,
-                                        key: `${(dev as Record<string, unknown>)["host"]}.${key}`,
-                                    });
-                                    if (!deviceRefs.includes(rp.device)) deviceRefs.push(rp.device);
-                                }
+                                return {
+                                    steps: [],
+                                    display: `入库点表未逐点提供 field——${FIELD_ISSUE}`,
+                                    ask: true,
+                                };
                             }
                         } else {
                             // asfp2 新目标：全部点按序（或点集表达式）
@@ -6039,7 +6020,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
         // 后的纯值应答直接落入追加草稿——全量重解析曾丢已确认字段（轮4 实测）并
         // 漏绑转发地址。绑定后：
         //   - 英文标识/转发地址应答 → 草稿已齐备，直接评估（零 LLM）
-        //   - 中文点名应答（英文标识未定）→ 专用微翻译（id_translate_prompt）补 id
+        //   - 中文点名应答（id 未定）→ 归一化补 id（2026-10-07 裁定，微翻译退役）
         //     ——不得落回全量重解析：累积文本含被拒旧名，change_prompt 会把 id 回填
         //     为旧名派生值，再次误报重名（「角度 vs 功率」死循环实测）
         if (
@@ -6063,44 +6044,20 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                     gap: state.pendingGap,
                     draft: JSON.stringify(state.changeAddPoints),
                 });
-                // 中文点名待翻译 → 专用微翻译补 id（干净上下文，不重解析）
+                // 中文点名 → 归一化补 id（2026-10-07 裁定，微翻译退役；干净上下文，不重解析）
                 const pt0 = state.changeAddPoints[0];
                 const nm0 = String(pt0["name"] ?? "").trim();
                 const id0 = String(pt0["id"] ?? "").trim();
-                if (
-                    state.pendingGap === "change.name" &&
-                    id0 === "" &&
-                    nm0 !== "" &&
-                    !IDENTIFIER_RE.test(nm0)
-                ) {
-                    const existing = devices
-                        .map((d) => {
-                            const pts = (d["points"] ?? []) as Array<
-                                Record<string, unknown>
-                            >;
-                            return `${String(d["id"])}：${pts
-                                .map(
-                                    (p) =>
-                                        `${String(p["name"] ?? "")}(${String(p["id"] ?? "")})`,
-                                )
-                                .join("、")}`;
-                        })
-                        .join("\n");
-                    const tr = await llm_json(
-                        "id_translate_prompt.txt",
-                        { existing_points: existing, name: nm0 },
-                        nm0,
-                        conversation,
-                    );
-                    const tid = tr ? String(tr["id"] ?? "").trim() : "";
-                    if (tid !== "" && IDENTIFIER_RE.test(tid)) {
-                        pt0["id"] = tid;
+                if (state.pendingGap === "change.name" && id0 === "" && nm0 !== "") {
+                    const nid = normalize_point_name(nm0);
+                    if (nid !== "" && is_safe_point_key(nid)) {
+                        pt0["id"] = nid;
                     } else {
-                        // 翻译失败/不合规 → 降级问用户英文标识（系统不自动生成）
+                        // 纯符号/非法 → 问用户点名（系统不自动生成）
                         state.pendingGap = "change.id";
                         return {
                             steps: [],
-                            display: `新增点「${nm0}」英文标识自动翻译失败——请直接提供英文标识后重试（系统不自动生成）。`,
+                            display: `新增点「${nm0}」无法构成有效标识——请提供合规点名后重试（系统不自动生成）。`,
                             ask: true,
                         };
                     }
@@ -6559,19 +6516,10 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             for (const p of state.changeAddPoints) {
                 const nm = String(p["name"] ?? "").trim();
                 const id = String(p["id"] ?? "").trim();
-                if (nm === "" || id !== "" || IDENTIFIER_RE.test(nm)) continue;
-                const existingPts = ((dev["points"] ?? []) as Array<Record<string, unknown>>)
-                    .map((q) => `${String(q["name"] ?? "")}(${String(q["id"] ?? "")})`)
-                    .join("、");
-                const tr = await llm_json(
-                    "id_translate_prompt.txt",
-                    { existing_points: existingPts, name: nm },
-                    nm,
-                    conversation,
-                ).catch(() => null);
-                const tid = tr ? String(tr["id"] ?? "").trim() : "";
-                if (tid !== "" && IDENTIFIER_RE.test(tid)) {
-                    p["id"] = tid;
+                if (nm === "" || id !== "") continue;
+                const nid = normalize_point_name(nm);
+                if (nid !== "" && is_safe_point_key(nid)) {
+                    p["id"] = nid;
                 }
             }
             return evaluate_change_add(state, targetId, svcType, dev, current, reg);

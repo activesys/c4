@@ -7,6 +7,7 @@
 //   - 裸值兜底绑定：提问后用户以纯值片段（端口/IP/地址范围）作答时，
 //     绑定给 pending 缺口——仅接受"整条消息就是一个值"的形态，宁可放过不可错绑。
 
+import { is_safe_point_key } from "../executor/point_key.js";
 import { zh_convert } from "./zh_numeral.js";
 
 /** 结构化缺口：key 供 pending 绑定与日志使用，text 复述/收摊，ask 确切提问 */
@@ -317,8 +318,8 @@ export function parse_receive_port(message: string): number | null {
 // 曾丢已确认字段、漏绑转发地址。此处将纯值应答直接落入追加草稿：
 // 宁可放过（走正常解析）不可错绑。
 
-/** 英文标识形态（与 executor.IDENTIFIER_RE 一致的保守复刻，仅用于绑定预判） */
-const CHANGE_ID_RE = /^[a-zA-Z][a-zA-Z0-9_]*$/;
+/** 点 key 安全形态（agent.md §3.2.1.3b：等于自身归一化结果；2026-10-08 起中文 id 合法） */
+const CHANGE_ID_OK = (t: string): boolean => is_safe_point_key(t);
 
 /**
  * 应答性/催促性词语——不是点名也不是英文标识（2026-10-04 用例 54 实测：
@@ -379,11 +380,11 @@ export function bind_change_answer(
         // 误判重名（2026-09-27 用例10「角度/压强 vs 功率(id=power)」死循环实测）；
         // id 作废后由 orchestrator 落回 change_prompt 重新翻译，英文形态以新名原文为 id
         delete draft[0]["id"];
-        if (CHANGE_ID_RE.test(t)) draft[0]["id"] = t;
+        if (CHANGE_ID_OK(t)) draft[0]["id"] = t;
         return true;
     }
     // change.id
-    if (!CHANGE_ID_RE.test(t)) return false;
+    if (!CHANGE_ID_OK(t)) return false;
     draft[0]["id"] = t;
     return true;
 }

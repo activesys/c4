@@ -98,6 +98,12 @@ const AgentConfigSchema: z.ZodType<AgentConfig> = z.object({
         name: z.string(),
         abbr: z.string(),
     }).optional(),
+    point_id: z
+        .object({
+            placeholder_names: z.array(z.string()).optional(),
+            placeholder_base: z.string().optional(),
+        })
+        .optional(),
     display: z.object({
         stale_threshold_ms: z.number().int().optional(),
     }).optional(),
@@ -569,6 +575,7 @@ async function main(): Promise<void> {
             mcpManager,
             configPath: config.shm_manager.config_path,
             agentConfigPath: configPath,
+            pointId: config.point_id ?? null,
             instanceId: config.instance_id,
             site: config.site ?? null,
             state: stateTracker,

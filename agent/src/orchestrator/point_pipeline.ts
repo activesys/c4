@@ -5,6 +5,7 @@
 // 来自注册信息规格或 LLM 识别结果；数值换算由代码机制性执行（归一化执行主体是管道）。
 
 import type { ParsedPointBlock, ParsedPointFile } from "../subagents/tools/doc_parsers.js";
+import { normalize_point_name } from "../executor/point_key.js";
 
 // ── 类型 ──────────────────────────────────────────────────
 
@@ -69,9 +70,6 @@ const CHUNK_CHARS = 12000;
 const CHUNK_ROWS = 150;
 /** 超过该行数的逻辑块走两遍法（识别 + 确定性转录），避免逐行 LLM 转写 */
 export const TWO_PASS_ROWS = 400;
-/** 批量英文标识翻译的每批名字数：长数组输出可靠性随长度劣化（RP-02 实测
- *  近 400 名单批返回 13 个空串），64 以内模型逐项翻译质量稳定 */
-const ID_BATCH = 64;
 
 // ── 数值解析 ──────────────────────────────────────────────
 
@@ -424,6 +422,8 @@ function render_chunk(file: ParsedPointFile, block: ParsedPointBlock, chunk: Chu
 export interface BlockIdent {
     addr_col: number;
     name_col: number;
+    /** 设备语境列（§3.2.1.3b）：识别到时裸 id = 设备语境值_点名 */
+    device_col?: number;
     point_type?: string;
     declared_count?: number | null;
     segments?: Array<{ row: number; point_type?: string; excluded?: boolean }>;
@@ -468,6 +468,10 @@ export async function identify_block(
     return {
         addr_col: addrCol,
         name_col: r && Number.isInteger(Number(r["name_col"])) ? Number(r["name_col"]) : -1,
+        device_col:
+            r && Number.isInteger(Number(r["device_col"])) && Number(r["device_col"]) >= 0
+                ? Number(r["device_col"])
+                : undefined,
         point_type: typeof r?.["point_type"] === "string" ? (r["point_type"] as string) : undefined,
         declared_count:
             typeof r?.["declared_count"] === "number" ? (r["declared_count"] as number) : null,
@@ -516,6 +520,9 @@ export function transcribe_block(
         p["addr"] = String(raw[ident.addr_col] ?? "").trim();
         const name = ident.name_col >= 0 ? String(raw[ident.name_col] ?? "").trim() : "";
         p["name"] = name;
+        if (ident.device_col !== undefined) {
+            p["_device"] = String(raw[ident.device_col] ?? "").trim();
+        }
         rows.push(p);
     }
     return { rows, excluded };
@@ -529,119 +536,96 @@ function segTitle(block: ParsedPointBlock, row: number): string {
     return row === 1 ? block.title : `段@行${row}`;
 }
 
-// ── 批量英文标识翻译 ─────────────────────────────────────
+// ── 点 id 赋配（2026-10-07 裁定：翻译退役，id = 点名确定性归一化）──
 
-export function is_compliant_id(name: string): boolean {
-    return /^[a-zA-Z][a-zA-Z0-9_]*$/.test(name) && name.length <= 64;
+/** 占位白名单缺省（agent.json point_id.placeholder_names 可覆盖） */
+export const DEFAULT_PLACEHOLDER_NAMES = ["备用", "预留", "空", "保留", "未用", "无"];
+/** 空名确认顺延的基名缺省（point_id.placeholder_base，仅在用户确认后使用） */
+export const DEFAULT_PLACEHOLDER_BASE = "未命名";
+
+export interface AssignPointIdsResult {
+    filled: number;
+    /** 空名/纯符号（追问路径） */
+    failed: number;
+    /** 业务点名撞名（整表拒收路径；禁用「顺延」字样） */
+    conflicts: Array<{ name: string; addrs: string[] }>;
 }
 
-/** 代码侧确定性修复（LLM 对禁令不可靠，RP-02 三轮实测：187/493 数字开头、
- * 63/493 超长、13/493 夹带中文）：先剔除非 [a-zA-Z0-9_] 字符并收拢下划线，
- * 数字开头补 p 前缀（identifier 要求字母开头），超 62 截断（留撞名顺延 _2
- * 的余量，段边界优先保语义完整）。全空 → 空串（交 failed 计数走 fail-visible） */
-function fixup_raw_id(id: string): string {
-    let s = id
-        .trim()
-        .replace(/[^a-zA-Z0-9_]+/g, "_")
-        .replace(/_+/g, "_")
-        .replace(/^_+|_+$/g, "");
-    if (s === "") return "";
-    if (/^[0-9]/.test(s)) s = `p${s}`;
-    if (s.length > 62) {
-        const cut = s.slice(0, 62);
-        const at = cut.lastIndexOf("_");
-        s = at >= 40 ? cut.slice(0, at) : cut;
-    }
-    return s;
-}
-
-/** 厂家占位点名的闭集确定性翻译：真实点表普遍以「空」「备用」整词标记未使用
- * 备用点（高力板镇 13/256、晨光 57、11号光伏区 21），语义即 spare——模型对
- * 这类无信息量名确定性拒译（RP-03 实测空串重试穷尽仍空），故走代码侧闭集
- * 映射而非生成；仅整名精确匹配，撞名由顺延兜底 */
-const PLACEHOLDER_ID: ReadonlyMap<string, string> = new Map([
-    ["空", "spare"],
-    ["备用", "spare"],
-]);
-
-/** 批量翻译：仅翻译不合规英文标识的点名；代码侧确定性去重（撞名追加序号） */
-export async function translate_ids(
+/**
+ * 按 §3.2.1.3b 为提取点赋配 id：裸 id = 设备语境值_点名（device_col 语境）或点名，
+ * 经 normalize_point_name 归一化；占位白名单点名撞名按文档序取最小未占用后缀顺延；
+ * 业务点名撞名记入 conflicts（调用方整表拒收）；空名/纯符号记入 failed（调用方追问）。
+ * LLM 提取层给出的任何 id 一律忽略——id 只由 name（与设备语境）确定性导出。
+ */
+export function assign_point_ids(
     points: RawPoint[],
-    call: LlmCall,
-    existing: ReadonlySet<string> = new Set(),
-): Promise<{ filled: number; failed: number }> {
-    const used = new Set<string>(existing);
-    const targets: number[] = [];
-    for (let i = 0; i < points.length; i++) {
-        const name = String(points[i]!["name"] ?? "").trim();
-        const id = String(points[i]!["id"] ?? "").trim();
-        if (id !== "") {
-            // 提取层给出的 id 需修复：数字开头补前缀、超长截断（确定性规则统一）
-            points[i]!["id"] = fixup_raw_id(id);
-            used.add(String(points[i]!["id"]).toLowerCase());
+    opts: {
+        existing?: ReadonlySet<string>;
+        placeholderNames?: ReadonlyArray<string>;
+        placeholderBase?: string;
+    } = {},
+): AssignPointIdsResult {
+    const placeholderNames = opts.placeholderNames ?? DEFAULT_PLACEHOLDER_NAMES;
+    const placeholderBase = opts.placeholderBase ?? DEFAULT_PLACEHOLDER_BASE;
+    const used = new Set<string>(
+        [...(opts.existing ?? [])].map((x) => x.toLowerCase()),
+    );
+    const byNid = new Map<string, { p: RawPoint; nameRaw: string; addrs: string[] }>();
+    const conflicts = new Map<string, { name: string; addrs: string[] }>();
+    let filled = 0;
+    let failed = 0;
+    for (const p of points) {
+        const nameRaw = String(p["name"] ?? "").trim();
+        const device = String(p["_device"] ?? "").trim();
+        if (nameRaw === "") {
+            failed++;
             continue;
         }
-        if (name !== "" && is_compliant_id(name)) {
-            let cand = name.toLowerCase();
-            let n = 2;
-            while (used.has(cand)) cand = `${name.toLowerCase()}_${n++}`;
-            points[i]!["id"] = cand;
-            used.add(cand);
+        // 占位判定在点名分量（原文精确匹配白名单）；撞名判定在合成后的裸 id 上
+        const isPlaceholder = placeholderNames.includes(nameRaw);
+        const bare = device !== "" ? `${device}_${nameRaw}` : nameRaw;
+        let nid = normalize_point_name(bare);
+        if (nid === "") {
+            failed++;
             continue;
         }
-        const ph = PLACEHOLDER_ID.get(name);
-        if (ph !== undefined) {
-            let cand = ph;
-            let n = 2;
-            while (used.has(cand)) cand = `${ph}_${n++}`;
-            points[i]!["id"] = cand;
-            used.add(cand);
-            continue;
-        }
-        if (name !== "") targets.push(i);
-    }
-    let filled = points.length - targets.length;
-    // 批内失败项逐轮收窄重试（整批 → 16 → 单条）：LLM 长数组偶发空串/不合规
-    // 是可靠性问题而非名字不可译（RP-02 实测 13/493），重试仍是 LLM 翻译
-    // （§3.2.1.3b 翻译非确定可接受），不是代码侧生成；穷尽仍失败才走 fail-visible
-    let pending = targets.slice();
-    for (const size of [ID_BATCH, 16, 1]) {
-        if (pending.length === 0) break;
-        const next: number[] = [];
-        for (let start = 0; start < pending.length; start += size) {
-            const idx = pending.slice(start, start + size);
-            const names = idx.map((i) => String(points[i]!["name"]));
-            const r = await call(
-                "id_translate_batch_prompt.txt",
-                {},
-                JSON.stringify(names),
-            );
-            const ids = r && Array.isArray(r["ids"]) ? (r["ids"] as unknown[]) : null;
-            if (!ids || ids.length !== names.length) {
-                next.push(...idx);
-                continue;
-            }
-            for (let j = 0; j < idx.length; j++) {
-                const id = fixup_raw_id(String(ids[j] ?? ""));
-                if (id === "" || !is_compliant_id(id)) {
-                    next.push(idx[j]!);
+        const seen = byNid.get(nid);
+        if (seen === undefined) {
+            // 撞名顺延取最小未占用后缀
+            if (used.has(nid)) {
+                if (!isPlaceholder) {
+                    const addr = String(p["addr"] ?? "").trim();
+                    conflicts.set(nid, { name: bare, addrs: [addr] });
                     continue;
                 }
-                let cand = id.toLowerCase();
                 let n = 2;
-                while (used.has(cand)) cand = `${id.toLowerCase()}_${n++}`;
-                points[idx[j]!]!["id"] = cand;
-                used.add(cand);
-                filled++;
+                while (used.has(`${nid}_${n}`)) n++;
+                nid = `${nid}_${n}`;
             }
+            byNid.set(nid, { p, nameRaw, addrs: [String(p["addr"] ?? "").trim()] });
+            used.add(nid);
+            p["id"] = nid;
+            filled++;
+            continue;
         }
-        pending = next;
+        // 同表内裸 id 重复
+        seen.addrs.push(String(p["addr"] ?? "").trim());
+        if (isPlaceholder) {
+            let n = 2;
+            while (used.has(`${nid}_${n}`)) n++;
+            nid = `${nid}_${n}`;
+            p["id"] = nid;
+            used.add(nid);
+            filled++;
+        } else {
+            // 整表拒收：冲突项列出该裸 id 下全部 colliding addr（含首点）
+            conflicts.set(nid, { name: bare, addrs: [...seen.addrs] });
+        }
     }
-    return { filled, failed: pending.length };
+    void placeholderBase;
+    return { filled, failed, conflicts: [...conflicts.values()] };
 }
 
-/** 类型值规范化：LLM 可能回中文枚举值（遥信），映射回枚举键（yx）——与
- *  point_normalization.per_type 键对齐；未知值原样（交 raw_asis 兜底） */
 export function canonicalize_types(
     points: RawPoint[],
     typeField: string,
