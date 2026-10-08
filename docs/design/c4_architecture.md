@@ -1,6 +1,6 @@
 # C4 架构设计
 
-> **版本**：v0.4.1 | **最后更新**：2026-10-04
+> **版本**：v0.4.2 | **最后更新**：2026-10-07
 
 ---
 
@@ -948,9 +948,9 @@ start 等工具被调用时，各 MCP Server 读取文件中同名顶层 key 对
 
 每个顶层 key 对应一个 MCP Server 类型，值为该类型实例的配置数组。不同实例按数组顺序启动。
 
-> **标识符命名规范**：各 MCP 服务配置中的 `id` 字段（即 `service_id`）和 points 数组中的 `id` 字段（即 `point_id`）均须匹配 `^[a-zA-Z][a-zA-Z0-9_]*$`（字母开头，字母/数字/下划线，数字合法），**不得包含 `.`**。`.` 被保留用作全局 key 的连接符，格式为 `{service_id}.{point_id}`（如 `channel1.wt1_windspeed`）。`service_id` 为接入分配的顺序句柄 `channel{N}`（用户不可见，详见 agent.md §3.2.1.3）；`point_id` 为统一前缀形态 `{设备前缀}_{裸id}`（如 `wt1_windspeed`，跨设备同名点共存）。Agent 在生成配置时负责校验此规则。
+> **标识符命名规范**：各 MCP 服务配置中的 `id` 字段（即 `service_id`）须匹配 `^[a-zA-Z][a-zA-Z0-9_]*$`（字母开头，字母/数字/下划线）；points 数组中的 `id` 字段（即 `point_id`）须**等于自身的确定性归一化结果**——可含中文与 `#` `()` 等白名单符号，但**不得包含 `.`**、空白、`,` `=`、引号与控制字符，≤ 1024 字节（agent.md §3.2.1.3b，2026-10-07）。`.` 被保留用作全局 key 的连接符，格式为 `{service_id}.{point_id}`（如 `channel1.wt1_windspeed`、`channel1.gf11_1#风机风速`）。`service_id` 为接入分配的顺序句柄 `channel{N}`（用户不可见，详见 agent.md §3.2.1.3）；`point_id` 为统一前缀形态 `{设备前缀}_{裸id}`（设备前缀仍为 ASCII；裸 id＝点表原名归一化，跨设备同名点共存）。Agent 在生成配置时负责校验此规则。
 
-> **点名落盘规则**：Writer（采集）服务的 `points[i]` 必须含 `name`——用户提供的原点名，Agent **原样保存**（可为中文，如「风速」），用于描述查重与对点展示，Go MCP 服务不消费；同时含 `id`（英文标识，参与全局 key）。Reader（转发）服务的 `points[i]` **不含 `name`**——点名经 `key` 解析采集点即得，落盘属冗余数据；`key`（引用采集点全局 key）即是对应关系与点名的唯一来源（展示对应关系由 Agent 按序解析呈现，见 agent.md §3.2.1.3b）。`c4_asfp2_server` 与 `c4_influxdb_client` 的逐字段规格见各自设计文档（`c4_asfp2_server.md` / `c4_influxdb_client.md` §2）。
+> **点名落盘规则**：Writer（采集）服务的 `points[i]` 必须含 `name`——用户提供的原点名，Agent **原样保存**（可为中文，如「风速」），用于描述查重与对点展示，Go MCP 服务不消费；同时含 `id`（点 key 裸 id＝点名的确定性归一化，可含中文，参与全局 key；§3.2.1.3b，2026-10-07 起不再翻译为英文）。Reader（转发）服务的 `points[i]` **不含 `name`**——点名经 `key` 解析采集点即得，落盘属冗余数据；`key`（引用采集点全局 key）即是对应关系与点名的唯一来源（展示对应关系由 Agent 按序解析呈现，见 agent.md §3.2.1.3b）。`c4_asfp2_server` 与 `c4_influxdb_client` 的逐字段规格见各自设计文档（`c4_asfp2_server.md` / `c4_influxdb_client.md` §2）。
 
 ### 3.2.2 c4_modbus_client 配置
 

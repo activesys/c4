@@ -1,6 +1,6 @@
 # C4 InfluxDB 写入 MCP 服务设计
 
-> **版本**：v0.1.0 | **最后更新**：2026-08-19 | **父文档**：[c4_architecture.md](c4_architecture.md) | **对应功能**：[C4_FUN_00016](../specification/c4_function.md), [C4_FUN_00067](../specification/c4_function.md), [C4_FUN_00068](../specification/c4_function.md)
+> **版本**：v0.1.1 | **最后更新**：2026-10-07 | **父文档**：[c4_architecture.md](c4_architecture.md) | **对应功能**：[C4_FUN_00016](../specification/c4_function.md), [C4_FUN_00067](../specification/c4_function.md), [C4_FUN_00068](../specification/c4_function.md)
 
 ---
 
@@ -530,8 +530,10 @@ measurement,tag1=val1,tag2=val2 field1=val1i timestamp
 > **仅数值 field，无字符串转义**：本服务仅写入数值类型 field（§1.1），line protocol 的字符串
 > field value 转义（`"` / `\`）不适用。
 >
-> **命名安全**：C4 的 `id` / `key` 匹配 `^[a-zA-Z][a-zA-Z0-9_]*$`（允许数字，agent.md
-> §3.2.1.3），measurement / field 由用户提供、通常不含需转义字符；但 `tags` 的值可能为
+> **命名安全**：C4 的采集点 `id` 为点表原名的确定性归一化（可含中文/`#` 等，但经归一化
+> 保证**不含 `.`、空白、逗号、等号、引号与控制字符**，agent.md §3.2.1.3b，2026-10-07
+> 起）；`measurement` / `field` 由用户显式提供（§2，必填不推导）、通常不含需转义字符；
+> 但 `tags` 的值可能为
 > 任意字符串（如中文设备名「华能阿拉善1#主变」）。中文字符不属于
 > line protocol 特殊字符，无需转义；若 tag value 含逗号 / 空格 / 等号则须转义。编码逻辑
 > 对所有字符串位置统一执行转义，避免遗漏。
