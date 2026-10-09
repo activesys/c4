@@ -22,10 +22,10 @@
   结构化行/表格）——按列名/表头语义映射到上述字段。
 
 # 提取规则
-1. 点名（name）与英文标识（id，仅 receive 侧需要）：用户对点的命名，中文/英文均可原样提取到 name；
-   同时为每点给出 id——name 已是合规英文标识（字母开头，仅字母/数字/下划线）时 id=name 原样，
-   否则把 name 翻译为小写 snake_case 英文标识（如「风速」→ windspeed、「桨叶角度」→ blade_angle）；
-   用户未命名的点 name 与 id 均填空串 ""（由上游统一向用户追问，系统不自动生成点名）。
+1. 点名（name，仅 receive 侧需要）：用户对点的命名，中文/英文/含符号均可，
+   必须原样提取到 name——禁止翻译、禁止改写（英文标识翻译机制已于 2026-10-07 退役，
+   点 id 由系统从 name 确定性归一化生成，LLM 不输出 id、不产出任何英文标识）；
+   用户未命名的点 name 填空串 ""（由上游统一向用户追问，系统不自动生成点名）。
 2. 全局声明展开：作用于全部点的批量声明（如"全部某枚举字段取同一值""全部32位浮点、
    字节顺序2""单元号都是1"）必须展开写入每个点的对应字段。
 3. 单点声明覆盖全局声明：某点单独给出的字段值优先于全局声明。
@@ -79,8 +79,7 @@
   "declared_count": "用户声明的点数（整数），未声明则 null",
   "points": [
     {
-      "name": "点名，未命名填空串",
-      "id": "英文标识（仅 receive 侧）：合规英文点名原样，中文名翻译为 snake_case；未命名填空串",
+      "name": "点名，未命名填空串（不输出 id——点 id 由系统按点名归一化生成）",
       "…": "按本阶段参数注入的字段清单逐点填写，输入未给出的字段省略键"
     }
   ],
@@ -103,11 +102,11 @@
 
 ---
 用户：<user_input>接入1号风机，点表3个点：3000:桨叶角度、3002:变桨速度、3004:电机温度，单元号1，全是模拟量（kind=3），全部32位浮点、字节顺序2</user_input>
-输出：{"declared_count": 3, "points": [{"name": "桨叶角度", "id": "blade_angle", "addr": 3000, "unit": 1, "kind": 3, "fmt": 10, "byte_order": 2}, {"name": "变桨速度", "id": "pitch_speed", "addr": 3002, "unit": 1, "kind": 3, "fmt": 10, "byte_order": 2}, {"name": "电机温度", "id": "motor_temp", "addr": 3004, "unit": 1, "kind": 3, "fmt": 10, "byte_order": 2}], "reason": "单元号1与全局声明展开至全部3个点；模拟量→kind=3、32位浮点→fmt=10 按 point_field_hints 映射；中文名已翻译为 snake_case 英文标识"}
+输出：{"declared_count": 3, "points": [{"name": "桨叶角度", "addr": 3000, "unit": 1, "kind": 3, "fmt": 10, "byte_order": 2}, {"name": "变桨速度", "addr": 3002, "unit": 1, "kind": 3, "fmt": 10, "byte_order": 2}, {"name": "电机温度", "addr": 3004, "unit": 1, "kind": 3, "fmt": 10, "byte_order": 2}], "reason": "单元号1与全局声明展开至全部3个点；模拟量→kind=3、32位浮点→fmt=10 按 point_field_hints 映射；点名原样保留（id 由系统归一化生成）"}
 
 ---
 用户：<user_input>读1号设备的状态量，单元号1，3000:阀门状态、3001:阀门反馈</user_input>
-输出：{"declared_count": null, "points": [{"name": "阀门状态", "id": "valve_status", "addr": 3000, "unit": 1, "kind": 1}, {"name": "阀门反馈", "id": "valve_feedback", "addr": 3001, "unit": 1, "kind": 1}], "reason": "状态量（kind=1）按跨字段规则 fmt 只能为开关量(0)或位(15)，无法唯一确定，需向用户确认；逐点列举不是数量声明，declared_count 填 null"}
+输出：{"declared_count": null, "points": [{"name": "阀门状态", "addr": 3000, "unit": 1, "kind": 1}, {"name": "阀门反馈", "addr": 3001, "unit": 1, "kind": 1}], "reason": "状态量（kind=1）按跨字段规则 fmt 只能为开关量(0)或位(15)，无法唯一确定，需向用户确认；逐点列举不是数量声明，declared_count 填 null"}
 
 ---
 用户：<user_input>接入1#风机，点表：3000:桨叶角度、3002:变桨速度，kind=3</user_input>
@@ -121,14 +120,14 @@ addr,name,kind,fmt,byte_order,unit
 3002,,3,10,2,1
 3004,电机温度,3,10,2,1
 </file_data>
-输出：{"declared_count": null, "points": [{"name": "桨叶角度", "id": "blade_angle", "addr": 3000, "unit": 1, "kind": 3, "fmt": 10, "byte_order": 2}, {"name": "", "id": "", "addr": 3002, "unit": 1, "kind": 3, "fmt": 10, "byte_order": 2}, {"name": "电机温度", "id": "motor_temp", "addr": 3004, "unit": 1, "kind": 3, "fmt": 10, "byte_order": 2}], "reason": "点表来自文件解析数据，按列名映射字段；第二行无点名，name 与 id 填空串由上游追问"}
+输出：{"declared_count": null, "points": [{"name": "桨叶角度", "addr": 3000, "unit": 1, "kind": 3, "fmt": 10, "byte_order": 2}, {"name": "", "addr": 3002, "unit": 1, "kind": 3, "fmt": 10, "byte_order": 2}, {"name": "电机温度", "addr": 3004, "unit": 1, "kind": 3, "fmt": 10, "byte_order": 2}], "reason": "点表来自文件解析数据，按列名映射字段；第二行无点名，name 填空串由上游追问"}
 
 【side = receive，protocol = demo2，
   point_fields：[{"name":"addr","description":"点地址"}]】
 
 ---
 用户：<user_input>接入某装置，点表：1000:有功功率、1002:无功功率</user_input>
-输出：{"declared_count": null, "points": [{"name": "有功功率", "id": "active_power", "addr": 1000}, {"name": "无功功率", "id": "reactive_power", "addr": 1002}], "reason": "该协议每点仅要点地址；中文名已翻译为 snake_case 英文标识；逐点列举不是数量声明，declared_count 填 null"}
+输出：{"declared_count": null, "points": [{"name": "有功功率", "addr": 1000}, {"name": "无功功率", "addr": 1002}], "reason": "该协议每点仅要点地址；点名原样保留（id 由系统归一化生成）；逐点列举不是数量声明，declared_count 填 null"}
 
 【side = forward，protocol = demo3，
   point_fields：[{"name":"addr","description":"转发地址（目标服务器点地址）"}]】

@@ -26,6 +26,10 @@
 #      入库：…」不命中 CHANGE_INTENT_RE 的变更意图识别，会误入新接入路径对既有
 #      设备起同名新草稿）；v2.1.55 已将「加一个点/加个点」补入该正则（73② 文档
 #      原文措辞），下游新增句式扩充另行评估。
+#   8. 75 field 追问应答（2026-10-09 裁定：入库标识字段不得中文）：「字段名跟点名
+#      对应」在点名中文化后无法直接落 field——agent 按行序追问显式 field 名，驱动器
+#      以 ANS75_FIELDS（windspeed…pressure）应答；数据面期望字段同步改为该清单
+#      （原文档「字段=采集点 key 去前缀」的 by-name 口径随点名翻译退役失效）。
 import json
 import os
 import re
@@ -101,6 +105,10 @@ MSG76_GROUP = ("现在接入一个风场的风机：1#~3#是倍福PLC风机，�
 
 FIELDS_BY_NAME = ["windspeed", "power", "wind_dir", "pitch_angle", "gen_speed",
                   "gearbox_oil_temp", "tower_temp", "air_temp", "humidity", "pressure"]
+
+# 2026-10-09 裁定：入库标识字段不得中文——「字段名跟点名对应」须追问后显式给出
+# （multi 链 ANS63_FIELDS 同款；数据面期望字段随之改为该显式清单，非中文裸 id）
+ANS75_FIELDS = ("字段名跟点名对应（" + "、".join(FIELDS_BY_NAME) + "）。")
 
 
 # ── agent 生命周期（76/77 需要「保留 agent.json 重启」与坏 key 实例）────────
@@ -484,7 +492,8 @@ def s75():
     influx_mod.influx_reset_db()  # 链内清库（写入前 hnals 库必须存在）
     conv = rc.Conv()
     base.flow(conv, MSG75,
-              answers=[(r"叫什么|名字|称为|下游目标", "计算库")],  # 目标名必答（§2.12.1，43 同款）
+              answers=[(r"叫什么|名字|称为|下游目标", "计算库"),   # 目标名必答（§2.12.1，43 同款）
+                       (r"field", ANS75_FIELDS)],  # field 必答追问（2026-10-09 裁定）
               done=lambda: any(k[0] == "c4_influxdb_client"
                                for k in rc.server_instances(rc.read_config() or {})))
     cfg = rc.wait_config(lambda c: any(k[0] == "c4_influxdb_client"
@@ -511,10 +520,9 @@ def s75():
         if str(fp.get("type")) != "float":
             raise rc.Fail(f"75: type={fp.get('type')!r} ≠ float")
     assert_watermark("75", 17)
-    # ③ 数据面：注入 → measurement=ABBR0 查得 10 字段（by-name——「字段名跟点名
-    # 对应」形态，期望字段 = 采集点 key 去前缀，同 influx 链 by_name 口径）
-    expect_fields = sorted(str(wpts.get(a, {}).get("id", "")).split("_", 1)[-1]
-                           for a in range(1000, 1010))
+    # ③ 数据面：注入 → measurement=ABBR0 查得 10 字段（field 口径 2026-10-09：
+    # 「字段名跟点名对应」经追问后显式给出——期望字段 = 应答清单，非中文裸 id）
+    expect_fields = sorted(FIELDS_BY_NAME)
     rc.inject(19001, 1000, 1010, times=3)
     deadline = time.time() + 60
     got = None

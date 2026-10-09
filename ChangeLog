@@ -1,3 +1,36 @@
+2026-10-09  activesys  <activesys@sina.com>
+    Version 2.1.69
+    * agent: Fix — 翻译退役残留清扫（e2e 全量回归暴露）：point_prompt.txt /
+      change_prompt.txt 移除「中文名翻译为 snake_case 英文标识」指令与全部翻译
+      few-shot（LLM 不再产出 id）；output_plan_steps.ts 三处、orchestrator.ts
+      两处 point.id 校验由旧 ASCII 正则（仅允许字母开头）迁移 point_key_error
+      （归一化安全 key，中文合法）；变更流 add_points 不再追问英文标识——id =
+      点名确定性归一化（缺失/纯符号追问）；文字路径提取接入 assign_point_ids
+      （与文件管道同规：撞名拒收/空名追问）。
+    * agent: Fix — is_safe_point_key / point_key_error 幂等比较放宽到小写意义下
+      （normalize(s) === s.toLowerCase()）：组模式编号前缀按 §2.11 原样保留大小写
+      （A01~A10 → nbA01_风速），原全等比较误拒合法全 key。
+    * agent: Fix — 组方案展示「点 key 后缀」列改由 derive_point_id 从点名导出
+      （提取层不再产出 id 字段后该列恒空）。
+    * agent: Add — 入库标识字段不得中文（2026-10-09 用户裁定；c4_influxdb_client.md
+      §2 v0.1.2 同步）：influx field 仅 [A-Za-z_]+、measurement 仅
+      [A-Za-z0-9_.-]+——提取层 sanitize（非法 field/measurement/tags 键剥除，
+      既有合法值保留）+「缺 field」缺口追问；「字段名跟点名对应（a、b、…）」
+      括号清单确定性绑定（单目标落 field、mt t{i}.fields 缺口绑定、变更流
+      expr 分支按行序绑定）；mt/legacy mirrorAll/expr 四处装配分支按清单落
+      field；「measurement按设备名」确定性落设备前缀（wt1/wt2，方案展示供确认）。
+    * mcp: c4_influxdb_client 新增 MEASUREMENT_FORMAT 校验（measurement 字符集，
+      两路径同源 validation.go）；registry c4_influxdb_client.json point_field_hints
+      修正「按点名作为字段名」误导指引并注字符集裁定。
+    * test: func_case_e2e 适配——run_cases.py 增归一化 Python 镜像（key 校验/断言）
+      与 glm-4.5-air 额度耗尽自动切 glm-4.6v（启动探测 + SSE error 检测 +
+      agent.json 热切换重启重试）；influx 驱动 influxd 自举（目录/wal-dir）；
+      s39/s63/s65/s67/s75 补 field 显式清单应答、s65 measurement 断言改 wt1/wt2、
+      s75 数据面期望字段改显式清单（by-name 中文裸 id 口径随翻译退役失效）、
+      s56 改名断言锚定既有 key、s8 补场站首答；全 14 套 e2e 链路回归通过
+      （场站变更链 68~77 于 22:21 复跑全绿；用例 47 变体 B 同日补测通过）。
+    * packaging: VERSION 2.1.68 → 2.1.69。
+
 2026-10-08  activesys  <activesys@sina.com>
     Version 2.1.68
     * agent: Add — 点 id 归一化机制落地（agent.md §3.2.1.3b 2026-10-07/08 裁定，

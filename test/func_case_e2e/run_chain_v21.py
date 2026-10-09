@@ -52,15 +52,7 @@ class V21Agent(rc.Agent):
         os.makedirs(self.dir, exist_ok=True)
         agent_json = {
             "instance_id": "c4_e2e",
-            "model": {
-                "provider": "zhipu",
-                "name": "glm-4.5-air",
-                "thinking": "disabled",
-                "base_url": "https://open.bigmodel.cn/api/paas/v4",
-                "temperature": 0,
-                "max_tokens": 16384,  # 2026-10-07: RP 真实点表分块提取/批量翻译需 10k+ 输出
-                "api_key_env": "ZHIPU_API_KEY",
-            },
+            "model": rc.model_conf(),  # 额度探测 + glm-4.5-air 耗尽自动切 glm-4.6v（run_cases）
             "server": {"host": "127.0.0.1", "port": 19720, "cors_origin": "*"},
             "mcp_registry": {"path": rc.REGISTRY_DIR},
             "shm_manager": {
@@ -178,8 +170,8 @@ def assert_writer_keys(cfg, prefix, addrs):
         pid = str(w.get(a, {}).get("id", ""))
         if not pid.startswith(prefix + "_"):
             raise rc.Fail(f"writer addr={a} 点 key={pid!r} 不以前缀 {prefix}_ 开头（实例 {wid}）")
-        if not re.fullmatch(r"[a-zA-Z][a-zA-Z0-9_]*", pid):
-            raise rc.Fail(f"writer addr={a} 点 key 非法: {pid!r}")
+        if not rc.is_safe_point_key(pid):
+            raise rc.Fail(f"writer addr={a} 点 key 非法（应为点名归一化安全 key）: {pid!r}")
     return w, wid
 
 

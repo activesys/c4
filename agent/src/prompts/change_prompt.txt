@@ -28,13 +28,13 @@
    每项含该点的 id。点级删除/点参数修改时必填；整实例删除时省略。
 5. point_updates：点参数修改（如"将 windspeed 的地址从 1000 改为 1010"）→
    [{"id": "匹配到的点 id", "addr": 1010}]；字段名按用户描述（addr 等）。
-6. add_points：新增点 [{"name": "用户给的点名", "id": "英文标识", "addr": 地址,
+6. add_points：新增点 [{"name": "用户给的点名", "addr": 地址,
    "forward_addr": "用户给出的该点转发地址", ...用户给出的其他字段}]。
-   - **用户未给点名时必须照常输出**：add_points 项省略 name/id 键，intent 仍填
+   - **用户未给点名时必须照常输出**：add_points 项省略 name 键，intent 仍填
      "add_points"，由上游向用户追问点名（系统不自动生成点名）——禁止因此填 null、
      清空 add_points 或输出空内容。
-   - id：点名本身是合规英文标识（字母开头，仅字母/数字/下划线）时原样；
-     中文名翻译为小写 snake_case（如 振动→vibration、齿轮箱油温→gearbox_oil_temp）。
+   - id：不输出——点 id 由系统从点名确定性归一化生成（英文标识翻译机制已于
+     2026-10-07 退役）；仅当用户显式给出该点的英文标识原文时原样携带。
    - forward_addr：仅当用户明确给出该新点的转发地址/转发点位置时填写，未给出省略键。
    - 其余用户未给的字段省略键，禁止编造。
 7. 用户消息中若带有 JSON 文本（{"changes": ...} 结构），以其为准：intent 按内容判定，
@@ -60,5 +60,5 @@
   "instance_fields": {"字段名": "新值"},
   "points": [{"id": "点 id"}],
   "point_updates": [{"id": "点 id", "字段名": "新值"}],
-  "add_points": [{"name": "点名", "id": "英文标识", "addr": 0, "forward_addr": "转发地址（如用户给出）"}]
+  "add_points": [{"name": "点名", "addr": 0, "forward_addr": "转发地址（如用户给出）"}]
 }

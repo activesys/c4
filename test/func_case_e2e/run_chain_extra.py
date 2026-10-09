@@ -356,7 +356,9 @@ def s56():
             raise rc.Fail("56: 转发侧被变更（引用 key 不变原则）")
         e = base.entry("wt1")
         pm = (e or {}).get("pointMap", {})
-        if pm.get("主轴承温度") != "wt1_gearbox_oil_temp":
+        # 2026-10-07 翻译退役：key 由点名归一化生成——断言锚定「改名不换 key」语义
+        #（新名重绑到既有 key），不再硬编码英文译名形态
+        if pm.get("主轴承温度") != old.get("id"):
             raise rc.Fail(f"56: pointMap 未重绑定新名: {pm}")
     finally:
         fwd.stop()

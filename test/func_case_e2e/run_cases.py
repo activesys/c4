@@ -226,6 +226,127 @@ def load_api_key():
     raise Fail(f"{AGENT_ENV} 中未找到 ZHIPU_API_KEY")
 
 
+# ── 点 key 安全校验（agent.md §3.2.1.3b 归一化的 Python 侧镜像，对齐 point_key.ts）──
+_POINT_KEY_SYMBOLS = set("_#()[]{}-~+!@^&%$*?")
+# 全角 ASCII 折叠（U+FF01–U+FF5E → 半角）；＄(0xFF04) 与 TS 折叠表一致地不含——
+# TS 表未收录 ＄，归一化时落入白名单过滤替换为 _
+_FULLWIDTH_MAP = {chr(f): chr(f - 0xFEE0) for f in range(0xFF01, 0xFF5F)
+                  if f != 0xFF04}
+
+
+def normalize_point_name(raw: str) -> str:
+    """NFC → 全半角折叠 → 白名单过滤 → 收拢/修剪 _ → ASCII 小写 → 960B 截断。
+    空串 = 原名无可提取语义（纯符号/空白）。"""
+    import unicodedata
+    s = unicodedata.normalize("NFC", str(raw or ""))
+    s = "".join(_FULLWIDTH_MAP.get(ch, ch) for ch in s)
+    s = "".join(
+        ch if (unicodedata.category(ch)[0] in ("L", "N") or ch in _POINT_KEY_SYMBOLS)
+        else "_" for ch in s)
+    s = re.sub(r"_+", "_", s).strip("_").lower()
+    if not s:
+        return ""
+    if len(s.encode("utf-8")) > 960:
+        t = ""
+        for ch in s:
+            if len((t + ch).encode("utf-8")) > 960:
+                break
+            t += ch
+        s = t.rstrip("_")
+    return s
+
+
+def is_safe_point_key(s: str) -> bool:
+    """与 normalize 幂等（小写意义下）：safe key 必然等于自身归一化结果的小写形式
+    （组模式编号前缀原样保留大小写，§2.11 A01~A10 → nbA01_）。"""
+    s = str(s or "")
+    return bool(s) and len(s.encode("utf-8")) <= 1024 and normalize_point_name(s) == s.lower()
+
+
+# ── 模型额度探测与自动切换（glm-4.5-air 额度耗尽 → glm-4.6v，不另询问）──
+MODEL_PRIMARY = "glm-4.5-air"
+MODEL_FALLBACK = "glm-4.6v"
+MODEL_NAME = MODEL_PRIMARY
+_QUOTA_PROBED = False
+
+# 智谱配额/欠费类错误标记（1113=欠费停止；429=限流/配额；中英文余额形态）。
+# 1302=并发超限与额度无关，不在此列；运行期仅对 SSE error 事件文本检测，
+# 不扫对话正文（真实点表用例中「1113」可能是合法 IOA 地址，避免误切）。
+QUOTA_RE = re.compile(
+    r"\b(?:429|1113)\b|欠费|余额不足|insufficient balance|arrears", re.IGNORECASE)
+
+
+def _llm_probe(name):
+    """对智谱端点发 1 次最小补全请求，返回 (http_status, body_snippet)。"""
+    body = json.dumps({"model": name,
+                       "messages": [{"role": "user", "content": "ok"}],
+                       "max_tokens": 8, "temperature": 0}).encode()
+    req = urllib.request.Request(
+        "https://open.bigmodel.cn/api/paas/v4/chat/completions", data=body,
+        headers={"Content-Type": "application/json",
+                 "Authorization": "Bearer " + load_api_key()})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return r.status, r.read().decode("utf-8", "replace")[:300]
+    except urllib.error.HTTPError as e:
+        return e.code, e.read().decode("utf-8", "replace")[:300]
+
+
+def _is_quota_error(status, body):
+    return status == 429 or QUOTA_RE.search(body) is not None
+
+
+def model_conf():
+    """agent.json 的 model 配置；进程内首次调用探测主模型额度，耗尽即切备用。"""
+    global MODEL_NAME, _QUOTA_PROBED
+    if not _QUOTA_PROBED and MODEL_NAME == MODEL_PRIMARY:
+        _QUOTA_PROBED = True
+        try:
+            status, body = _llm_probe(MODEL_PRIMARY)
+            if _is_quota_error(status, body):
+                log(f"  ⚠ {MODEL_PRIMARY} 额度耗尽（HTTP {status}: {body[:80]}）"
+                    f"——自动切换 {MODEL_FALLBACK}")
+                MODEL_NAME = MODEL_FALLBACK
+        except Exception as e:
+            log(f"  ⚠ 模型额度探测失败（不切换，按主模型继续）: {e!r}"[:150])
+    return {
+        "provider": "zhipu",
+        "name": MODEL_NAME,
+        "thinking": "disabled",
+        "base_url": "https://open.bigmodel.cn/api/paas/v4",
+        "temperature": 0,
+        # 16384（2026-10-07）：RP 真实点表用例的分块提取单次输出达 10k+ token，
+        # 4096 会截断 JSON（原 4096 为早期小点表用例设定）
+        "max_tokens": 16384,
+        "api_key_env": "ZHIPU_API_KEY",
+    }
+
+
+def _switch_model_and_restart():
+    """LLM 额度耗尽：切 MODEL_NAME、改写现存 agent.json 的 model.name 并重启
+    隔离 agent（state=filesystem，会话与配置现态保留）。已是备用模型时不重复切。"""
+    global MODEL_NAME
+    if MODEL_NAME != MODEL_PRIMARY:
+        return False
+    MODEL_NAME = MODEL_FALLBACK
+    log(f"  ⚠ LLM 额度耗尽——自动切换 {MODEL_PRIMARY} → {MODEL_FALLBACK} 并重启隔离 agent")
+    if AGENT.p:
+        AGENT.stop()
+    subprocess.run(["fuser", "-k", "19720/tcp"], capture_output=True, timeout=5)
+    time.sleep(1)
+    aj = os.path.join(AGENT_DIR, "agent.json")
+    try:
+        with open(aj, encoding="utf-8") as f:
+            conf = json.load(f)
+        conf.setdefault("model", {})["name"] = MODEL_NAME
+        with open(aj, "w", encoding="utf-8") as f:
+            json.dump(conf, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass  # agent.json 缺失/损坏时由 up() 按 MODEL_NAME 重写
+    AGENT.up()
+    return True
+
+
 # ── 隔离 agent 实例 ───────────────────────────────────────
 class Agent:
     def __init__(self):
@@ -254,17 +375,7 @@ class Agent:
         agent_json = {
             "instance_id": "c4_e2e",
             "site": {"name": "华能阿拉善", "abbr": "hnals"},
-            "model": {
-                "provider": "zhipu",
-                "name": "glm-4.5-air",
-                "thinking": "disabled",
-                "base_url": "https://open.bigmodel.cn/api/paas/v4",
-                "temperature": 0,
-                # 16384（2026-10-07）：RP 真实点表用例的分块提取/批量翻译单次输出
-                # 达 10k+ token，4096 会截断 JSON（原 4096 为早期小点表用例设定）
-                "max_tokens": 16384,
-                "api_key_env": "ZHIPU_API_KEY",
-            },
+            "model": model_conf(),
             "server": {"host": "127.0.0.1", "port": 19720, "cors_origin": "*"},
             "mcp_registry": {"path": REGISTRY_DIR},
             "shm_manager": {
@@ -342,41 +453,57 @@ def _post(path, body, timeout=300):
     return urllib.request.urlopen(req, timeout=timeout)
 
 
+def _read_sse(resp):
+    """解析 SSE 响应流，返回 (完整文本, 事件列表, error 事件文本列表)。
+    事件形如 (type, name)：("tool_call","output_access_plan") / ("error","") 等。"""
+    text_parts, events, err_texts = [], [], []
+    buf = []
+    for raw in resp:
+        line = raw.decode("utf-8", "replace").rstrip("\n")
+        if line.startswith("data: "):
+            buf.append(line[6:])
+            continue
+        if line == "" and buf:
+            data = "\n".join(buf)
+            buf = []
+            try:
+                d = json.loads(data)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(d, dict):
+                continue
+            t = d.get("type")
+            if t == "text" and isinstance(d.get("content"), str):
+                text_parts.append(d["content"])
+            elif t in ("tool_call", "tool_result"):
+                events.append((t, str(d.get("name", ""))))
+            elif t == "error":
+                err_texts.append(str(d.get("message", "") or ""))
+                events.append(("error", ""))
+    return "".join(text_parts), events, err_texts
+
+
+def _quota_tripped(err_texts):
+    return any(QUOTA_RE.search(m) for m in err_texts if m)
+
+
 def chat(message, history, conversation_id=None):
     """返回 (完整文本, 事件列表)；事件用于过程健康度断言（README §4）。
-    事件形如 (type, name)：("tool_call","output_access_plan") / ("error","") 等。
     新架构（agent.md §2.8）：方案武装信号为 button_arm 语义事件（不再从工具事件推断——
-    工具副作用 ≠ 语义状态）；本函数对旧工具事件与新语义事件双兼容探测。"""
-    text_parts = []
-    events = []
+    工具副作用 ≠ 语义状态）；本函数对旧工具事件与新语义事件双兼容探测。
+    额度防护：SSE error 命中配额标记 → 切 glm-4.6v 并重启隔离 agent 后重试一次
+    （state=filesystem，会话现态保留）；备用模型仍耗尽则 Fail 停链。"""
     payload = {"message": message, "history": history}
     if conversation_id:
         payload["conversationId"] = conversation_id
     with _post("/api/chat", payload) as resp:
-        buf = []
-        for raw in resp:
-            line = raw.decode("utf-8", "replace").rstrip("\n")
-            if line.startswith("data: "):
-                buf.append(line[6:])
-                continue
-            if line == "" and buf:
-                data = "\n".join(buf)
-                buf = []
-                try:
-                    d = json.loads(data)
-                except json.JSONDecodeError:
-                    continue
-                if not isinstance(d, dict):
-                    continue
-                t = d.get("type")
-                if t == "text" and isinstance(d.get("content"), str):
-                    text_parts.append(d["content"])
-                elif t in ("tool_call", "tool_result"):
-                    events.append((t, str(d.get("name", ""))))
-                elif t == "error":
-                    events.append(("error", ""))
-
-    return "".join(text_parts), events
+        text, events, errs = _read_sse(resp)
+    if _quota_tripped(errs) and _switch_model_and_restart():
+        with _post("/api/chat", payload) as resp:
+            text, events, errs = _read_sse(resp)
+    if _quota_tripped(errs):
+        raise Fail("LLM 额度耗尽（glm-4.5-air / glm-4.6v 均不可用）——停止执行")
+    return text, events
 
 
 def upload_file(conversation_id, file_path, message=None):
@@ -414,32 +541,16 @@ def upload_file(conversation_id, file_path, message=None):
         BASE + "/api/upload", data=body, method="POST",
         headers={"Content-Type": f"multipart/form-data; boundary={boundary}",
                  "Accept": "text/event-stream"})
-    text_parts, events = [], []
     with urllib.request.urlopen(req, timeout=300) as resp:
         server_cid = resp.headers.get("X-Conversation-Id", "")
-        buf = []
-        for raw in resp:
-            line = raw.decode("utf-8", "replace").rstrip("\n")
-            if line.startswith("data: "):
-                buf.append(line[6:])
-                continue
-            if line == "" and buf:
-                data = "\n".join(buf)
-                buf = []
-                try:
-                    d = json.loads(data)
-                except json.JSONDecodeError:
-                    continue
-                if not isinstance(d, dict):
-                    continue
-                t = d.get("type")
-                if t == "text" and isinstance(d.get("content"), str):
-                    text_parts.append(d["content"])
-                elif t in ("tool_call", "tool_result"):
-                    events.append((t, str(d.get("name", ""))))
-                elif t == "error":
-                    events.append(("error", ""))
-    return "".join(text_parts), events, server_cid
+        text, events, errs = _read_sse(resp)
+    if _quota_tripped(errs) and _switch_model_and_restart():
+        with urllib.request.urlopen(req, timeout=300) as resp:
+            server_cid = resp.headers.get("X-Conversation-Id", "")
+            text, events, errs = _read_sse(resp)
+    if _quota_tripped(errs):
+        raise Fail("LLM 额度耗尽（glm-4.5-air / glm-4.6v 均不可用）——停止执行")
+    return text, events, server_cid
 
 
 def state():
@@ -845,14 +956,17 @@ def prereq():
         wait_config(lambda c2: writer_of(c2, 1000) is not None
                     and forward_of(c2, 5000) is not None,
                     desc="1#风机 writer + 转发实例")
-        # 点名规格（agent.md §3.2.1.3b，2026-09-23 裁定）：采集点 name（用户原点名，
-        # 原样中文）+ id（英文标识）双字段落盘；转发点无 name 字段（经 key 解析，零冗余）
+        # 点名规格（agent.md §3.2.1.3b，2026-10-07 翻译退役）：采集点 name（用户原点名，
+        # 原样中文）+ id（点名确定性归一化，可含中文）双字段落盘；转发点无 name 字段
+        #（经 key 解析，零冗余）
         cfg = read_config()
         wpt = points_of(cfg, "c4_asfp2_server", writer_of(cfg, 1000))[1000]
         if wpt.get("name") != "风速":
             raise Fail(f"采集点 name 未落盘或不符: {json.dumps(wpt, ensure_ascii=False)[:150]}")
-        if not re.fullmatch(r"[a-zA-Z][a-zA-Z0-9_]*", str(wpt.get("id", ""))):
-            raise Fail(f"采集点 id 非英文标识（应为点名原文/翻译，非 p_ 生成）: {wpt.get('id')}")
+        if not is_safe_point_key(str(wpt.get("id", ""))):
+            raise Fail(f"采集点 id 非安全点 key（应为点名归一化，非 p_ 生成）: {wpt.get('id')}")
+        if str(wpt.get("id", "")) != normalize_point_name("风速"):
+            raise Fail(f"采集点 id 应为点名「风速」的归一化结果: {wpt.get('id')}")
         fpt = points_of(cfg, "c4_asfp2_client", forward_of(cfg, 5000))[5000]
         if "name" in fpt:
             raise Fail(f"转发点不应含 name 字段（冗余数据）: {json.dumps(fpt, ensure_ascii=False)[:150]}")

@@ -36,6 +36,10 @@ func validateInfluxPoints(points []influxPoint) []infIssue {
 			issues = append(issues, infIssue{Code: "INVALID_TYPE",
 				Message: fmt.Sprintf("点 %s 的 type='%s' 非法（float/int/uint/bool）", is.Key, is.Type),
 				Points:  []string{is.Key}, Field: "type"})
+		case "MEASUREMENT_FORMAT":
+			issues = append(issues, infIssue{Code: "MEASUREMENT_FORMAT",
+				Message: fmt.Sprintf("点 %s 的 measurement='%s' 含非法字符（仅英文字母/数字/下划线/点/连字符，不得中文）", is.Key, is.Measurement),
+				Points:  []string{is.Key}, Field: "measurement"})
 		case "FIELD_EMPTY":
 			issues = append(issues, infIssue{Code: "FIELD_FORMAT",
 				Message: fmt.Sprintf("点 %s 的 field 为空（必填，无默认值、不推导——由点表/用户提供）", is.Key),

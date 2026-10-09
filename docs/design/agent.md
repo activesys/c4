@@ -1698,7 +1698,9 @@ reader key 反解析（执行模块/编排器共 7 处）与 shm 唯一键 `serv
 > 解码配置——如 Modbus 同 uid/fun/addr 配不同 type/swap 即点重复（禁止同一寄存器双类型解码）。
 > 转发端（Reader，如 InfluxDB）无自身点名——按序引用对应采集点点名，不生成、不落盘。
 > **Reader 的业务字段（如 InfluxDB field）同样必须显式提供**（c4_influxdb_client.md §2，
-> 2026-10-01 裁定：必填、无默认值、**不推导**）——与点 id 分属两个独立供给，点 id 改为
+> 2026-10-01 裁定：必填、无默认值、**不推导**；2026-10-09 裁定：点表各标识字段
+> 不得中文——field 仅 `[a-zA-Z_]+`、measurement 仅 `[A-Za-z0-9_.-]+`，「字段名跟
+> 点名对应」类表述不得直接落中文名，Agent 须追问显式 field 名）——与点 id 分属两个独立供给，点 id 改为
 > 中文原名不影响 field；编排器 mirrorAll/expr 路径现存的「从 id 剥前缀派生 field」
 > 违反本条，随本裁定同批修正为「field 缺失即走缺口追问」。
 

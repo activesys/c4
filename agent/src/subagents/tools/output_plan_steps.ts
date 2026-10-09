@@ -16,6 +16,7 @@ import {
     point_duplicate_error,
 } from "../../executor/executor.js";
 import { derive_point_id } from "../../executor/point_rules.js";
+import { point_key_error } from "../../executor/point_key.js";
 import type {
     PointField,
     RegistryEntry,
@@ -307,8 +308,9 @@ export function generate_steps(
                 };
             }
 
-            // 裸 id → 点 key（agent.md §3.2.1.3b，2026-09-23 裁定 + 2026-10-01 前缀修订）：
-            // id 来自提取层翻译或用户合规英文原文——系统不自动生成，格式不符报告用户
+            // 裸 id → 点 key（agent.md §3.2.1.3b，2026-10-07 翻译退役）：
+            // id = 点表原名确定性归一化（系统不自动生成、不翻译）；提取层/上游装配
+            // 已携带的 id（组装配全 key、pointMap 沿用）须为安全 key，格式不符报告用户
             const raw_id = typeof raw["id"] === "string" ? (raw["id"] as string) : "";
             const derived = derive_point_id(
                 raw_id,
@@ -320,12 +322,12 @@ export function generate_steps(
                 return {
                     steps,
                     warnings,
-                    fatal: `设备 "${dev.name}" 的点「${name_raw}」${derived.error}——请向用户提供合规英文点名（字母开头，仅字母/数字/下划线，1K 以内）后重试`,
+                    fatal: `设备 "${dev.name}" 的点「${name_raw}」${derived.error}——请向用户提供有效点名（中英文均可，系统按点名归一化为点 id）后重试`,
                 };
             }
             let bare_id = derived.id;
             // 幂等防重（P0 修复）：方案层装配可能已携带完整 key（含 pointMap 沿用的
-            // 既有 key）——已带本设备前缀的 id 先剥前缀再拼接，杜绝 wt1_wt1_windspeed
+            // 既有 key）——已带本设备前缀的 id 先剥前缀再拼接，杜绝 wt1_wt1_风速
             // 双重前缀（落盘 key 与用户确认的方案不一致）
             if (bare_id.startsWith(`${prefix}_`)) {
                 bare_id = bare_id.slice(prefix.length + 1);
@@ -334,15 +336,15 @@ export function generate_steps(
                 return {
                     steps,
                     warnings,
-                    fatal: `设备 "${dev.name}" 存在点的英文标识为空前缀（"${String(raw["id"])}"）——请提供有效的英文标识`,
+                    fatal: `设备 "${dev.name}" 存在点的点 id 为空前缀（"${String(raw["id"])}"）——请提供有效点名`,
                 };
             }
-            const id_err = identifier_error(bare_id, "point.id");
+            const id_err = point_key_error(bare_id, "point.id");
             if (id_err !== null) {
                 return {
                     steps,
                     warnings,
-                    fatal: `设备 "${dev.name}" 的点「${name_raw}」的英文标识 "${bare_id}" ${id_err}——请修正后重试，系统不自动替换`,
+                    fatal: `设备 "${dev.name}" 的点「${name_raw}」的点 id "${bare_id}" ${id_err}——请修正后重试，系统不自动替换`,
                 };
             }
             const key = `${prefix}_${bare_id}`;
@@ -350,7 +352,7 @@ export function generate_steps(
                 return {
                     steps,
                     warnings,
-                    fatal: `设备 "${dev.name}" 的点 key "${key}" 重复（同一设备内部真重名）——请为重复的点名提供不同的英文标识`,
+                    fatal: `设备 "${dev.name}" 的点 key "${key}" 重复（同一设备内部真重名）——同名点是否为不同物理点需设备厂家确认，请修正点名后重传`,
                 };
             }
             seen_keys.add(key);
@@ -1044,9 +1046,9 @@ export function createOutputPlanStepsTool(
                     }
                     for (const p of c.points ?? []) {
                         const rec = p as unknown as Record<string, unknown>;
-                        // 点名归一（agent.md §3.2.1.3b，2026-09-23 裁定）：change 点缺
-                        // id/key 时由点名推导 id——合规英文点名原样用作 id，name 原样保留
-        // （name+id 双字段落盘）；中文/非规范点名由提取层给 id，系统不自动生成
+                        // 点名归一（agent.md §3.2.1.3b，2026-10-07 翻译退役）：change 点缺
+                        // id/key 时由点名确定性归一化推导 id，name 原样保留
+                        //（name+id 双字段落盘）；系统不翻译、不自动生成业务点名
                         const has_id = typeof rec["id"] === "string" && (rec["id"] as string).length > 0;
                         const has_key = typeof rec["key"] === "string" && (rec["key"] as string).length > 0;
                         const name_raw =
@@ -1058,26 +1060,64 @@ export function createOutputPlanStepsTool(
                                 IDENTIFIER_RE,
                                 MAX_IDENTIFIER_LENGTH,
                             );
-                            if (
-                                derived.error !== null ||
-                                identifier_error(derived.id, "point.id") !== null
-                            ) {
+                            if (derived.error !== null) {
                                 return JSON.stringify({
                                     success: false,
                                     error:
                                         `变更点「${name_raw || JSON.stringify(rec)}」无法确定 point.id：` +
-                                        (derived.error ?? "英文标识格式非法") +
-                                        "——请向用户确认合规英文点名后重试，系统不自动生成",
+                                        (derived.error ?? "") +
+                                        "——请向用户确认有效点名后重试，系统不自动生成",
                                 });
                             }
                             rec["id"] = derived.id;
                         }
                         const pid = rec["id"];
                         if (typeof pid === "string" && pid.length > 0) {
-                            const err = identifier_error(pid, "point.id");
+                            const err = point_key_error(pid, "point.id");
                             if (err) {
                                 return JSON.stringify({ success: false, error: err });
                             }
+                        }
+                    }
+                }
+                // influxdb 点表标识字段字符集（c4_influxdb_client.md §2，2026-10-09
+                // 用户裁定：点表各标识字段不得中文）——非法 measurement 按引用 key 的
+                // 设备前缀确定性修正（「measurement按设备名」形态），field 非法即拒绝
+                //（指引 LLM 向用户逐点询问显式 field 名，不翻译不推导）
+                for (const c of input.changes) {
+                    if (String(c.service_type ?? "") !== "c4_influxdb_client") continue;
+                    for (const p of c.points ?? []) {
+                        const rec = p as unknown as Record<string, unknown>;
+                        const label =
+                            String(rec["field"] ?? rec["key"] ?? rec["addr"] ?? "?").slice(0, 40);
+                        const meas = String(rec["measurement"] ?? "");
+                        if (meas !== "" && !/^[A-Za-z0-9_.-]+$/.test(meas)) {
+                            const refKey = String(rec["key"] ?? rec["id"] ?? "");
+                            const bare = refKey.includes(".") ? refKey.split(".").pop()! : refKey;
+                            const pref = bare.includes("_") ? bare.slice(0, bare.indexOf("_")) : "";
+                            if (pref !== "" && /^[A-Za-z0-9_.-]+$/.test(pref)) {
+                                rec["measurement"] = pref;
+                            }
+                        }
+                        const m2 = String(rec["measurement"] ?? "");
+                        if (m2 === "" || !/^[A-Za-z0-9_.-]+$/.test(m2)) {
+                            return JSON.stringify({
+                                success: false,
+                                error:
+                                    `变更点「${label}」的 measurement "${m2}" 含非法字符` +
+                                    `（仅英文字母/数字/下划线/点/连字符，不得中文，2026-10-09 裁定）` +
+                                    `——请向用户提供合法 measurement 后重试，系统不自动生成`,
+                            });
+                        }
+                        const fld = String(rec["field"] ?? "");
+                        if (fld === "" || !/^[A-Za-z_]+$/.test(fld)) {
+                            return JSON.stringify({
+                                success: false,
+                                error:
+                                    `变更点「${label}」的 field "${fld}" 仅允许英文字母与下划线` +
+                                    `（不得中文，不推导、不翻译）——请向用户逐点询问显式 field 名` +
+                                    `（按点表行序对应）后重新提交`,
+                            });
                         }
                     }
                 }

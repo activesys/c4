@@ -78,11 +78,13 @@ export function normalize_point_name(raw: string): string {
 }
 
 /** 已成形 key 的安全校验（防御外部来源：变更流手输 id、历史配置）——
- *  与 normalize 幂等：safe key 必然等于自身归一化结果 */
+ *  与 normalize 幂等（小写意义下）：safe key 必然等于自身归一化结果的小写形式。
+ *  比较放宽到小写是组模式编号前缀的需要（§2.11：A01~A10 编号原样进前缀，
+ *  nbA01_风速 含大写——前缀大小写属注册表权威，不参与归一化折叠）。 */
 export function is_safe_point_key(id: string): boolean {
     const s = String(id ?? "");
     return s !== "" && key_byte_length(s) <= MAX_POINT_KEY_BYTES &&
-        normalize_point_name(s) === s;
+        normalize_point_name(s) === s.toLowerCase();
 }
 
 /** 校验失败的用户可读原因（null = 合法） */
@@ -97,7 +99,7 @@ export function point_key_error(id: string, label: string): string | null {
     if (s.includes(".")) {
         return `${label} "${s}" 含分隔符「.」——点 key 内不允许点号，请改用其他字符`;
     }
-    if (normalize_point_name(s) !== s) {
+    if (normalize_point_name(s) !== s.toLowerCase()) {
         return `${label} "${s}" 含不允许的字符（空白/引号/逗号/等号/控制字符或未折叠全角），请修正点名`;
     }
     return null;

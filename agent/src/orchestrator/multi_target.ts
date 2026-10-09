@@ -26,7 +26,8 @@ export interface TargetDecl {
     pointsMode: "addrs" | "mirrorAll" | "expr" | null;
     exprText: string | null; // 点集表达式原文（pointsMode=expr）
     mirrorDevice: string | null; // pointsMode=mirrorAll 时引用的设备名
-    fieldFromSource: boolean; // 「字段名跟点名对应」→ field 由源点 id 派生
+    fieldFromSource: boolean; // 「字段名跟点名对应」类表述（field 不可自动落，须用户显式给出，2026-10-09 裁定）
+    fieldList: string[] | null; // 用户显式给出的 field 清单（按点表行序，仅 [A-Za-z_]+）
     deviceRefs: string[];
     raw: string;
 }
@@ -210,6 +211,7 @@ export function split_target_decls(semantic: string): TargetDecl[] | null {
             exprText,
             mirrorDevice,
             fieldFromSource,
+            fieldList: null,
             deviceRefs: refs,
             raw: clause,
         });

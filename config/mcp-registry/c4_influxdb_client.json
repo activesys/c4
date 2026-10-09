@@ -20,12 +20,12 @@
       {
         "name": "measurement",
         "type": "string",
-        "description": "measurement 名（表名）"
+        "description": "measurement 名（表名；仅英文字母/数字/下划线/点/连字符，不得中文）"
       },
       {
         "name": "field",
         "type": "string",
-        "description": "field 名（字段名）"
+        "description": "field 名（字段名；仅英文字母与下划线，不得中文，必填不推导）"
       },
       {
         "name": "type",
@@ -116,11 +116,11 @@
     "point_field_hints": {
       "measurement": {
         "description": "measurement 名（表名），相当于关系数据库的表名，通常按设备或数据类别命名",
-        "extraction": "可由场站缩写确定性推导（阶段 1 已确认数据）；用户明确给出时以用户为准；推导值在方案展示中标注供确认"
+        "extraction": "仅允许英文字母/数字/下划线/点/连字符，不得中文（2026-10-09 裁定）；可由场站缩写确定性推导（阶段 1 已确认数据）；用户明确给出时以用户为准（非法字符集的值不接受）；推导值在方案展示中标注供确认"
       },
       "field": {
         "description": "field 名（字段名）",
-        "extraction": "常见表述：按点名作为字段名"
+        "extraction": "仅允许英文字母与下划线（[a-zA-Z_]+），不得中文、不得含数字/点/连字符（2026-10-09 裁定）；必填、不推导、不翻译——「字段名跟点名对应」「按点名作为字段名」类表述不能直接采用中文名，必须向用户逐点询问显式 field 名（按点表行序对应）"
       },
       "type": {
         "description": "数据类型",

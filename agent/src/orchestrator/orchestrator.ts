@@ -27,7 +27,7 @@ import {
     type AbbrEntry,
     type AbbrRegistry,
 } from "../registry/abbr_registry.js";
-import { is_safe_point_key, normalize_point_name } from "../executor/point_key.js";
+import { is_safe_point_key, normalize_point_name, point_key_error } from "../executor/point_key.js";
 import { validate_point_table, derive_point_id } from "../executor/point_rules.js";
 import { write_site_config } from "../site_config.js";
 import {
@@ -49,7 +49,6 @@ import {
     IDENTIFIER_RE,
     LISTENER_SERVICES,
     MAX_IDENTIFIER_LENGTH,
-    identifier_error,
     merge_config_from_steps,
     run_runtime_stop_start,
     rollback_config_change,
@@ -758,6 +757,87 @@ export interface OrchestratorConfig {
 /** 入库 field 派生存量修正（2026-10-08）：field 必填、不推导——统一拒装话术 */
 const FIELD_ISSUE =
     'field 必填、不推导（2026-10-01 裁定）——本目标的入库点表未逐点提供 field，无法装配：请提供逐点含 field 的入库点表后重试。';
+
+/** influxdb 点表标识字段字符集（c4_influxdb_client.md §2，2026-10-09 用户裁定：
+ *  点表各标识字段不得中文）——field/tag key 仅 [A-Za-z_]；measurement 另放行
+ *  数字/点/连字符。提取层产出的非法值（如按「跟点名对应」规则映射出的中文名
+ *  field）一律剥除——剥除后按「缺字段」缺口追问，由用户显式提供（field 必填、
+ *  不推导、不翻译；measurement 缺失走确定性推导）；既有草稿同序位的合法值优先
+ *  保留（历史轮重提取不得清掉已确认映射）。 */
+const INFLUX_FIELD_RE = /^[A-Za-z_]+$/;
+const INFLUX_MEAS_RE = /^[A-Za-z0-9_.-]+$/;
+/** 从文本提取括号内 field 清单 token（全部命中 [A-Za-z_]+ 才返回，否则 null）——
+ *  单目标落 field 与 mt 目标绑定共用（宁可放过不可错绑）。 */
+function parse_field_list_tokens(text: string): string[] | null {
+    const m = text.match(/[（(]([^（）()]+)[）)]/);
+    if (!m) return null;
+    const tokens = m[1]!.split(/[、，,;；\s]+/).map((t) => t.trim()).filter((t) => t !== "");
+    if (tokens.length === 0 || !tokens.every((t) => INFLUX_FIELD_RE.test(t))) return null;
+    return tokens;
+}
+/** influxdb field 显式清单的确定性绑定（2026-10-09）：「（a、b、c…）」形态按点表
+ *  行序逐点落 field——LLM 提取对纯清单文本无法映射（无地址行），「缺 field」追问
+ *  由此闭合。约束：括号内 token 数与点数全等，否则不绑。显式重述总是采纳。 */
+function bind_influx_field_list(text: string, points: Array<Record<string, unknown>>): boolean {
+    const tokens = parse_field_list_tokens(text);
+    if (tokens === null || tokens.length !== points.length) return false;
+    let changed = false;
+    for (let i = 0; i < points.length; i++) {
+        if (String(points[i]!["field"] ?? "") !== tokens[i]) {
+            points[i]!["field"] = tokens[i];
+            changed = true;
+        }
+    }
+    return changed;
+}
+function sanitize_influx_fields(
+    pts: Array<Record<string, unknown>>,
+    prev: Array<Record<string, unknown>> | null,
+    protocol: string | null,
+): Array<Record<string, unknown>> {
+    if (normalize_protocol(protocol ?? "") !== "influxdb") return pts;
+    return pts.map((p, i) => {
+        let out = p;
+        const f = String(out["field"] ?? "");
+        if (f === "" || !INFLUX_FIELD_RE.test(f)) {
+            const kept = String((prev ?? [])[i]?.["field"] ?? "");
+            if (kept !== "" && INFLUX_FIELD_RE.test(kept)) {
+                out = { ...out, field: kept };
+            } else {
+                const { field: _dropped, ...rest } = out;
+                out = rest;
+            }
+        }
+        const m = String(out["measurement"] ?? "");
+        if (m !== "" && !INFLUX_MEAS_RE.test(m)) {
+            const kept = String((prev ?? [])[i]?.["measurement"] ?? "");
+            if (kept !== "" && INFLUX_MEAS_RE.test(kept)) {
+                out = { ...out, measurement: kept };
+            } else {
+                const { measurement: _dropped, ...rest } = out;
+                out = rest;
+            }
+        }
+        const tags = out["tags"];
+        if (tags !== null && typeof tags === "object" && !Array.isArray(tags)) {
+            const clean: Record<string, unknown> = {};
+            let dropped = false;
+            for (const [k, v] of Object.entries(tags as Record<string, unknown>)) {
+                if (INFLUX_FIELD_RE.test(k)) clean[k] = v;
+                else dropped = true;
+            }
+            if (dropped) {
+                if (Object.keys(clean).length === 0) {
+                    const { tags: _dropped, ...rest } = out;
+                    out = rest;
+                } else {
+                    out = { ...out, tags: clean };
+                }
+            }
+        }
+        return out;
+    });
+}
 
 export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
     // 会话草稿按 conversationId 隔离（web.md §3.1.2：conversationId 是会话主键）——
@@ -1914,14 +1994,48 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                             state.recv.resetInfo = { ...merged.reset, sig: blockSig };
                             state.recv.excluded = merged.excluded;
                             progress = true;
-                        } else if (!incomplete(merged.points)) {
-                            state.recv.points = merged.points;
-                            state.recv.excluded = merged.excluded;
-                            state.recv.declared =
-                                typeof r?.["declared_count"] === "number"
-                                    ? (r?.["declared_count"] as number)
-                                    : null;
-                            progress = true;
+                        } else {
+                            // id 赋配（2026-10-07 翻译退役）：文字路径与文件管道同规——
+                            // id = 点名确定性归一化，LLM 提取不再产出 id；业务撞名整表
+                            // 拒收，空名/纯符号汇总追问（2026-10-08 空名裁定）
+                            const pid = assign_point_ids(merged.points, {
+                                existing: new Set(
+                                    (state.recv.points ?? []).map((q) =>
+                                        String(q["id"] ?? "").toLowerCase(),
+                                    ),
+                                ),
+                                placeholderNames: cfg.pointId?.placeholder_names ?? DEFAULT_PLACEHOLDER_NAMES,
+                                placeholderBase: cfg.pointId?.placeholder_base ?? DEFAULT_PLACEHOLDER_BASE,
+                            });
+                            if (pid.conflicts.length > 0) {
+                                const list = pid.conflicts
+                                    .slice(0, 5)
+                                    .map((c) => `「${c.name}」×${c.addrs.length}（addr ${c.addrs.filter(Boolean).join("/") || "见点表"}）`)
+                                    .join("；");
+                                state.recv.extractError =
+                                    `业务点名必须唯一：${pid.conflicts.length} 组同名点（${list}${pid.conflicts.length > 5 ? " 等" : ""}）` +
+                                    `——同名点是否为不同物理点需设备厂家确认。请按装置拆分文件分别接入，或修正点名后重传；回复「取消」结束本次接入。`;
+                                progress = true;
+                            } else if (pid.failed > 0 || incomplete(merged.points)) {
+                                const bad = merged.points.filter(
+                                    (p) =>
+                                        String(p["name"] ?? "").trim() === "" ||
+                                        String(p["id"] ?? "").trim() === "",
+                                );
+                                state.recv.extractError = `${bad.length} 个点缺点名或名字无效（纯符号无法构成标识），如：${bad
+                                    .slice(0, 3)
+                                    .map((p) => `addr ${p["addr"] ?? "?"}`)
+                                    .join("、")}。请提供这些点的点名（可汇总给出，按行序对应），或回复「取消」结束本次接入。`;
+                                progress = true;
+                            } else {
+                                state.recv.points = merged.points;
+                                state.recv.excluded = merged.excluded;
+                                state.recv.declared =
+                                    typeof r?.["declared_count"] === "number"
+                                        ? (r?.["declared_count"] as number)
+                                        : null;
+                                progress = true;
+                            }
                         }
                     }
                 }
@@ -1941,6 +2055,16 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             // 累积文本——当前消息优先（显式重述总是采纳），无命中再扫历史转发句，
             // 避免把接收侧点表表述误认成转发地址
             const fwdScopedNow = fwdScoped ? `${semantic}\n${fwdScoped}` : semantic;
+            // influxdb field 显式清单确定性绑定先于 LLM 提取（2026-10-09）：
+            // 「（a、b、c…）」按行序落 field；命中后本回合跳过清单文本的 LLM 重提取
+            //（无地址行的纯清单会产出缺 addr 的点集，覆盖既有 addr 草稿）
+            let influxFieldsBound = false;
+            if (fwdProtocol === "influxdb" && state.fwd.points) {
+                influxFieldsBound = bind_influx_field_list(fwdScopedNow || semantic, state.fwd.points);
+                if (influxFieldsBound) {
+                    progress = true;
+                }
+            }
             // 转发点表 LLM 提取（首提/重提共用）：输入只能是用户对转发侧的显式表述
             //（文本重述或文件通道），空结果不落槽位
             const extract_fwd_points = async (input: string): Promise<void> => {
@@ -1973,7 +2097,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                         ? (r["points"] as Array<Record<string, unknown>>)
                         : null;
                 if (pts && pts.length > 0 && !same_points_deep(state.fwd.points, pts)) {
-                    state.fwd.points = pts;
+                    state.fwd.points = sanitize_influx_fields(pts, state.fwd.points, state.fwd.protocol);
                     progress = true;
                 }
             };
@@ -2032,8 +2156,14 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                         );
                     }
                 }
-            } else {
+            } else if (!influxFieldsBound) {
                 await extract_fwd_points(semantic);
+            }
+            // 首提回落补绑：提取/确定性回落完成后草稿已成形，清单形态再绑一次——
+            // LLM 提取对纯清单文本不稳定时的确定性兜底（已绑值相同则为 no-op）
+            if (fwdProtocol === "influxdb" && state.fwd.points &&
+                bind_influx_field_list(fwdScopedNow || semantic, state.fwd.points)) {
+                progress = true;
             }
         }
 
@@ -2514,6 +2644,22 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                     });
                 }
             }
+            // 入库 field 显式清单缺口（2026-10-09 裁定：标识字段不得中文、field 不推导
+            // 不翻译——「字段名跟点名对应」不能直接落中文名，须用户按行序显式给出）
+            for (const [i, t] of ts.entries()) {
+                if (
+                    t.name &&
+                    t.protocol === "influxdb" &&
+                    t.pointsMode !== null &&
+                    t.fieldList === null
+                ) {
+                    gaps.push({
+                        key: `t${i}.fields`,
+                        text: `「${t.name}」的入库 field 清单（仅英文字母与下划线）`,
+                        ask: `「${t.name}」的入库 field 仅允许英文字母与下划线（不得中文，不推导、不翻译）——请按点表行序逐点给出，如：字段名跟点名对应（windspeed、power、…）。`,
+                    });
+                }
+            }
             for (const [i, t] of ts.entries()) {
                 if (t.name && t.protocol) {
                     recap.push(
@@ -2900,6 +3046,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                           exprText: null,
                           mirrorDevice: null,
                           fieldFromSource: false,
+                          fieldList: null,
                           deviceRefs: state.recv.deviceName ? [state.recv.deviceName] : [],
                           raw: "",
                       },
@@ -2941,17 +3088,37 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 }));
             } else if (t.pointsMode === "mirrorAll") {
                 if (t.protocol === "influxdb") {
-                    return { plan: {}, display: "", issue: `「${t.name}」的入库点表未逐点提供 field——${FIELD_ISSUE}` };
-                }
-                const tu = typeUniformOf(t);
-                for (const { p } of flat) {
-                    const bare = p.id.slice(p.id.indexOf("_") + 1);
-                    ftPoints.push({
-                        measurement: String(t.conn["measurement"] ?? state.site?.abbr ?? "data"),
-                        field: bare,
-                        type: tu,
-                        _pairId: p.id,
+                    // field 显式清单（2026-10-09 裁定）：t{i}.fields 缺口绑定后按行序装配；
+                    // measurement「按设备名」落设备前缀（ASCII，不得中文）
+                    if (t.fieldList === null) {
+                        return { plan: {}, display: "", issue: `「${t.name}」的入库点表未逐点提供 field——${FIELD_ISSUE}` };
+                    }
+                    if (t.fieldList.length !== flat.length) {
+                        return { plan: {}, display: "", issue: `「${t.name}」的 field 清单数量（${t.fieldList.length}）与入库点数（${flat.length}）不一致——请按点表行序重新提供。` };
+                    }
+                    const byDevName = /按设备名|按设备命名/.test(t.raw);
+                    flat.forEach(({ p }, i) => {
+                        const pref = p.id.includes("_") ? p.id.slice(0, p.id.indexOf("_")) : "";
+                        ftPoints.push({
+                            measurement: byDevName && pref !== ""
+                                ? pref
+                                : String(t.conn["measurement"] ?? state.site?.abbr ?? "data"),
+                            field: t.fieldList![i],
+                            type: typeUniformOf(t),
+                            _pairId: p.id,
+                        });
                     });
+                } else {
+                    const tu = typeUniformOf(t);
+                    for (const { p } of flat) {
+                        const bare = p.id.slice(p.id.indexOf("_") + 1);
+                        ftPoints.push({
+                            measurement: String(t.conn["measurement"] ?? state.site?.abbr ?? "data"),
+                            field: bare,
+                            type: tu,
+                            _pairId: p.id,
+                        });
+                    }
                 }
             } else if (t.pointsMode === "expr" && t.exprText) {
                 const exprDevs = devBuilds.map((d) => ({
@@ -2967,10 +3134,30 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                     };
                 }
                 if (t.protocol === "influxdb") {
-                    return { plan: {}, display: "", issue: `「${t.name}」的入库点表未逐点提供 field——${FIELD_ISSUE}` };
-                }
-                for (const rp of r.points) {
-                    ftPoints.push({ addr: rp.addr, _pairId: rp.id });
+                    if (t.fieldList === null) {
+                        return { plan: {}, display: "", issue: `「${t.name}」的入库点表未逐点提供 field——${FIELD_ISSUE}` };
+                    }
+                    if (t.fieldList.length !== r.points.length) {
+                        return { plan: {}, display: "", issue: `「${t.name}」的 field 清单数量（${t.fieldList.length}）与入库点数（${r.points.length}）不一致——请按点表行序重新提供。` };
+                    }
+                    const byDevName = /按设备名|按设备命名/.test(t.raw);
+                    r.points.forEach((rp, i) => {
+                        const rid = String(rp.id ?? "");
+                        const pref = rid.includes("_") ? rid.slice(0, rid.indexOf("_")) : "";
+                        ftPoints.push({
+                            measurement: byDevName && pref !== ""
+                                ? pref
+                                : String(t.conn["measurement"] ?? state.site?.abbr ?? "data"),
+                            field: t.fieldList![i],
+                            type: typeUniformOf(t),
+                            addr: rp.addr,
+                            _pairId: rp.id,
+                        });
+                    });
+                } else {
+                    for (const rp of r.points) {
+                        ftPoints.push({ addr: rp.addr, _pairId: rp.id });
+                    }
                 }
             } else {
                 continue; // 点表缺口层已拦
@@ -3325,14 +3512,14 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             const rawId = typeof p["id"] === "string" ? p["id"].trim() : "";
             const nameRaw = typeof p["name"] === "string" ? p["name"].trim() : "";
             const derived = derive_point_id(rawId, nameRaw, IDENTIFIER_RE, MAX_IDENTIFIER_LENGTH);
-            const idErr = derived.error ?? identifier_error(derived.id, "point.id");
+            const idErr = derived.error ?? point_key_error(derived.id, "point.id");
             if (idErr !== null) {
                 return {
                     plan: {},
                     display: "",
                     issue:
                         `点「${nameRaw || String(p["addr"] ?? "?")}」${idErr}` +
-                        `——请提供合规英文标识（字母开头，仅字母/数字/下划线）后重试。`,
+                        `——请提供有效点名（系统按点名归一化为点 id，不自动生成）后重试。`,
                 };
             }
             const mapped = reused?.pointMap[nameRaw];
@@ -3504,15 +3691,36 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 mtPts = t.points.map((p, i) => ({ addr: Number(p["addr"]), _pairId: flat[i].id }));
             } else if (t.pointsMode === "mirrorAll") {
                 if (t.protocol === "influxdb") {
-                    return { plan: {}, display: "", issue: `「${t.name}」的入库点表未逐点提供 field——${FIELD_ISSUE}` };
-                }
-                for (const fp of flat) {
-                    mtPts.push({
-                        measurement: String(t.conn["measurement"] ?? state.site?.abbr ?? "data"),
-                        field: fp.id.slice(fp.id.indexOf("_") + 1),
-                        type: typeUniform,
-                        _pairId: fp.id,
+                    // field 显式清单（2026-10-09 裁定：field 不得中文、不推导不翻译，
+                    // 「跟点名对应」经 t{i}.fields 缺口追问后确定性绑定）；
+                    // measurement「按设备名」落设备前缀（ASCII，不得中文，方案展示供确认）
+                    if (t.fieldList === null) {
+                        return { plan: {}, display: "", issue: `「${t.name}」的入库点表未逐点提供 field——${FIELD_ISSUE}` };
+                    }
+                    if (t.fieldList.length !== flat.length) {
+                        return { plan: {}, display: "", issue: `「${t.name}」的 field 清单数量（${t.fieldList.length}）与入库点数（${flat.length}）不一致——请按点表行序重新提供。` };
+                    }
+                    const byDevName = /按设备名|按设备命名/.test(t.raw);
+                    flat.forEach((fp, i) => {
+                        const pref = fp.id.includes("_") ? fp.id.slice(0, fp.id.indexOf("_")) : "";
+                        mtPts.push({
+                            measurement: byDevName && pref !== ""
+                                ? pref
+                                : String(t.conn["measurement"] ?? state.site?.abbr ?? "data"),
+                            field: t.fieldList![i],
+                            type: typeUniform,
+                            _pairId: fp.id,
+                        });
                     });
+                } else {
+                    for (const fp of flat) {
+                        mtPts.push({
+                            measurement: String(t.conn["measurement"] ?? state.site?.abbr ?? "data"),
+                            field: fp.id.slice(fp.id.indexOf("_") + 1),
+                            type: typeUniform,
+                            _pairId: fp.id,
+                        });
+                    }
                 }
             } else if (t.pointsMode === "expr" && t.exprText) {
                 const r = parse_point_set_expr(
@@ -3530,10 +3738,31 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                     return { plan: {}, display: "", issue: `「${t.name}」的点集表达式无法解析：${r.error ?? "结果为空"}` };
                 }
                 if (t.protocol === "influxdb") {
-                    return { plan: {}, display: "", issue: `「${t.name}」的入库点表未逐点提供 field——${FIELD_ISSUE}` };
-                }
-                for (const rp of r.points) {
-                    mtPts.push({ addr: rp.addr, _pairId: rp.id });
+                    // expr 分支同 mirrorAll：field 显式清单 + 「按设备名」→ 设备前缀
+                    if (t.fieldList === null) {
+                        return { plan: {}, display: "", issue: `「${t.name}」的入库点表未逐点提供 field——${FIELD_ISSUE}` };
+                    }
+                    if (t.fieldList.length !== r.points.length) {
+                        return { plan: {}, display: "", issue: `「${t.name}」的 field 清单数量（${t.fieldList.length}）与入库点数（${r.points.length}）不一致——请按点表行序重新提供。` };
+                    }
+                    const byDevName = /按设备名|按设备命名/.test(t.raw);
+                    r.points.forEach((rp, i) => {
+                        const rid = String(rp.id ?? "");
+                        const pref = rid.includes("_") ? rid.slice(0, rid.indexOf("_")) : "";
+                        mtPts.push({
+                            measurement: byDevName && pref !== ""
+                                ? pref
+                                : String(t.conn["measurement"] ?? state.site?.abbr ?? "data"),
+                            field: t.fieldList![i],
+                            type: typeUniform,
+                            addr: rp.addr,
+                            _pairId: rp.id,
+                        });
+                    });
+                } else {
+                    for (const rp of r.points) {
+                        mtPts.push({ addr: rp.addr, _pairId: rp.id });
+                    }
                 }
             } else {
                 continue;
@@ -4559,7 +4788,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                             plan: {},
                             display: "",
                             registryWrites: { upserts: [], deletes: [], pointMapDrops: [], channelHighWatermark: 0 },
-                            issue: `设备组「${head}」的点「${String(tp["name"] ?? "?")}」缺少英文标识（字母开头，仅字母/数字/下划线）——请补充后重试。`,
+                            issue: `设备组「${head}」的点「${String(tp["name"] ?? "?")}」点名缺失或为纯符号（无法构成标识）——请补充点名后重试。`,
                         };
                     }
                     let bare = derived.id;
@@ -4752,8 +4981,16 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 lines.push("| 模板地址 | 点名 | 点 key 后缀 |");
                 lines.push("| --- | --- | --- |");
                 for (const tp of tps) {
+                    // 后缀 = 点名归一化（2026-10-07 翻译退役：提取层不再产出 id 字段，
+                    // 落盘后缀由 assemble 的 derive_point_id 从点名导出，展示同源）
+                    const bare = derive_point_id(
+                        typeof tp["id"] === "string" ? tp["id"] : "",
+                        String(tp["name"] ?? ""),
+                        IDENTIFIER_RE,
+                        MAX_IDENTIFIER_LENGTH,
+                    );
                     lines.push(
-                        `| ${md_cell(tp["addr"])} | ${md_cell(tp["name"] ?? "（未命名）")} | \`${md_cell(tp["id"] ?? "")}\` |`,
+                        `| ${md_cell(tp["addr"])} | ${md_cell(tp["name"] ?? "（未命名）")} | \`${md_cell(bare.id)}\` |`,
                     );
                 }
             }
@@ -5613,6 +5850,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                               exprText: null,
                               mirrorDevice: null,
                               fieldFromSource: false,
+                              fieldList: null,
                               deviceRefs: [],
                               raw: semantic,
                           }
@@ -5912,11 +6150,45 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                                         ask: true,
                                     };
                                 }
-                                return {
-                                    steps: [],
-                                    display: `入库点表未逐点提供 field——${FIELD_ISSUE}`,
-                                    ask: true,
-                                };
+                                // field 显式清单（2026-10-09 裁定：不得中文、不推导、
+                                // 不翻译）——按点表行序绑定；无清单/数量不符 → 可重入
+                                // 追问（semantic 为累积文本，应答后在此闭合）
+                                const fieldTokens = parse_field_list_tokens(semantic);
+                                if (fieldTokens === null || fieldTokens.length !== r.points.length) {
+                                    return {
+                                        steps: [],
+                                        display: `「${draft.name}」的入库 field 仅允许英文字母与下划线（不得中文，不推导、不翻译）——请按点表行序逐点给出 ${r.points.length} 个 field 名，如：字段名跟点名对应（windspeed、power、…）。`,
+                                        ask: true,
+                                    };
+                                }
+                                const byDevName = /按设备名|按设备命名/.test(semantic);
+                                const typeM = semantic.match(/类型统一\s*([a-zA-Z]+)/i);
+                                const hostOf = new Map<string, { host: string; name: string }>();
+                                for (const d of devices as Array<Record<string, unknown>>) {
+                                    for (const q of ((d["points"] ?? []) as Array<Record<string, unknown>>)) {
+                                        hostOf.set(String(q["id"] ?? ""), {
+                                            host: String(d["host"] ?? ""),
+                                            name: String(d["name"] ?? ""),
+                                        });
+                                    }
+                                }
+                                const usedDevs = new Set<string>();
+                                for (const [i, rp] of r.points.entries()) {
+                                    const rid = String(rp.id ?? "");
+                                    const pref = rid.includes("_") ? rid.slice(0, rid.indexOf("_")) : "";
+                                    const srcDev = hostOf.get(rid);
+                                    if (srcDev !== undefined) usedDevs.add(srcDev.name);
+                                    newPts.push({
+                                        measurement: byDevName && pref !== ""
+                                            ? pref
+                                            : String(draft.conn["measurement"] ?? state.site?.abbr ?? "data"),
+                                        field: fieldTokens[i],
+                                        type: typeM ? typeM[1]!.toLowerCase() : "float",
+                                        key: `${srcDev?.host ?? ""}.${rid}`,
+                                        addr: rp.addr,
+                                    });
+                                }
+                                deviceRefs.push(...usedDevs);
                             }
                         } else {
                             // asfp2 新目标：全部点按序（或点集表达式）
@@ -6586,38 +6858,43 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
     } | null {
         const ap = state.changeAddPoints ?? [];
         if (ap.length === 0) return null;
-        // ① 点名 / 英文标识（agent.md §3.2.1.3b：不自动生成，逐项问齐）
+        // ① 点名 → 点 id（agent.md §3.2.1.3b，2026-10-07 翻译退役：id = 点名
+        // 确定性归一化，不再询问英文标识；点名缺失/纯符号追问，不自动生成。
+        // 提取层/应答绑定已携带的 id 须为安全 key——用户显式原文，非法即追问）
         for (const p of ap) {
             const nm = String(p["name"] ?? "").trim();
-            let id = String(p["id"] ?? "").trim();
-            // 点名为合规英文标识 → 原文即 id（用户原文提供，非系统生成）
-            if (id === "" && nm !== "" && IDENTIFIER_RE.test(nm)) id = nm;
             if (nm === "") {
                 state.pendingGap = "change.name";
                 return {
                     steps: [],
                     display:
-                        "请提供新增点的点名（中文名即可；英文标识确认点名后另行提供——系统不自动生成）。",
+                        "请提供新增点的点名（中文名即可；系统不自动生成点名）。",
                     ask: true,
                 };
             }
-            if (id === "") {
-                state.pendingGap = "change.id";
+            const rawId = String(p["id"] ?? "").trim();
+            if (rawId !== "") {
+                const err = point_key_error(rawId, "point.id");
+                if (err) {
+                    state.pendingGap = "change.id";
+                    return {
+                        steps: [],
+                        display: `新增点「${nm}」${err}——请修正后重试（系统不自动生成）。`,
+                        ask: true,
+                    };
+                }
+                continue;
+            }
+            const nid = normalize_point_name(nm);
+            if (nid === "") {
+                state.pendingGap = "change.name";
                 return {
                     steps: [],
-                    display: `新增点「${nm}」缺少英文标识 id——请提供英文点名或确认中文名的英文翻译后重试（系统不自动生成）。`,
+                    display: `新增点「${nm}」为纯符号名，无法构成点标识——请提供有效点名（中英文均可，系统不自动生成）。`,
                     ask: true,
                 };
             }
-            const err = identifier_error(id, "point.id");
-            if (err) {
-                state.pendingGap = "change.id";
-                return {
-                    steps: [],
-                    display: `新增点「${nm}」${err}——请更换英文标识后重试（系统不自动生成）。`,
-                    ask: true,
-                };
-            }
+            p["id"] = nid;
         }
         // 点 key 无条件前缀（§3.2.1.3b）：裸 id → {设备前缀}_{裸id}。add_points 是
         // 新增点（无既有点可更新），不涉及 pointMap 解析——「经 pointMap 沿用既有
@@ -7558,13 +7835,34 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 return;
             }
 
+            // ⑥.5b mt field 清单绑定（2026-10-09）：pendingGap=t{i}.fields 时无条件
+            // 先试绑定——LLM 提取器对纯清单文本可能报「实质进展」（转发意图/场站归属
+            // 判定），不得因此跳过绑定；token 全 [A-Za-z_]+ 才落（宁可放过不可错绑）
+            if (state.pendingGap !== null && state.mtTargets) {
+                const fGap = /^t(\d+)\.fields$/.exec(state.pendingGap);
+                if (fGap) {
+                    const tg = state.mtTargets[Number(fGap[1])];
+                    const tokens = tg ? parse_field_list_tokens(userText.trim()) : null;
+                    if (tg && tokens !== null) {
+                        tg.fieldList = tokens;
+                        extraction_progress = true;
+                        state.pendingGap = null;
+                        cfg.agentLogger.memory(conversation, "pending_bind", {
+                            gap: "t.fields",
+                            target: fGap[1],
+                            count: tokens.length,
+                        });
+                    }
+                }
+            }
+
             // ⑥.6 裸值兜底绑定（§2.6 单缺口顺序提问）：上一回合提问的缺口仍未闭合、
             // 本回合各提取器无进展、消息为纯值片段（端口/IP/地址范围）→ 直接绑定给
             // pending 缺口。宁可放过（走正常缺口追问）不可错绑。
             if (!extraction_progress && state.pendingGap !== null) {
-                // 多下游缺口裸值绑定（agent.md §2.12）：t{i}.name / t{i}.conn 应答
-                // 直接落入对应目标草稿（问句带目标名消歧，应答按 pending 归位）
-                const mtGap = /^(t(\d+))\.(name|conn)$/.exec(state.pendingGap);
+                // 多下游缺口裸值绑定（agent.md §2.12）：t{i}.name / t{i}.conn / t{i}.fields
+                // 应答直接落入对应目标草稿（问句带目标名消歧，应答按 pending 归位）
+                const mtGap = /^(t(\d+))\.(name|conn|fields)$/.exec(state.pendingGap);
                 if (mtGap && state.mtTargets) {
                     const ti = Number(mtGap[2]);
                     const tg = state.mtTargets[ti];
@@ -7574,6 +7872,13 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                         if (mtGap[3] === "name" && ans !== "" && ans.length <= 20) {
                             tg.name = ans;
                             bound = true;
+                        } else if (mtGap[3] === "fields") {
+                            // field 显式清单（2026-10-09）：token 全部 [A-Za-z_]+ 才绑
+                            const tokens = parse_field_list_tokens(ans);
+                            if (tokens !== null) {
+                                tg.fieldList = tokens;
+                                bound = true;
+                            }
                         } else if (mtGap[3] === "conn") {
                             const ipM = ans.match(
                                 /^(\d{1,3}(?:\.\d{1,3}){3})\s*[:：]\s*(\d{1,5})$/,

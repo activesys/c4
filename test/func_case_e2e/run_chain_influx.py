@@ -46,6 +46,10 @@ MSG39 = MSG38.replace(
 ).replace("wind_turbine这个measurement，字段名跟点名对应（windspeed、power、wind_dir、pitch_angle、gen_speed、gearbox_oil_temp、tower_temp、air_temp、humidity、pressure）",
           "wind_turbine，字段名跟点名对应")
 ANS39 = "bucket是hnals。"
+# 2026-10-09 起「字段名跟点名对应」不再自动映射（点名已中文化，field 仅允许
+# [a-zA-Z_]+、不推导不翻译）——Agent 追问后须显式给出逐点 field 名
+ANS39_FIELDS = ("字段名跟点名对应（windspeed、power、wind_dir、pitch_angle、gen_speed、"
+                "gearbox_oil_temp、tower_temp、air_temp、humidity、pressure）。")
 MSG43 = ("这10个点都写一份到另一个bucket：url同，还是http://127.0.0.1:8086，"
          "token是hnals-influx-2026，org是activesys，bucket换成wind_history，"
          "measurement和字段名跟wind_turbine那边一样，类型统一float。")
@@ -71,6 +75,15 @@ class Influxd:
     def up(self, wait=True):
         self.kill_orphans()
         if self.p is None or self.p.poll() is not None:
+            # 自举：目录与最小配置缺失时补建（/tmp 清理后驱动器仍可独立运行；
+            # auth 关闭——鉴权形态不在被测范围，见文件头注）
+            os.makedirs("/tmp/influxdb_test", exist_ok=True)
+            if not os.path.exists(INFLUX_CONF):
+                with open(INFLUX_CONF, "w", encoding="utf-8") as f:
+                    f.write('[meta]\n  dir = "/tmp/influxdb_test/meta"\n'
+                            '[data]\n  dir = "/tmp/influxdb_test/data"\n'
+                            '  wal-dir = "/tmp/influxdb_test/wal"\n'
+                            '[http]\n  enabled = true\n  bind-address = ":18086"\n')
             self.p = subprocess.Popen(
                 [INFLUXD, "-config", INFLUX_CONF],
                 stdout=open("/tmp/influxdb_test/influxd_driver.log", "ab"),
@@ -121,7 +134,7 @@ def influx_fields_of(measurement):
 
 
 # ── 断言助手 ───────────────────────────────────────────────
-def assert_influx_pair(tag, cfg, expect_fields=None):
+def assert_influx_pair(tag, cfg):
     """38/39 通用：双侧成对（asfp2_server 9001 + influxdb 入库实例，无 asfp2_client）、
     逐点 field/measurement/type 原样、引用 key = {采集实例id}.{点key}。"""
     base.assert_channel_ids(cfg)
@@ -158,16 +171,8 @@ def assert_influx_pair(tag, cfg, expect_fields=None):
         if str(fp.get("type")) != "float":
             raise rc.Fail(f"{tag}: addr={addr} type={fp.get('type')} ≠ float")
     fields = sorted(str(fp.get("field")) for fp in fpts.values())
-    if expect_fields == "by_name":
-        # 「字段名跟点名对应」（用例 39，无显式清单）：field = 各点名英文翻译
-        # （即采集点裸 id）——不是 38 的显式清单
-        expect = sorted(str(wpt.get(a, {}).get("id", "")).split("_", 1)[-1]
-                        for a in range(1000, 1010))
-        if fields != expect:
-            raise rc.Fail(f"{tag}: field 与点名对应关系不符: {fields} ≠ {expect}")
-    else:
-        if fields != sorted(FIELDS38):
-            raise rc.Fail(f"{tag}: field 映射不符（原样采纳）: {fields}")
+    if fields != sorted(FIELDS38):
+        raise rc.Fail(f"{tag}: field 映射不符（原样采纳）: {fields}")
     return wid, fid
 
 
@@ -214,12 +219,14 @@ def s41(influx):
 
 def s39(influx):
     conv = rc.Conv()
-    base.flow(conv, MSG39, answers=[(r"场站", "华能阿拉善"), (r"bucket", ANS39)],
+    base.flow(conv, MSG39,
+              answers=[(r"场站", "华能阿拉善"), (r"bucket", ANS39),
+                       (r"field", ANS39_FIELDS)],
               done=lambda: cfg_has_influx())
     cfg = rc.wait_config(lambda c: sum(1 for k in rc.server_instances(c)
                                        if k[0] == "c4_influxdb_client") >= 1,
                          timeout=240, desc="39: 补 bucket 后接入")
-    assert_influx_pair("39", cfg, expect_fields="by_name")
+    assert_influx_pair("39", cfg)
     if base.registry().get("channelHighWatermark") != 2:
         raise rc.Fail(f"39: 水位={base.registry().get('channelHighWatermark')} ≠ 2")
     base.assert_no_handle_leak("39")

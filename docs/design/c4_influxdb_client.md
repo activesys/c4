@@ -1,6 +1,6 @@
 # C4 InfluxDB 写入 MCP 服务设计
 
-> **版本**：v0.1.1 | **最后更新**：2026-10-07 | **父文档**：[c4_architecture.md](c4_architecture.md) | **对应功能**：[C4_FUN_00016](../specification/c4_function.md), [C4_FUN_00067](../specification/c4_function.md), [C4_FUN_00068](../specification/c4_function.md)
+> **版本**：v0.1.2 | **最后更新**：2026-10-09 | **父文档**：[c4_architecture.md](c4_architecture.md) | **对应功能**：[C4_FUN_00016](../specification/c4_function.md), [C4_FUN_00067](../specification/c4_function.md), [C4_FUN_00068](../specification/c4_function.md)
 
 ---
 
@@ -159,8 +159,8 @@ InfluxDB 写入实例。
 | 字段 | 类型 | 含义 |
 |------|------|------|
 | `key` | string | 引用的 Writer 采集点标识，格式为 `{service_id}.{point_id}`（如 `channel1.wt1_windspeed`）。`c4_shm_manager` 根据此 key 填入与 Writer 端相同的 shm_id |
-| `measurement` | string | InfluxDB measurement 名（如 `wind_turbine`），对应一条时序数据的表名 |
-| `field` | string | field key（如 `windspeed`）。**必填，无默认值、不推导**（2026-10-01 用户裁定：field 是点表必填项，由点表/用户提供；废除旧「缺省时取 `key` 的 `{point_id}` 部分」推导——该推导在新点 key 含数字的形态下不成立） |
+| `measurement` | string | InfluxDB measurement 名（如 `wind_turbine`），对应一条时序数据的表名。仅允许英文字母/数字/下划线/点/连字符，**不得中文**（2026-10-09 用户裁定：点表各标识字段不得中文） |
+| `field` | string | field key（如 `windspeed`）。**必填，无默认值、不推导**（2026-10-01 用户裁定：field 是点表必填项，由点表/用户提供；废除旧「缺省时取 `key` 的 `{point_id}` 部分」推导——该推导在新点 key 含数字的形态下不成立）。仅允许英文字母与下划线，**不得中文**（2026-10-09 用户裁定）——「字段名跟点名对应」类表述不能直接采用中文名，Agent 必须追问显式 field 名 |
 | `type` | string | 入库类型，决定 value 编码为 line protocol field 的类型：`"float"` / `"int"` / `"uint"` / `"bool"`。缺省时跟随采集类型（见 §4.4.1） |
 | `tags` | object | 附加 tag 键值对（可选），用于区分设备 / 区域 / 协议等维度。键须匹配 `[a-zA-Z_]+`，值可为任意字符串（含中文） |
 | `shm_id` | integer | 全局 shm_id，默认 0（未分配），由 `c4_shm_manager` 分配后回填 |
@@ -170,6 +170,7 @@ InfluxDB 写入实例。
 - `type` 取值须为 `"float"` / `"int"` / `"uint"` / `"bool"` 之一，或省略（跟随采集类型）
 - `measurement` 非空
 - `field` **非空**（2026-10-01 裁定：必填、无默认值、不推导）且与 `tags` 的键名须匹配 `[a-zA-Z_]+`（`tags` 的值可为任意字符串，含中文）
+- `measurement` 须匹配 `[A-Za-z0-9_.-]+`——点表各标识字段不得中文（2026-10-09 用户裁定）
 - 同一实例内 `shm_id` 不得重复
 
 ### 2.4 全局配置中的声明

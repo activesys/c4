@@ -31,6 +31,14 @@ MSG63 = (
 )
 MSG63_ADDR = "127.0.0.1:9900"
 MSG63_BUCKET = "compute"
+# 2026-10-09 裁定：入库标识字段不得中文——「字段名跟点名对应」须追问后显式给出
+ANS63_FIELDS = ("字段名跟点名对应（windspeed、power、wind_dir、pitch_angle、gen_speed、"
+                "gearbox_oil_temp、tower_temp、air_temp、humidity、pressure）。")
+ANS65_FIELDS = ("字段按行序（windspeed、power、wind_dir、pitch_angle、gen_speed、"
+                "gearbox_oil_temp、tower_temp、air_temp、humidity、pressure、windspeed、power）。")
+ANS65V_FIELDS = ("字段按行序（windspeed、power、wind_dir、pitch_angle、gen_speed、"
+                 "gearbox_oil_temp、tower_temp）。")
+ANS_MEAS = "measurement用设备前缀，1号风机wt1、2号风机wt2。"
 
 MSG64 = (
     "现在需要接入1号风机的数据，第三方厂家通过asfp2协议给我们转来1#风机数据，10个点，从1000到1009，"
@@ -95,7 +103,8 @@ def s63():
         conv, SITE_PRE + MSG63,
         answers=[(r"提供场站名称", "华能阿拉善"),
                  (r"目标地址", MSG63_ADDR),
-                 (r"bucket", MSG63_BUCKET)],
+                 (r"bucket", MSG63_BUCKET),
+                 (r"field", ANS63_FIELDS)],
         done=lambda: rc.forward_of(rc.read_config() or {}, 5000) is not None,
     )
     cfg = rc.wait_config(
@@ -159,13 +168,16 @@ def s65():
     base.flow(conv, SITE_PRE + MSG63,
               answers=[(r"提供场站名称", "华能阿拉善"),
                        (r"目标地址", MSG63_ADDR),
-                       (r"bucket", MSG63_BUCKET)],
+                       (r"bucket", MSG63_BUCKET),
+                       (r"field", ANS63_FIELDS)],
               done=lambda: rc.writer_of(rc.read_config() or {}, 1100) is not None)
     cfg0 = rc.read_config()
     if rc.forward_of(cfg0, 5000) is None:
         raise rc.Fail("65②: 前置（63 完成态）未就绪")
     # 入口 B：点集表达式新建统计库
-    text, _ = base.flow(conv, MSG65, done=lambda: len(
+    text, _ = base.flow(conv, MSG65,
+                        answers=[(r"field", ANS65_FIELDS), (r"measurement", ANS_MEAS)],
+                        done=lambda: len(
         [inst for (st, _i), inst in rc.server_instances(rc.read_config() or {}).items()
          if st == "c4_influxdb_client"]) >= 2)
     cfg = rc.wait_config(
@@ -180,13 +192,16 @@ def s65():
     if len(stats.get("points", [])) != 12:
         raise rc.Fail(f"65④: 统计库点数 {len(stats.get('points', []))} ≠ 12")
     meas = sorted({str(p.get("measurement")) for p in stats.get("points", [])})
-    if meas != sorted(["1号风机", "2号风机"]):
-        raise rc.Fail(f"65⑤: measurement 按设备名期望 1号风机/2号风机，实得 {meas}")
+    # 2026-10-09 裁定：入库标识字段不得中文——「measurement按设备名」落设备前缀
+    if meas != sorted(["wt1", "wt2"]):
+        raise rc.Fail(f"65⑤: measurement 按设备名期望前缀 wt1/wt2，实得 {meas}")
     reg = base.registry()
     if not any(e.get("name") == "统计库" for e in reg.get("entries", [])):
         raise rc.Fail("65⑥: 注册表缺统计库目标条目")
     # 同段多选择器（空格并列）→ 7 点
-    base.flow(conv, MSG65_VAR, done=lambda: len(
+    base.flow(conv, MSG65_VAR,
+              answers=[(r"field", ANS65V_FIELDS), (r"measurement", ANS_MEAS)],
+              done=lambda: len(
         [i for (st, _i), i in rc.server_instances(rc.read_config() or {}).items()
          if st == "c4_influxdb_client"]) >= 3)
     cfg2 = rc.wait_config(
@@ -249,7 +264,8 @@ def s67():
     """删除下游收缩、收缩至空停用、级联、同事务删 A 增 D。"""
     # 前置：自足单设备 + 两路下游
     conv = rc.Conv()
-    base.flow(conv, SITE_PRE + MSG67_0, answers=[(r"提供场站名称", "华能阿拉善")],
+    base.flow(conv, SITE_PRE + MSG67_0,
+              answers=[(r"提供场站名称", "华能阿拉善"), (r"field", ANS63_FIELDS)],
               done=lambda: rc.forward_of(rc.read_config() or {}, 5000) is not None)
     cfg0 = rc.wait_config(
         lambda c: rc.forward_of(c, 5000) is not None and len(
@@ -290,7 +306,8 @@ def s67():
 
     # 场景③：删除设备级联（独立回零重跑前置）
     conv2 = rc.Conv()
-    base.flow(conv2, SITE_PRE + MSG67_0, answers=[(r"提供场站名称", "华能阿拉善")],
+    base.flow(conv2, SITE_PRE + MSG67_0,
+              answers=[(r"提供场站名称", "华能阿拉善"), (r"field", ANS63_FIELDS)],
               done=lambda: rc.forward_of(rc.read_config() or {}, 5000) is not None)
     base.flow(conv2, MSG67_3, stop_on=[r"恢复原样", "无法"],
               done=lambda: rc.read_config() is None or len(rc.server_instances(rc.read_config())) == 0)
@@ -308,7 +325,8 @@ def s67():
 
     # 场景④：同事务删 A 增 D（独立回零重跑前置）
     conv3 = rc.Conv()
-    base.flow(conv3, SITE_PRE + MSG67_0, answers=[(r"提供场站名称", "华能阿拉善")],
+    base.flow(conv3, SITE_PRE + MSG67_0,
+              answers=[(r"提供场站名称", "华能阿拉善"), (r"field", ANS63_FIELDS)],
               done=lambda: rc.forward_of(rc.read_config() or {}, 5000) is not None)
     # 退出/等待按端口判定：第三方同为点表 5000~5009，forward_of(5000) 无法区分新旧
     def _third_on(c, port):
