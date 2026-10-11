@@ -263,9 +263,10 @@ def is_safe_point_key(s: str) -> bool:
     return bool(s) and len(s.encode("utf-8")) <= 1024 and normalize_point_name(s) == s.lower()
 
 
-# ── 模型额度探测与自动切换（glm-4.5-air 额度耗尽 → glm-4.6v，不另询问）──
-MODEL_PRIMARY = "glm-4.5-air"
-MODEL_FALLBACK = "glm-4.6v"
+# ── 测试模型（2026-10-10 用户指令：glm-4.5-air / glm-4.6v 依次耗尽——测试一律
+#    改用 glm-4.7，不另询问）──
+MODEL_PRIMARY = "glm-4.7"
+MODEL_FALLBACK = "glm-4.7"
 MODEL_NAME = MODEL_PRIMARY
 _QUOTA_PROBED = False
 
@@ -965,8 +966,11 @@ def prereq():
             raise Fail(f"采集点 name 未落盘或不符: {json.dumps(wpt, ensure_ascii=False)[:150]}")
         if not is_safe_point_key(str(wpt.get("id", ""))):
             raise Fail(f"采集点 id 非安全点 key（应为点名归一化，非 p_ 生成）: {wpt.get('id')}")
-        if str(wpt.get("id", "")) != normalize_point_name("风速"):
-            raise Fail(f"采集点 id 应为点名「风速」的归一化结果: {wpt.get('id')}")
+        # 点 key 无条件设备前缀（v2.1.0 架构，与 run_chain_v21 assert_writer_keys
+        # 同口径）：落盘 id = {设备 key}_{点名归一化}（2026-10-10 修正——原断言
+        # 期望裸 id，与 v2.1.0 起的落地形态矛盾）
+        if str(wpt.get("id", "")) != f"wt1_{normalize_point_name('风速')}":
+            raise Fail(f"采集点 id 应为 wt1_前缀 + 点名「风速」归一化: {wpt.get('id')}")
         fpt = points_of(cfg, "c4_asfp2_client", forward_of(cfg, 5000))[5000]
         if "name" in fpt:
             raise Fail(f"转发点不应含 name 字段（冗余数据）: {json.dumps(fpt, ensure_ascii=False)[:150]}")
@@ -1053,8 +1057,10 @@ def case18():
     after = read_config()
     w = points_of(after, "c4_asfp2_server", writer_of(after, 1000))
     addrs = [p["addr"] for p in w.values()]
-    if w.get(1000, {}).get("id") != "windspeed":
-        raise Fail(f"addr=1000 的 windspeed 被改写（回复: {text[:150]}）")
+    # 原点未被子名覆盖：id 保持 设备前缀+点名归一化（翻译退役后无 windspeed 形态
+    # ——2026-10-10 修正陈旧断言）
+    if w.get(1000, {}).get("id") != f"wt1_{normalize_point_name('风速')}":
+        raise Fail(f"addr=1000 的风速原点被改写（回复: {text[:150]}）")
     dup = sorted({a for a in addrs if addrs.count(a) > 1})
     if dup:
         raise Fail(f"出现重复 addr: {dup}（回复: {text[:150]}）")
@@ -1100,7 +1106,9 @@ def case21():
         wait_port(P_RECV2, True)
         if not listening(P_RECV1):
             raise Fail("1#风机接收端口失去监听")
-        w2 = points_of(cfg, "c4_asfp2_server", "hnals_wt2")
+        # 实例句柄为 channel{N}（v2.1.0 命名重构）——按 addr 定位实例，不得写死
+        # 旧 id「hnals_wt2」（2026-10-10 修正陈旧断言）
+        w2 = points_of(cfg, "c4_asfp2_server", writer_of(cfg, 1100))
         if len(w2) != 10 or min(w2) != 1100:
             raise Fail(f"2#风机点表异常: {sorted(w2)[:3]}...")
         inject(P_RECV2, 1100, 1109, times=3)
@@ -1179,6 +1187,22 @@ def case25():
     log("  用例25 PASS ✓")
 
 
+def case23d():
+    """用例 23 收尾清理：删除并入的 3号风机（其点表并入 1号宿主实例）。26 的
+    「删至 0 台」断言要求删除 1号 前清空全部设备——23 加入的 3号 不清理则
+    残留 wt3_* 点（2026-10-10 补）。"""
+    c = Conv()
+    text, confirmed = c.send_and_confirm("删除3号风机。")
+    if not confirmed:
+        raise Fail(f"未进入确认流程: {text[:200]}")
+
+    def check(cfg):
+        wid = writer_of(cfg, 1200)
+        return wid is None or 1200 not in points_of(cfg, "c4_asfp2_server", wid)
+    wait_config(check, timeout=180, desc="3号风机（并入点 1200~1209）移除")
+    log("  用例23d PASS ✓（3号风机清理，1号保留）")
+
+
 def case26():
     c = Conv()
     text, confirmed = c.send_and_confirm("删除1号风机。")
@@ -1211,10 +1235,12 @@ def case28():
     #（列表 + 确认按钮同消息出现即合规）；仅当「未列清单就索要确认」才算
     # 跳步（模糊指令直接出确认方案）。未确认时不得有任何风机被删（③，
     # 由后续用例 25/26 的重建断言兜底验证 config 未被改写）。
-    listed = bool(re.search(r"1#", text) and re.search(r"2#", text))
+    # 设备列举形态 = 「N号风机」（方案逐台核对清单，2026-10-10 修正——
+    # 原断言只认「1#/2#」字面，方案用「1号风机」全称即被误判跳步）
+    listed = len(set(re.findall(r"([1-9]号风机)", text))) >= 2
     if not listed and "是否确认" in text:
         raise Fail(f"模糊指令直接出确认方案（未列清单）: {text[:200]}")
-    if not re.search(r"1#|2#|哪些|哪台|列表|具体|哪一", text):
+    if not re.search(r"1#|2#|[1-9]号风机|哪些|哪台|列表|具体|哪一", text):
         raise Fail(f"既未列清单也未询问: {text[:200]}")
     log(f"  用例28 PASS ✓（回复片段: {text[:150]}）")
 
@@ -2043,7 +2069,7 @@ def case42():
 
 CASES = {
     "prereq": prereq, "4": case4, "6": case6, "16": case16, "17": case17,
-    "18": case18, "19": case19, "20": case20, "21": case21, "22": case22,
+    "18": case18, "19": case19, "20": case20, "21": case21, "22": case22, "23d": case23d,
     "23": case23, "24": case24, "25": case25, "26": case26, "27": case27,
     "28": case28, "29": case29, "10": case10,
 }
@@ -2057,8 +2083,12 @@ CASES.update({
 })
 
 
-SEQUENCE = ["prereq", "16", "17", "10", "18", "19", "20",
-            "21", "25", "22", "23", "24", "27", "28", "25", "26", "29"]
+# 用例 20（增量缺转发地址→必须询问）先于 16 运行：其测试输入「地址2010:振动」
+# 以振动为新增点为前提——16 会合法加入振动@2010，原顺序使 20 撞既有点名被
+# 重名门禁拦截、测不到转发地址询问（2026-10-10 修正序列污染）。20 仅断言询问、
+# 不落地，对后续用例状态无影响
+SEQUENCE = ["prereq", "20", "16", "17", "10", "18", "19",
+            "21", "25", "22", "23", "24", "27", "28", "25", "23d", "26", "29"]
 
 SEQUENCE2 = ["reset", "30", "31", "32", "33", "34", "35", "36", "37",
              "38", "41", "reset", "39", "reset", "40", "reset", "42"]

@@ -31,6 +31,48 @@ describe("deterministic_site_tag", () => {
         ).toBe("other");
     });
 
+    it("数据来源场站前缀为异站完整名（site_change 72② 形态）→ other", () => {
+        expect(
+            deterministic_site_tag(
+                "现在需要接入大唐辽宁三区风电场6号风机的数据，转发采用asfp2协议",
+                "国电河北II区",
+            ),
+        ).toBe("other");
+    });
+
+    it("数据来源场站前缀为旧站名（site_change 72① 形态）→ other", () => {
+        expect(
+            deterministic_site_tag(
+                "现在需要接入华能阿拉善6号风机的数据，使用端口9006",
+                "国电河北II区",
+            ),
+        ).toBe("other");
+    });
+
+    it("数据来源场站前缀为绑定场站+通用后缀的超集泛化（71② 形态）→ 不拒绝", () => {
+        expect(
+            deterministic_site_tag(
+                "现在需要接入大唐辽宁三区风电场3号风机的数据，使用端口9003",
+                "大唐辽宁三区",
+            ),
+        ).toBeNull();
+    });
+
+    it("数据来源场站前缀为绑定场站去品牌子集（71③ 形态）→ 不在确定性层拒绝", () => {
+        expect(
+            deterministic_site_tag(
+                "现在需要接入河北II区风电场4号风机的数据，使用端口9004",
+                "国电河北II区",
+            ),
+        ).toBe("ambiguous");
+    });
+
+    it("数据来源场站前缀即绑定场站（语义等价）→ 交后续规则（不因前缀拒绝）", () => {
+        expect(
+            deterministic_site_tag("现在需要接入阿拉善6号风机的数据", "华能阿拉善"),
+        ).toBe("ambiguous");
+    });
+
     it("地名一致但非完整场站名 → ambiguous", () => {
         expect(deterministic_site_tag("接入阿拉善风电场的数据", site)).toBe("ambiguous");
     });
@@ -88,21 +130,21 @@ describe("llm_site_tag", () => {
     });
 });
 
-describe("arbitrate_site_tags（取更保守方）", () => {
-    it("任一方 other → other", () => {
+describe("arbitrate_site_tags（确定性标签优先，LLM 兜底）", () => {
+    it("确定性 other → other（LLM 不得放行）", () => {
         expect(arbitrate_site_tags("other", null)).toBe("other");
-        expect(arbitrate_site_tags(null, "other")).toBe("other");
+        expect(arbitrate_site_tags("other", "ambiguous")).toBe("other");
         expect(arbitrate_site_tags("other", "ambiguous")).toBe("other");
     });
 
-    it("任一方 ambiguous 且无 other → ambiguous", () => {
+    it("确定性 ambiguous → ambiguous（LLM 抖动为 other 不得拖成拒绝，71③）", () => {
         expect(arbitrate_site_tags("ambiguous", null)).toBe("ambiguous");
-        expect(arbitrate_site_tags(null, "ambiguous")).toBe("ambiguous");
+        expect(arbitrate_site_tags("ambiguous", "other")).toBe("ambiguous");
     });
 
-    it("LLM 判一致但确定性有标签 → 以确定性为准（agent.md 935）", () => {
-        expect(arbitrate_site_tags("ambiguous", null)).toBe("ambiguous");
-        expect(arbitrate_site_tags("other", null)).toBe("other");
+    it("确定性 null → LLM 标签兜底（纯语义形态）", () => {
+        expect(arbitrate_site_tags(null, "other")).toBe("other");
+        expect(arbitrate_site_tags(null, "ambiguous")).toBe("ambiguous");
     });
 
     it("双方均无标签 → null（放行）", () => {

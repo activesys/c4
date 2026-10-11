@@ -86,6 +86,7 @@ import {
     extract_file_block,
     merge_and_normalize,
     assign_point_ids,
+    parse_face_summary,
     DEFAULT_PLACEHOLDER_BASE,
     DEFAULT_PLACEHOLDER_NAMES,
     canonicalize_types,
@@ -1361,6 +1362,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
         // 格式（「场站名称：X」，用户自愿提供缩写时仍成对采纳）；缺口追问
         //（pendingGap === "site"）下的自由文本应答交 location_prompt rule6
         //（first_access 模式）兜底提取——提问即上下文锁定，非无询问的自动提取
+        let siteBoundThisTurn = false;
         if (!state.site) {
             let siteName = "";
             let siteAbbr = "";
@@ -1382,8 +1384,12 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                     semantic,
                     conversation,
                 ).catch(() => null);
+                // 不校验 mode：首接语境由 known_site 哨兵保证，glm-4.7 实测会把
+                // 提示词示例场站误当已知场站返回 mode=check/rule5（2026-10-11
+                // RP-03/05 轨迹）——未绑定语境下 is_consistent/mode 无意义，
+                // 提取到名称即采纳，mode 标签错误不得吞掉用户给出的场站名
                 const exSite =
-                    r && r["mode"] === "first_access" && typeof r["user_site"] === "string"
+                    r && typeof r["user_site"] === "string"
                         ? (r["user_site"] as string).trim()
                         : "";
                 if (exSite.length >= 2 && exSite.length <= 20) {
@@ -1410,21 +1416,28 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 }
                 persist_site(state.site, conversation);
                 progress = true;
+                siteBoundThisTurn = true;
             }
         }
         // 归属判定（已绑定场站，agent.md「场地判定仲裁规则」）：location_prompt LLM
         // 语义判定在此先行发起（与本回合其余提取阶段并行），确定性地名比对在阶段
         // 提取出口执行，两者仲裁取更保守方（见本函数尾「归属判定合并」）。
         state.turnSiteCheck = null;
+        // 本回合刚完成场站绑定时跳过归属判定——场站应答消息即绑定来源本身，
+        // 对其自检会得出「归属不明确」的自我矛盾结论（2026-10-11 RP-05 实测：
+        // 裸名绑定成功后同消息被判 ambiguous 追问确认）
         // 纯值片段应答（裸端口/IP/地址范围、协议名）不含任何场站信息，跳过归属
         // 判定——location_prompt 对此类消息的保守误判（rule5 ambiguous）会以
         // 「归属不明确」中断正常应答流（2026-09-27 用例4 e2e 实测：应答「asfp2」
-        // 被误判停机两轮）
+        // 被误判停机两轮）。设备名缺口应答同理：「设备名叫虎头山风电场」的
+        // 虎头山风电场是设备名（站点形名称不构成场站声明，2026-10-11 RP-05
+        // 实测被误判 other 致接入停止）
         const siteFragment =
-            semantic.trim().length <= 24 &&
-            (parse_bare_value(semantic) !== null ||
-                supported_protocol_token(semantic.trim(), registry, "reader"));
-        const siteTagLlm = state.site && !siteFragment
+            state.pendingGap === "recv.device" ||
+            (semantic.trim().length <= 24 &&
+                (parse_bare_value(semantic) !== null ||
+                    supported_protocol_token(semantic.trim(), registry, "reader")));
+        const siteTagLlm = state.site && !siteFragment && !siteBoundThisTurn
             ? llm_json(
                   "location_prompt.txt",
                   { known_site: `${state.site.name}（缩写 ${state.site.abbr}）` },
@@ -1873,10 +1886,8 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                     }
                     if (extractError !== null) {
                         state.recv.extractError = extractError;
-                        cfg.agentLogger.error(conversation, `[RP诊断] extractError: ${extractError}`);
                     } else if (rawPoints.length > 0) {
                         const merged = merge_and_normalize(rawPoints, perExcluded, normSpec);
-                        cfg.agentLogger.error(conversation, `[RP诊断] raw=${rawPoints.length} reset=${merged.reset ? merged.reset.seqKey + "@" + merged.reset.at + ":" + merged.reset.from + "->" + merged.reset.to : "null"} asis=${merged.asisCount} spec=${normSpec ? "有" : "无"}`);
                         if (merged.reset) {
                             // 序列回落（多设备分段/吞址脏数据）：不静默接入，追问；
                             // 已在草稿中的既有点保留不动（回落缺口阻断方案）
@@ -1894,16 +1905,38 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                                         String(q["id"] ?? "").toLowerCase(),
                                     ),
                                 ),
+                                existingTypes: new Map(
+                                    (state.recv.points ?? [])
+                                        .map((q): [string, string] => [
+                                            String(q["id"] ?? "").toLowerCase(),
+                                            String(q["point_type"] ?? "").trim().toLowerCase(),
+                                        ])
+                                        .filter(([id]) => id !== ""),
+                                ),
                                 placeholderNames: cfg.pointId?.placeholder_names ?? DEFAULT_PLACEHOLDER_NAMES,
                                 placeholderBase: cfg.pointId?.placeholder_base ?? DEFAULT_PLACEHOLDER_BASE,
                             });
                             if (pid.conflicts.length > 0) {
-                                // 业务点名撞名 → 整表拒收（§3.2.1.3b 裁决 2，禁用「顺延」字样）
+                                // 业务点名撞名 → 整表拒收（§3.2.1.3b 裁决 2，禁用「顺延」字样）；
+                                // 解析面（提取数/类型分布/排除组）随冲突一并回报（解析能力可见）
+                                // 冲突清单按点名分量（裸 id 去设备前缀）去重展示
+                                // ——RP-09：18 台装置的「箱变备用」各一组，不去重
+                                // 会挤掉「箱变断路器2分位」等其他撞名家族
+                                const seenNamePart = new Set<string>();
                                 const list = pid.conflicts
+                                    .filter((c) => {
+                                        const part = c.name.includes("_")
+                                            ? c.name.slice(c.name.indexOf("_") + 1)
+                                            : c.name;
+                                        if (seenNamePart.has(part)) return false;
+                                        seenNamePart.add(part);
+                                        return true;
+                                    })
                                     .slice(0, 5)
                                     .map((c) => `「${c.name}」×${c.addrs.length}（addr ${c.addrs.filter(Boolean).join("/") || "见点表"}）`)
                                     .join("；");
                                 state.recv.extractError =
+                                    `${parse_face_summary(merged.points, merged.excluded, normSpec?.type_field ?? "point_type", enumMap ?? {})}。` +
                                     `业务点名必须唯一：${pid.conflicts.length} 组同名点（${list}${pid.conflicts.length > 5 ? " 等" : ""}）` +
                                     `——同名点是否为不同物理点需设备厂家确认。请按装置拆分文件分别接入，或修正点名后重传；回复「取消」结束本次接入。`;
                                 progress = true;
@@ -2004,15 +2037,36 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                                         String(q["id"] ?? "").toLowerCase(),
                                     ),
                                 ),
+                                existingTypes: new Map(
+                                    (state.recv.points ?? [])
+                                        .map((q): [string, string] => [
+                                            String(q["id"] ?? "").toLowerCase(),
+                                            String(q["point_type"] ?? "").trim().toLowerCase(),
+                                        ])
+                                        .filter(([id]) => id !== ""),
+                                ),
                                 placeholderNames: cfg.pointId?.placeholder_names ?? DEFAULT_PLACEHOLDER_NAMES,
                                 placeholderBase: cfg.pointId?.placeholder_base ?? DEFAULT_PLACEHOLDER_BASE,
                             });
                             if (pid.conflicts.length > 0) {
+                                // 冲突清单按点名分量（裸 id 去设备前缀）去重展示
+                                // ——RP-09：18 台装置的「箱变备用」各一组，不去重
+                                // 会挤掉「箱变断路器2分位」等其他撞名家族
+                                const seenNamePart = new Set<string>();
                                 const list = pid.conflicts
+                                    .filter((c) => {
+                                        const part = c.name.includes("_")
+                                            ? c.name.slice(c.name.indexOf("_") + 1)
+                                            : c.name;
+                                        if (seenNamePart.has(part)) return false;
+                                        seenNamePart.add(part);
+                                        return true;
+                                    })
                                     .slice(0, 5)
                                     .map((c) => `「${c.name}」×${c.addrs.length}（addr ${c.addrs.filter(Boolean).join("/") || "见点表"}）`)
                                     .join("；");
                                 state.recv.extractError =
+                                    `${parse_face_summary(merged.points, merged.excluded, normSpec?.type_field ?? "point_type", enumMap ?? {})}。` +
                                     `业务点名必须唯一：${pid.conflicts.length} 组同名点（${list}${pid.conflicts.length > 5 ? " 等" : ""}）` +
                                     `——同名点是否为不同物理点需设备厂家确认。请按装置拆分文件分别接入，或修正点名后重传；回复「取消」结束本次接入。`;
                                 progress = true;
@@ -2382,10 +2436,16 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 ri.alias !== undefined
                     ? `；该段地址以 16 进制书写（首值 ${ri.alias.hex}H = ${ri.alias.dec}）`
                     : "";
+            // 提取数随回落追问可见（解析能力可见，RP-12 口径：提取 447 行全量）；
+            // 序列键类型经枚举映射为中文名（RP-12：类型归类遥信可见）
+            const enumMapR = type_enum_of(side, role);
+            const [seqType, ...seqRest] = ri.seqKey.split("×");
+            const seqKeyTxt = [enumMapR[seqType] ?? seqType, ...seqRest].join("×");
             gaps.push(
                 mk(
                     `${keyPrefix}.points.reset`,
-                    `${label}点表「${ri.seqKey}」的地址序列在第 ${ri.at} 行出现回落` +
+                    `${label}点表已解析 ${ri.total} 行。` +
+                        `「${seqKeyTxt}」的地址序列在第 ${ri.at} 行出现回落` +
                         `（${ri.from} → ${ri.to}，共 ${ri.drops} 处下降）${extraTxt}${aliasTxt}` +
                         `——疑似多台设备分段或数据异常。本期不支持一次接入多设备分段点表：` +
                         `请按设备拆分文件后分别上传，或每台设备单独接入。`,
@@ -2481,7 +2541,14 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             problems.push(...issues.map((it) => `${label}点表问题：${it}`));
         }
         if (problems.length > 0) {
-            gaps.push(mk(`${keyPrefix}.points.fields`, problems.join("\n")));
+            // 解析面前缀（解析能力可见，RP-12 口径）：提取数/类型分布随缺陷一并回报
+            // ——仅在点携带 point_type 字段的协议形态下前置（其他协议类型字段名不同）
+            const pts0 = (side.points ?? [])[0];
+            const face =
+                pts0 !== undefined && pts0["point_type"] !== undefined
+                    ? `${parse_face_summary(side.points ?? [], side.excluded, "point_type", type_enum_of(side, role))}。`
+                    : "";
+            gaps.push(mk(`${keyPrefix}.points.fields`, `${face}${problems.join("\n")}`));
         }
         recap.push(
             `${label}点表 ${side.points.length} 个点：${side.points
@@ -4139,6 +4206,8 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
         } else if (nameOnly) {
             siteName = nameOnly[1];
         } else {
+            // 不校验 mode（同单设备流：known_site 哨兵已保证首接语境，
+            // glm-4.7 偶发返回 mode=check 不得吞掉提取到的场站名）
             const r = await llm_json(
                 "location_prompt.txt",
                 { known_site: "（未设置）" },
@@ -4146,7 +4215,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 conversation,
             ).catch(() => null);
             const ex =
-                r && r["mode"] === "first_access" && typeof r["user_site"] === "string"
+                r && typeof r["user_site"] === "string"
                     ? (r["user_site"] as string).trim()
                     : "";
             if (ex.length >= 2 && ex.length <= 20) siteName = ex;
@@ -7744,10 +7813,17 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                             const sameIdx = blocks.findIndex((b) => b.name === originalName);
                             if (sameIdx >= 0) {
                                 blocks[sameIdx] = { name: originalName, data: pf };
-                                // 同名再传 = 替换该文件块并重开接入草稿（保留场站与记忆库）
-                                state.recv = fresh_side();
-                                state.fwd = fresh_side();
-                                state.forwardIntent = false;
+                                // 同名再传 = 替换该文件块并重开接入草稿（§2.13.4）。
+                                // 只重置点表草稿（点/排除组/提取进度/对账声明），已确认
+                                // 必要项（协议/连接/设备名/转发侧/场站与记忆库）保留——
+                                // 其余文件块（异名分次上传）随阶段 3 管道全量重提取，
+                                // 草稿按当前 fileBlocks 重建（RP-01：yx 替换后仍 12728）
+                                state.recv.points = null;
+                                state.recv.excluded = null;
+                                state.recv.extractedFiles = [];
+                                state.recv.extractError = null;
+                                state.recv.resetInfo = null;
+                                state.recv.declared = null;
                                 state.accessPlan = null;
                                 cfg.agentLogger.phase(conversation, "draft-reopened");
                             } else {

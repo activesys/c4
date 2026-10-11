@@ -373,14 +373,23 @@ export function bind_change_answer(
     if (draft.length !== 1) return false;
     if (CHANGE_STOPWORD_RE.test(t)) return false;
     if (key === "change.name") {
-        if (/^[0-9]+$/.test(t)) return false;
-        if (!/^[\u4e00-\u9fa5A-Za-z][\u4e00-\u9fa5A-Za-z0-9_]{0,23}$/.test(t)) return false;
-        draft[0]["name"] = t;
+        // 应答形态：裸点名（「转速」）或自然语句（「新点名叫转速，转发地址5011」
+        // ——换名应答常携带转发地址等补充信息，整句匹配会绑定失败，挂起变更
+        // 每轮按旧名重新评估造成死循环（2026-10-10 用例10 实测））。取引导词
+        // （新点名叫/改名为/叫/：…）之后的尾段，再按逗号句号切断
+        let name = t;
+        const m = t.match(
+            /(?:新点名(?:叫|是|为|：|:)|改名(?:为|叫|成)|更名(?:为|叫)|点名叫|叫|是|：|:)\s*([^，,。；;]+)/,
+        );
+        if (m) name = m[1].trim();
+        if (/^[0-9]+$/.test(name)) return false;
+        if (!/^[\u4e00-\u9fa5A-Za-z][\u4e00-\u9fa5A-Za-z0-9_]{0,23}$/.test(name)) return false;
+        draft[0]["name"] = name;
         // 换名连带：旧名派生的 id 一并作废——撞名换名后残留旧 id 会被 id 重复比对
         // 误判重名（2026-09-27 用例10「角度/压强 vs 功率(id=power)」死循环实测）；
         // id 作废后由 orchestrator 落回 change_prompt 重新翻译，英文形态以新名原文为 id
         delete draft[0]["id"];
-        if (CHANGE_ID_OK(t)) draft[0]["id"] = t;
+        if (CHANGE_ID_OK(name)) draft[0]["id"] = name;
         return true;
     }
     // change.id

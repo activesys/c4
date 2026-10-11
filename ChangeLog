@@ -1,3 +1,132 @@
+2026-10-11  activesys  <activesys@sina.com>
+    Version 2.1.72
+    * agent: Fix — 首接场站绑定不再依赖 LLM 的 mode 标签（RP-03/05 实测，
+      glm-4.7）：裸场站名应答走 location_prompt 兜底提取，glm-4.7 会把提示词
+      示例场站误当已知场站返回 mode=check/rule5（agent 日志 00:57:31 轨迹
+      「无法确认是否为已知场站（I区）」），绑定门禁要求 mode==="first_access"
+      导致用户给出的场站名被丢弃、缺口追问至收摊死循环。单设备流与组接入
+      group_bind_site 两处均改为：known_site 哨兵已保证首接语境，提取到
+      user_site 即采纳，不校验 mode/is_consistent（未绑定语境下二者无意义）。
+    * agent: Fix — identify name 列极低基数校正（RP-04 实测，glm-4.7）：无表头
+      表中取值极低基数的设备短编码列（ZRR300AOLD 式装置型号）被识别为点名列
+      （rule 2「机器标识形态才是点名」被套在设备列上），撞名清单变为设备名
+      分组、业务撞名漏报。新增确定性护栏：所选 name 列 distinct×10 < 行数且
+      存在全文本、基数 >3× 候选列时改选基数最大者；所选列具备设备语境形态
+      （distinct×2 ≤ 行数）且未识别 device_col 时归位 device_col。
+    * agent: location_prompt rule6 强化——「（未设置）」不是场站名、不存在一致性
+      比较对象，rule1~5 以真实已知场站为前提禁止套用，提取到场站名时 mode
+      必须为 first_access；新增裸名应答示例（用户：开鲁 → hnals 式）。
+      point_identify_prompt rule2 增补机器标识消歧——逐行唯一编码才是点名，
+      少数离散取值大量重复的短编码列是设备语境列（规则 2b）。
+    * agent: Fix — 场站绑定同回合归属自检与设备名应答误判（RP-05 实测）：
+      ① 裸名应答绑定场站的同一回合，该消息再进归属判定（对刚绑定的场站
+      自检）被 glm-4.7 判 ambiguous →「归属不明确」追问确认——本回合绑定
+      成功即跳过归属判定（siteBoundThisTurn）；② 「设备名叫虎头山风电场」
+      的站点形设备名被提取为 user_site 判冲突 other →「接入已停止」——
+      设备名缺口（pendingGap=recv.device）应答跳过归属判定（与 2026-09-27
+      用例4「asfp2 纯值应答」同类豁免）。
+    * agent: 清理 [RP诊断] 残留 error 级日志两处（上一轮 RP 排查插桩，
+      每次提取误报 error）。
+    * test: point_pipeline identify_block 单测 +2（极低基数校正正/反例，
+      vitest 全绿）。
+
+2026-10-10  activesys  <activesys@sina.com>
+    Version 2.1.71
+    * agent: Fix — 变更流换名应答绑定（run_cases 用例10 死循环实测）：
+      bind_change_answer 的 change.name 分支要求整条应答为裸点名，自然语句
+      （「新点名叫转速，转发地址5011」）绑定失败 → 挂起变更每轮按旧名重新
+      评估、原样再拒。改为取引导词（新点名叫/改名为/叫/：…）之后的尾段并按
+      标点切断，裸点名路径不变。
+    * agent: Fix — 数据来源场站前缀转确定性判定（site_change 链步 72 实测）：
+      「接入{异站完整名}{N}号风机」形态在 glm-4.6v 下语义层漏判（探针证实
+      location_prompt 单点调用判定正确，链路消费正常；72② 组合形态漏判）。
+      deterministic_site_tag 新增：接入语句中设备编号前的完整地名前缀与绑定
+      场站无包含关系 → other（location_prompt 提取范围 3 的确定性化）。
+    * test: run_cases 陈旧断言清扫（v2.1.0/v2.1.68 架构演进残留，A/B 实测
+      v2.1.69 同样失败，非回归）：prereq/29 落盘 id 期望改 wt1_前缀+归一化
+      （与 run_chain_v21 assert_writer_keys 同口径）；case18 的 windspeed
+      英文形态改 wt1_风速；case21 实例定位改 writer_of(1100)（channel{N}
+      命名重构后 hnals_wt2 已不存在）；case28 设备列举接受「N号风机」全称
+      形态；SEQUENCE 将用例 20 前置到 16 之前（其输入以振动为新增点为前提，
+      原顺序撞 16 落地的同名点被重名门禁拦截）。
+    * agent: Fix — 场地判定仲裁改确定性优先（site_change 链步 71③ 实测）：
+      原仲裁「取更保守一方」使 LLM 语义层的单次 rule4 抖动能压过确定性层的
+      ambiguous（glm-4.6v 对去品牌形态在 rule4/rule5 间跨调用漂移）。按
+      agent.md「确定性标签优先」改为：确定性层非空即生效，LLM 判定仅在
+      其为 null 时兜底。
+    * test: point_pipeline/site_check/gap_question 单测 +8（vitest 195 全绿）。
+
+2026-10-10  activesys  <activesys@sina.com>
+    Version 2.1.70
+    * agent: Fix — device_col 护栏（RP-02 实测缺陷）：识别层把「点号」列误判为设备
+      语境列（与 addr_col 同列、逐点唯一），裸 id = 点号_点名 使 493 点 id 天然
+      唯一、业务点名撞名判定整体失效、整表拒收被跳过直接出方案。identify_block
+      增加确定性校验：device_col 与 addr_col 同列、或列值去重数 > 行数一半（非
+      离散分组形态）时按无设备语境处理；point_identify_prompt.txt 2b 规则同步
+      禁止（addr_col 本身 / 点号/序号/流水号等逐点唯一列）。
+    * agent: Add — 整表拒收文案携带解析面（func_test_case_real_points.md 拒收
+      口径「解析面断言成立」）：parse_face_summary（point_pipeline.ts）按类型
+      枚举映射汇总提取行数/类型分布/排除组，文件与文字两处业务撞名拒收文案
+      前置该摘要（如「已解析 493 行（遥信 324 + 遥测 125 + 遥脉 44；排除：
+      YK（17 点））」）。
+    * agent: Fix — 撞名判定作用域收窄为同类型 + 跨类型同名确定性共存（RP-01
+      实测缝隙）：yxTagTable yx/yc 两表存在同装置同名跨类型点（「1期#N光伏室
+      箱变_大兴光伏箱变备用」遥信/遥测各一条，40 组）——信号类型不同即不同
+      物理点，不属于「同名是否同物理点需厂家确认」拒收语义；但点 key 实例内
+      唯一，原同域判定使合并草稿误触发整表拒收、12728 无法落地。assign_point_ids
+      增加 existingTypes/typeField：同类型同名仍整表拒收；跨类型同名后到类型
+      以 _yx/_yc/_ym 后缀确定性限定；类型未知（existingTypes 缺省）从严按旧
+      口径拒收。单测 5 例补齐（vitest 183 全绿）。
+    * agent: Fix — 同名再传替换语义收窄（§2.13.4，RP-01 实测）：原实现对同名
+      文件块替换执行 fresh_side() 无差别清空——其余文件块已并点、协议/连接等
+      已确认必要项全部丢失，重传后草稿无法自愈（重新索要协议）。改为外科手术
+      式重置点表草稿（points/excluded/extractedFiles/extractError/resetInfo/
+      declared），必要项（协议/连接/设备名/转发侧）与场站保留；阶段 3 管道按
+      当前 fileBlocks 全量重提取重建草稿（yx 替换后仍 12728）。
+    * agent: Fix — 设备语境列空缺行向下填充（RP-03 实测）：高力板镇「设备名称」
+      列为合并单元格形态（组首有值、组内空白），原「空缺 = 无语境」规则使 14 组
+      装置内同名裸奔触发误拒收。transcribe_block 对 device_col 取值向下填充继承
+      上方最近非空值（列首空缺方视为无语境）；point_identify_prompt.txt 2b 注明
+      合并单元格形态不要因值稀疏而排除设备列；agent.md §3.2.1.3b 判定边界 ①
+      同步（设计变更：空缺 = 合并单元格续行）。
+    * agent: Fix — addr 列小基数离散确定性校正（RP-09 实测）：名为「地址」的
+      装置地址列（101~118，样例段恒值）被识别为 IOA，装置地址进入 addr、设备
+      语境丢失。identify_block 增加校正：所选 addr 列 distinct×10 < 行数（小基数
+      离散，非 IOA/序号形态）时改选全数值列中基数最大者；被纠正下来的陷阱列
+      在 device_col 未识别时归位于设备语境列（§3.2.1.3b）。
+    * agent: Fix — 识别层列号判定的 Number(null) === 0 误读：addr/name/device_col
+      显式 null（未识别）被 Number.isInteger(Number(null)) 判成第 0 列，三处统一
+      改用 Number.isInteger(原值)。
+    * agent: Add — 点表缺陷缺口携带解析面（RP-12 口径）：side_gaps 的
+      problems 缺口（字段不完整/地址重复/校验问题）前置 parse_face_summary
+      摘要（point_type 字段协议形态下），提取数/类型分布随缺陷可见（如
+      「已解析 447 行（遥信 447）」）。
+    * agent: Add — 解析面带每类型地址区间（RP-09 口径「地址起点 16385 可见」）：
+      parse_face_summary 各类型计数附 addr min~max（如「遥测 7902（addr
+      16385~24286）」），「地址」陷阱列未混入 addr 的证据载体。
+    * agent: Fix — name/device 列确定性判定补强（RP-11 实测）：① 表头存在时
+      name 列按点名语义精确匹配（点名 > 信号名称 > 名称 > 描述），不再依赖
+      LLM 自由发挥；② device 候选（LLM 结果 + 表头设备语义列 + addr 校正陷阱
+      列）按「与点名组合撞名数」择优——已识别时仅存在严格更优才切换（同装置
+      真撞名不得被语境掩盖），未识别时采纳优于无语境基线者；③ 拒收冲突清单
+      按点名分量（去设备前缀）去重展示，避免同族撞名挤占清单位（RP-09：18 台
+      装置的「箱变备用」与「箱变断路器2分位」并存可见）。
+    * agent: Fix — addr 列表头语义优先（RP-12 实测）：信息体地址列（hex 形态
+      000A~000F，不在全数值校正候选内）落选、发送编号列被误选为 IOA——其序列
+      15→14 下降误触发多设备分段回落，掩盖 L1 重复/缺地址缺陷路径。表头精确
+      命中地址语义（信息体地址/遥信地址/点号/ioa/地址）者直接选为 addr 列，
+      小基数校正仍然生效（板卡「地址」陷阱列路径不变）。
+    * agent: Add — 回落追问携带提取总数（RP-12 口径「提取 447 行全量进入」可见）：
+      ResetInfo 增加 total（回落块提取行数），回落缺口文案前置「点表已解析 N 行」；
+      序列键类型经枚举映射为中文名（「yx×Sheet4」→「遥信×Sheet4」）。
+    * agent: Fix — 无表头表机器标识点名列优先（RP-08 实测：晨光点名/描述两列
+      并存，LLM 选列在 DT_* 编码列与中文短语列间抖动——选描述列时 115 组同名
+      误拒收）。当前所选 name 列为中文短语形态（≥50% 含汉字）且存在 ≥90% 取值
+      匹配 ASCII 代码模式（^[A-Za-z][A-Za-z0-9_-]*$）的高基数文本列时，确定性
+      切换到机器标识列；addr/device 列不参与，有表头文件不受影响。
+    * test: point_pipeline 单测 +8（device_col 填充、addr 校正、跨类型共存、
+      existingTypes 判定、同类型收窄），vitest 186 全绿。
+
 2026-10-09  activesys  <activesys@sina.com>
     Version 2.1.69
     * agent: Fix — 翻译退役残留清扫（e2e 全量回归暴露）：point_prompt.txt /

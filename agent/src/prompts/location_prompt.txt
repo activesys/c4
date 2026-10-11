@@ -52,6 +52,9 @@
 例：已知"大唐辽宁三区"，用户说"接入辽宁三区风电场9号风机的数据" → 不一致（去品牌写法：地名主体"辽宁"相同、品牌缺失，无法唯一对应，需向用户确认）——此类有部分线索判 rule5，品牌与地名全都对不上才是 rule4。
 
 ## 规则6：首次接入（已知场站为"（未设置）"时）
+- 「（未设置）」不是场站名——已知场站为（未设置）时**不存在一致性比较对象**，
+  rule1~rule5 均以真实已知场站为前提，此时禁止套用；只要用户输入中有场站名称，
+  mode 必须为 "first_access"、is_consistent 必须为 true。
 - 用户输入中有场站名称 → 提取名称；按拼音首字母生成缩写
   （"风电场""场站""新能源"等通用后缀词不计入缩写，如 华能阿拉善 → hnals、开鲁 → kl、
   华能阿拉善风电场 → hnals）；mode="first_access"，is_consistent=true，
@@ -115,6 +118,10 @@
 ---
 用户：场站名称：华能阿拉善风电场，接入1#风机
 输出：{"mode": "first_access", "user_site": "华能阿拉善风电场", "is_consistent": true, "generated_abbr": "hnals", "confidence": "high", "reason": "首次接入，已提取场站名称并按拼音首字母生成缩写", "matched_rule": "rule6"}
+
+---
+用户：开鲁
+输出：{"mode": "first_access", "user_site": "开鲁", "is_consistent": true, "generated_abbr": "kl", "confidence": "high", "reason": "首次接入，用户单独给出场站名称（裸名应答），提取并生成缩写", "matched_rule": "rule6"}
 
 ---
 用户：接入1#风机的数据

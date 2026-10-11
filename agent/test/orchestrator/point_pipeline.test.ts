@@ -6,6 +6,7 @@ import {
     merge_and_normalize,
     parse_addr_value,
     transcribe_block,
+    identify_block,
     extract_file_block,
     DEFAULT_PLACEHOLDER_NAMES,
     type NormSpec,
@@ -204,6 +205,31 @@ describe("transcribe_block（两遍法转录）", () => {
         expect(r.rows).toHaveLength(0);
         expect(r.excluded).toEqual([{ name: "YK", count: 2 }]);
     });
+    it("device_col 空缺行向下填充（RP-03：设备名称列合并单元格，组首有值）", () => {
+        const blk = {
+            title: "104遥测",
+            kind: "table" as const,
+            header: ["序号", "点号", "名称", "设备名称"],
+            nonData: [],
+            rows: [
+                ["1", "16385", "IA", "箱变测控"],
+                ["2", "16386", "IB", null],
+                ["3", "16417", "IA", "逆变器1"],
+                ["4", "16418", "IB", null],
+                ["5", "16419", "IC", null],
+            ],
+        };
+        const r = transcribe_block(
+            blk,
+            { addr_col: 1, name_col: 2, device_col: 3, point_type: "yc" },
+            "point_type",
+        );
+        expect(r.rows).toHaveLength(5);
+        expect(r.rows[0]!["_device"]).toBe("箱变测控");
+        expect(r.rows[1]!["_device"]).toBe("箱变测控");
+        expect(r.rows[2]!["_device"]).toBe("逆变器1");
+        expect(r.rows[4]!["_device"]).toBe("逆变器1");
+    });
     it("段类型向前携带 + 排除段边界不互吞（RP-04：单 sheet 五段，遥控段后紧跟遥调段）", () => {
         // 11号光伏区形态：yc 4 行 → yx 3 行 → 遥控排除 2 行 → 遥调排除 2 行
         const seg = {
@@ -288,6 +314,124 @@ describe("transcribe_block（两遍法转录）", () => {
     });
 });
 
+describe("identify_block 确定性校正（识别输出不作信任）", () => {
+    const file = { name: "板卡.xls" } as never;
+    const mkBlock = (rows: unknown[][], header = ["序号", "地址", "组号", "条目号", "描述", "FCDA"]) => ({
+        title: "遥测引用表",
+        kind: "table" as const,
+        header,
+        nonData: [],
+        rows,
+    });
+    const call = async () => ({
+        addr_col: 1, name_col: 4, device_col: null, declared_count: null, notes: "",
+    });
+
+    it("addr 小基数离散校正：装置地址列（RP-09 陷阱列）改选全数值基数最大列", async () => {
+        const rows: unknown[][] = [];
+        for (let d = 0; d < 18; d++) {
+            for (let i = 0; i < 12; i++) {
+                rows.push(["1", String(101 + d), "101", String(i + 1), `支路${i}`, String(16385 + d * 12 + i)]);
+            }
+        }
+        const ident = await identify_block(file, mkBlock(rows), {}, "", call);
+        expect(ident.addr_col).toBe(5);
+        expect(ident.device_col).toBe(1); // 纠正下来的「地址」陷阱列归位设备语境
+    });
+
+    it("正常连续地址列不触发校正", async () => {
+        const rows: unknown[][] = [];
+        for (let i = 0; i < 30; i++) {
+            rows.push([String(i), String(16385 + i), `点名${i}`]);
+        }
+        const ident = await identify_block(file, mkBlock(rows), {}, "",
+            async () => ({ addr_col: 1, name_col: 2, declared_count: null, notes: "" }));
+        expect(ident.addr_col).toBe(1);
+        expect(ident.device_col).toBeUndefined();
+    });
+
+    it("addr 列表头语义优先：信息体地址（hex 形态）列命中、发送编号落选（RP-12）", async () => {
+        const rows: unknown[][] = [];
+        for (let i = 0; i < 30; i++) {
+            const hex = (i + 1).toString(16).padStart(4, "0");
+            rows.push([String(i), "7", `装置${i % 3}`, hex]);
+        }
+        const ident = await identify_block(
+            file,
+            mkBlock(rows, ["发送编号", "网关编号", "名称", "信息体地址"]),
+            {}, "",
+            async () => ({ addr_col: 0, name_col: 2, declared_count: null, notes: "" }));
+        expect(ident.addr_col).toBe(3);
+        expect(ident.name_col).toBe(2);
+    });
+
+    it("无表头机器标识列优先：DT_* 编码列是点名、中文短语列是描述（RP-08）", async () => {
+        const rows: unknown[][] = [];
+        for (let i = 0; i < 30; i++) {
+            rows.push([
+                `DT_CGDQU_DQDI${String(i + 1).padStart(5, "0")}`,
+                `故障${i + 1}`,
+                String(1 + i),
+            ]);
+        }
+        const ident = await identify_block(file, mkBlock(rows, []), {}, "",
+            async () => ({ addr_col: 2, name_col: 1, declared_count: null, notes: "" }));
+        expect(ident.name_col).toBe(0);
+        expect(ident.addr_col).toBe(2);
+    });
+
+    it("name 列表头确定性判定：信号名称列命中（RP-11 高低位/语境列不误选）", async () => {
+        const rows: unknown[][] = [];
+        for (let i = 0; i < 30; i++) {
+            rows.push([
+                String(i), String(1 + i), "公用信号", "公用信号", String(i),
+                i % 2 === 0 ? "低位" : "高位",
+                i % 3 === 0 ? "事故总" : (i % 3 === 1 ? "预告总" : "蜷动总"),
+            ]);
+        }
+        const ident = await identify_block(
+            file,
+            mkBlock(rows, ["序号", "遥信地址", "通道名称", "装置名称", "装置信号地址", "高低位", "信号名称"]),
+            {}, "",
+            async () => ({ addr_col: 1, name_col: 5, device_col: 2, declared_count: null, notes: "" }));
+        expect(ident.name_col).toBe(6);
+        expect(ident.device_col).toBe(2);
+    });
+
+    it("name 列极低基数校正：设备短编码列被误选为点名列时改选并归位 device_col（RP-04）", async () => {
+        const rows: unknown[][] = [];
+        let seq = 0;
+        for (let d = 0; d < 18; d++) {
+            for (let i = 0; i < 16; i++) {
+                rows.push([
+                    String(seq++),
+                    `DEV${String(d).padStart(2, "0")}`,
+                    `装置${d}信号${i}`,
+                ]);
+            }
+        }
+        const ident = await identify_block(file, mkBlock(rows, []), {}, "",
+            async () => ({ addr_col: 0, name_col: 1, device_col: null, declared_count: null, notes: "" }));
+        expect(ident.name_col).toBe(2);
+        expect(ident.device_col).toBe(1);
+    });
+
+    it("name 列极低基数校正不误伤：逐行唯一机器标识点名（RP-08 形态）保持不动", async () => {
+        const rows: unknown[][] = [];
+        for (let i = 0; i < 30; i++) {
+            rows.push([
+                `DT_CGDQU_DQDI${String(i + 1).padStart(5, "0")}`,
+                `故障${i + 1}`,
+                String(1 + i),
+            ]);
+        }
+        const ident = await identify_block(file, mkBlock(rows, []), {}, "",
+            async () => ({ addr_col: 2, name_col: 0, declared_count: null, notes: "" }));
+        expect(ident.name_col).toBe(0);
+        expect(ident.device_col).toBeUndefined();
+    });
+});
+
 describe("assign_point_ids（id 赋配：归一化 + 顺延/拒收）", () => {
     const ph = [...DEFAULT_PLACEHOLDER_NAMES];
 
@@ -357,6 +501,51 @@ describe("assign_point_ids（id 赋配：归一化 + 顺延/拒收）", () => {
         const r = assign_point_ids(pts);
         expect(r.failed).toBe(2);
         for (const p of pts) expect(p["id"]).toBeUndefined();
+    });
+
+    it("跨类型同名共存（RP-01 实测：同装置「…箱变备用」遥信/遥测各一条）——后到类型加后缀", () => {
+        const pts: RawPoint[] = [
+            { name: "大兴光伏箱变备用", addr: "3298", _device: "1期#1光伏室箱变", point_type: "yx" },
+            { name: "大兴光伏箱变备用", addr: "19206", _device: "1期#1光伏室箱变", point_type: "yc" },
+        ];
+        const r = assign_point_ids(pts);
+        expect(r.conflicts).toEqual([]);
+        expect(r.filled).toBe(2);
+        expect(pts[0]!["id"]).toBe("1期#1光伏室箱变_大兴光伏箱变备用");
+        expect(pts[1]!["id"]).toBe("1期#1光伏室箱变_大兴光伏箱变备用_yc");
+    });
+
+    it("跨类型同名经 existingTypes 判定（分块上传：既有 yx 草稿 + 到达 yc 块）", () => {
+        const pts: RawPoint[] = [
+            { name: "大兴光伏箱变备用", addr: "19206", _device: "1期#1光伏室箱变", point_type: "yc" },
+        ];
+        const r = assign_point_ids(pts, {
+            existing: new Set(["1期#1光伏室箱变_大兴光伏箱变备用"]),
+            existingTypes: new Map([["1期#1光伏室箱变_大兴光伏箱变备用", "yx"]]),
+        });
+        expect(r.conflicts).toEqual([]);
+        expect(pts[0]!["id"]).toBe("1期#1光伏室箱变_大兴光伏箱变备用_yc");
+    });
+
+    it("existingTypes 缺失（类型未知）时跨类型同名从严判拒收（旧口径兼容）", () => {
+        const pts: RawPoint[] = [
+            { name: "箱变备用", addr: "19206", _device: "1期#1光伏室箱变", point_type: "yc" },
+        ];
+        const r = assign_point_ids(pts, {
+            existing: new Set(["1期#1光伏室箱变_箱变备用"]),
+        });
+        expect(r.conflicts).toHaveLength(1);
+        expect(pts[0]!["id"]).toBeUndefined();
+    });
+
+    it("同类型同名仍拒收（类型收窄不放大撞名域）", () => {
+        const pts: RawPoint[] = [
+            { name: "A相功率因数", addr: "100", point_type: "yc" },
+            { name: "A相功率因数", addr: "101", point_type: "yc" },
+        ];
+        const r = assign_point_ids(pts);
+        expect(r.conflicts).toHaveLength(1);
+        expect(r.conflicts[0]!.addrs).toEqual(["100", "101"]);
     });
 });
 

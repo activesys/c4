@@ -13,6 +13,24 @@ export type SiteCheckTag = "ambiguous" | "other" | null;
 export function deterministic_site_tag(text: string, siteName: string): SiteCheckTag {
     if (!siteName) return null;
     if (text.includes(siteName)) return null;
+    // 数据来源场站前缀（location_prompt 提取范围 3：设备编号前的地名前缀是数据
+    // 来源场站，如「接入华能阿拉善6号风机的数据」中的「华能阿拉善」）——完整
+    // 前缀与绑定场站无包含关系 → other。转确定性判定的原因：语义层在 glm-4.6v
+    // 下对「接入{异站完整名}{N}号风机」形态漏判（site_change 链步 72② 实测
+    // 2026-10-10），该形态机构上可判定，不依赖模型
+    const srcSite = text.match(/接入([^\s，。,，；;]+?)\d+号(?:风机|机组)/);
+    if (srcSite) {
+        // 候选剥通用后缀再比对：{绑定场站}+「风电场」的超集泛化（71②）与去品牌
+        // 子集（71③，交 ambiguous 确认）都不是异站；真异站（72①/72②，品牌地名
+        // 均无交集）才 other
+        const cand = srcSite[1].trim().replace(/(风电场|风场|光伏电站|光伏|电站|场站|风电)+$/, "");
+        if (
+            cand.length >= 2 && cand !== siteName &&
+            !siteName.includes(cand) && !cand.includes(siteName)
+        ) {
+            return "other";
+        }
+    }
     const loc = siteName.slice(2);
     if (loc.length >= 2 && text.includes(loc)) return "ambiguous";
     if (text.includes(siteName.slice(0, 2))) return "other";
@@ -31,11 +49,13 @@ export function llm_site_tag(parsed: Record<string, unknown> | null): SiteCheckT
 }
 
 /**
- * 仲裁（agent.md：确定性标签优先；冲突不静默吞并，取更保守的一方）。
- * 保守序：other（拒绝）> ambiguous（追问确认）> null（放行）。
+ * 仲裁（agent.md「场地判定仲裁规则」：确定性标签优先——确定性层非空即生效，
+ * LLM 判定仅在其为 null 时兜底）。依据：确定性比对机构上可复现，LLM 语义判定
+ * 存在跨调用抖动（glm-4.6v 对去品牌形态在 rule4/rule5 间漂移，site_change 71③
+ * 2026-10-10 实测：两层均 ambiguous 仍被单次 rule4 拖成 other 误拒）。
+ * 保守序（LLM 兜底路径内）：other（拒绝）> ambiguous（追问确认）> null（放行）。
  */
 export function arbitrate_site_tags(det: SiteCheckTag, llm: SiteCheckTag): SiteCheckTag {
-    if (det === "other" || llm === "other") return "other";
-    if (det === "ambiguous" || llm === "ambiguous") return "ambiguous";
-    return null;
+    if (det !== null) return det;
+    return llm;
 }

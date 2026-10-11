@@ -233,6 +233,15 @@ describe("bind_change_answer（变更流应答绑定，2026-09-27 用例10）", 
         expect(draft[0]["id"]).toBe("风速2");
     });
 
+    it("换名应答为自然语句（携带转发地址等补充信息）→ 取引导词后尾段（用例10）", () => {
+        const draft = [{ addr: 2000, name: "风速", id: "风速" }];
+        expect(
+            bind_change_answer("change.name", "新点名叫转速，转发地址5011", draft),
+        ).toBe(true);
+        expect(draft[0]["name"]).toBe("转速");
+        expect(draft[0]["id"]).toBe("转速");
+    });
+
     it("点名应答：英文形态 → name 与 id 同时落（用户原文提供）", () => {
         const draft = [{ addr: 2000 }];
         expect(bind_change_answer("change.name", "vibration", draft)).toBe(true);

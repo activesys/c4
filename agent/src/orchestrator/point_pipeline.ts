@@ -38,6 +38,8 @@ export interface ResetInfo {
     drops: number;
     /** 伴生问题摘要（重复地址/缺地址行） */
     extra: string[];
+    /** 回落块提取总行数（RP-12：提取数随回落追问可见） */
+    total: number;
     /** 该序列首值命中 hex 起点别名（如 4001H = 16385）——hex 形态判定随回落
      *  追问可见（func_test_case_real_points.md RP-06） */
     alias?: { hex: number; dec: number };
@@ -329,6 +331,7 @@ export function merge_and_normalize(
                     drops: drop.drops,
                     extra,
                     alias,
+                    total: seq.length,
                 },
             };
         }
@@ -459,19 +462,277 @@ export async function identify_block(
         ndLines !== "" ? `非数据行（段标题）:\n${ndLines}` : "非数据行: 无",
     ].join("\n");
     const r = await call("point_identify_prompt.txt", params, `${context}\n\n<user_input>\n${userText}\n</user_input>\n\n样例（行号: 原始行）:\n${sample.join("\n")}`);
-    const addrCol = r && Number.isInteger(Number(r["addr_col"])) ? Number(r["addr_col"]) : -1;
+    // 列号判定用 Number.isInteger(原值)——Number(null) === 0 会把识别层的
+    // 「null = 未识别」误读成第 0 列
+    const colOf = (v: unknown): number => (Number.isInteger(v) ? (v as number) : -1);
+    let addrCol = colOf(r?.["addr_col"]);
     if (addrCol < 0) {
         throw new Error(
             `无法识别「${file.name}/${block.title}」的地址列——请检查点表或补充说明文字`,
         );
     }
+    // addr 列表头语义优先（RP-12 实测：信息体地址列（hex 形态 000A~）落选、
+    // 发送编号列误选）——表头精确命中地址语义者直接取用；随后仍经小基数离散
+    // 校正（板卡「地址」陷阱列由其纠正为设备语境列）
+    const ADDR_HEADERS = ["信息体地址", "遥信地址", "点号", "ioa", "地址"];
+    const header0 = block.header ?? [];
+    for (const h of ADDR_HEADERS) {
+        const idx = header0.findIndex((c) => String(c ?? "").trim().toLowerCase() === h);
+        if (idx >= 0) {
+            addrCol = idx;
+            break;
+        }
+    }
+    // addr 列小基数离散校正（确定性校验，识别输出不作信任；RP-09 实测：名为
+    // 「地址」的装置地址列 101~118 被误选为 IOA——恒值/小基数离散列不是 IOA，
+    // c4_iec104_client.md §10.1 判据）。所选列 distinct×10 < 行数即视为小基数
+    // 离散，改选数值基数最大的全数值列；被纠正下来的列即「名为地址实为装置号」
+    // 陷阱列，device_col 未识别时归位于此（§3.2.1.3b）
+    let addrSalvaged: number | undefined;
+    if (block.rows.length > 20) {
+        const colDistinct = (c: number): number => {
+            const s = new Set<string>();
+            for (const row of block.rows) s.add(String(row[c] ?? "").trim());
+            return s.size;
+        };
+        if (colDistinct(addrCol) * 10 < block.rows.length) {
+            const width = Math.max(...block.rows.map((row) => row.length));
+            let best = -1;
+            let bestN = colDistinct(addrCol);
+            for (let c = 0; c < width; c++) {
+                if (c === addrCol) continue;
+                const s = new Set<string>();
+                let numeric = 0;
+                for (const row of block.rows) {
+                    const v = String(row[c] ?? "").trim();
+                    if (v !== "" && !Number.isNaN(Number(v))) {
+                        numeric++;
+                        s.add(v);
+                    }
+                }
+                if (numeric === block.rows.length && s.size > bestN) {
+                    best = c;
+                    bestN = s.size;
+                }
+            }
+            if (best >= 0) {
+                addrSalvaged = addrCol;
+                addrCol = best;
+            }
+        }
+    }
+    // device_col 护栏（确定性校验，识别输出不作信任）：设备语境列必须与地址列
+    // 不同，且取值具离散分组形态（大量重复）。逐点唯一列（点号/序号/流水号形态）
+    // 并入裸 id 会使点标识天然唯一、撞名判定整体失效（RP-02 实测：点号列被识别
+    // 为设备列，业务撞名漏检直接出方案）——违反者按无设备语境处理（§3.2.1.3b
+    // 裸 id = 点名），不追问
+    let deviceCol: number | undefined;
+    const dcRaw = colOf(r?.["device_col"]);
+    if (dcRaw >= 0 && dcRaw !== addrCol) {
+        const vals = new Set<string>();
+        for (const row of block.rows) vals.add(String(row[dcRaw] ?? "").trim());
+        if (vals.size * 2 <= block.rows.length) deviceCol = dcRaw;
+    }
+    if (deviceCol === undefined && addrSalvaged !== undefined) {
+        deviceCol = addrSalvaged;
+    }
+    // name 列表头确定性判定（LLM 识别不作信任；RP-11 实测：信号名称与相邻标志
+    // 列/语境列误选）——表头存在时按点名语义精确匹配，优先级：点名 > 信号名称 >
+    // 名称 > 描述；未命中（无表头/无匹配）回落 LLM 结果 + 小基数校正
+    const NAME_HEADERS = ["点名", "点名称", "信号名称", "名称", "描述"];
+    const header = block.header ?? [];
+    let headerName = -1;
+    for (const h of NAME_HEADERS) {
+        const idx = header.findIndex((c) => String(c ?? "").trim() === h);
+        if (idx >= 0) {
+            headerName = idx;
+            break;
+        }
+    }
+    let nameCol = headerName >= 0 ? headerName : colOf(r?.["name_col"]);
+    if (headerName < 0 && nameCol >= 0 && block.rows.length > 20) {
+        const colDistinct = (c: number): number => {
+            const s = new Set<string>();
+            for (const row of block.rows) s.add(String(row[c] ?? "").trim());
+            return s.size;
+        };
+        // 机器标识列优先（RP-08 实测：无表头表的点名/描述两列并存——形如
+        // DT_CGDQU_DQDI00001 的 ASCII 长编码列才是点名，人类可读中文短语列是
+        // 描述；LLM 在两列间抖动）。当前所选列为中文短语形态、且存在 ≥90% 取值
+        // 匹配代码模式的高基数文本列时切换；addr/device 列不参与
+        const codeLike = (c: number): boolean => {
+            let hits = 0;
+            let total = 0;
+            for (const row of block.rows) {
+                const v = String(row[c] ?? "").trim();
+                if (v === "") continue;
+                total += 1;
+                if (/^[A-Za-z][A-Za-z0-9_-]*$/.test(v)) hits += 1;
+            }
+            return total > 0 && hits / total >= 0.9;
+        };
+        const chineseLike = (c: number): boolean => {
+            let cn = 0;
+            let total = 0;
+            for (const row of block.rows) {
+                const v = String(row[c] ?? "").trim();
+                if (v === "") continue;
+                total += 1;
+                if (/\p{Script=Han}/u.test(v)) cn += 1;
+            }
+            return total > 0 && cn / total >= 0.5;
+        };
+        if (chineseLike(nameCol)) {
+            const width = Math.max(...block.rows.map((row) => row.length));
+            for (let c = 0; c < width; c++) {
+                if (c === nameCol || c === addrCol || c === deviceCol) continue;
+                if (codeLike(c) && colDistinct(c) >= block.rows.length * 0.9) {
+                    nameCol = c;
+                    break;
+                }
+            }
+        }
+        // name 列小基数校正（RP-11 实测：「高低位」标志列（低位/高位）被误选为
+        // 点名列）——所选 name 列 distinct ≤ 3（标志/枚举形态，非点名）且存在
+        // 取值更丰富的非纯数值文本列时改选基数最大者；addr/device 列不参与
+        if (colDistinct(nameCol) <= 3) {
+            const width = Math.max(...block.rows.map((row) => row.length));
+            let best = -1;
+            let bestN = colDistinct(nameCol);
+            for (let c = 0; c < width; c++) {
+                if (c === nameCol || c === addrCol || c === deviceCol) continue;
+                const s = new Set<string>();
+                let textual = 0;
+                for (const row of block.rows) {
+                    const v = String(row[c] ?? "").trim();
+                    if (v !== "" && Number.isNaN(Number(v))) {
+                        textual++;
+                        s.add(v);
+                    }
+                }
+                if (textual === block.rows.length && s.size > bestN) {
+                    best = c;
+                    bestN = s.size;
+                }
+            }
+            if (best >= 0) nameCol = best;
+        }
+        // name 列极低基数校正（RP-04 实测，glm-4.7）：无表头表中取值极低基数的
+        // 短编码列（装置型号/设备标识，离散分组形态）被误选为点名列——rule 2
+        // 「机器标识形态才是点名」被套在设备列上。点名/描述列基数远高于设备列：
+        // 所选列 distinct×10 < 行数且存在全文本、基数 >3× 的候选列时改选基数
+        // 最大者；所选列同时具备设备语境形态（distinct×2 ≤ 行数）且尚未识别
+        // device_col 时归位 device_col（设备语境并入随之成立，裸 id = 设备_点名）
+        if (colDistinct(nameCol) * 10 < block.rows.length) {
+            const width = Math.max(...block.rows.map((row) => row.length));
+            let best = -1;
+            let bestN = colDistinct(nameCol);
+            for (let c = 0; c < width; c++) {
+                if (c === nameCol || c === addrCol || c === deviceCol) continue;
+                const s = new Set<string>();
+                let textual = 0;
+                for (const row of block.rows) {
+                    const v = String(row[c] ?? "").trim();
+                    if (v !== "" && Number.isNaN(Number(v))) {
+                        textual++;
+                        s.add(v);
+                    }
+                }
+                if (textual === block.rows.length && s.size > bestN) {
+                    best = c;
+                    bestN = s.size;
+                }
+            }
+            if (best >= 0 && bestN > colDistinct(nameCol) * 3) {
+                if (deviceCol === undefined) {
+                    const vals = new Set<string>();
+                    for (const row of block.rows) {
+                        vals.add(String(row[nameCol] ?? "").trim());
+                    }
+                    if (vals.size * 2 <= block.rows.length) deviceCol = nameCol;
+                }
+                nameCol = best;
+            }
+        }
+    }
+    // device 候选组合消歧（RP-11 实测：通道名称/装置名称同为设备语境列，仅
+    // 装置名称与点名组合唯一——c4_iec104_client.md §10.2「与点名组合可消歧」
+    // 的操作化）。候选 = LLM device_col + 表头精确设备语义列（设备名称/装置
+    // 名称/通道名称）+ addr 校正陷阱列。已识别 device_col 时仅当存在严格更优
+    // （组合撞名更少）候选才切换（同装置真撞名交撞名判定拒收，不得被语境掩盖）；
+    // 未识别时采纳优于「无语境基线」的最优候选
+    if (nameCol >= 0 && block.rows.length > 20) {
+        const colDistinct = (c: number): number => {
+            const s = new Set<string>();
+            for (const row of block.rows) s.add(String(row[c] ?? "").trim());
+            return s.size;
+        };
+        const collideOf = (c: number): number => {
+            const seen = new Set<string>();
+            let collide = 0;
+            let last = "";
+            for (const row of block.rows) {
+                if (c >= 0) {
+                    const v = String(row[c] ?? "").trim();
+                    if (v !== "") last = v; // 空缺行向下填充（合并单元格续行）
+                }
+                const nm = String(row[nameCol] ?? "").trim();
+                if (nm === "") continue;
+                const key = `${last}\x00${nm}`;
+                if (seen.has(key)) collide += 1;
+                else seen.add(key);
+            }
+            return collide;
+        };
+        const DEVICE_HEADERS = ["设备名称", "装置名称", "通道名称", "设备", "装置", "通道"];
+        const cands: number[] = [];
+        const pushCand = (c: number) => {
+            if (
+                c >= 0 && c !== addrCol && c !== nameCol && !cands.includes(c) &&
+                colDistinct(c) * 2 <= block.rows.length
+            ) {
+                cands.push(c);
+            }
+        };
+        pushCand(deviceCol ?? -1);
+        for (const h of DEVICE_HEADERS) {
+            pushCand(header.findIndex((c) => String(c ?? "").trim() === h));
+        }
+        pushCand(addrSalvaged ?? -1);
+        if (cands.length > 0) {
+            if (deviceCol !== undefined) {
+                const mine = collideOf(deviceCol);
+                if (mine > 0) {
+                    let best = -1;
+                    let bestK = mine;
+                    for (const c of cands) {
+                        const k = collideOf(c);
+                        if (k < bestK) {
+                            best = c;
+                            bestK = k;
+                        }
+                    }
+                    if (best >= 0) deviceCol = best;
+                }
+            } else {
+                const baseline = collideOf(-1);
+                let best = -1;
+                let bestK = baseline;
+                for (const c of cands) {
+                    const k = collideOf(c);
+                    if (k < bestK) {
+                        best = c;
+                        bestK = k;
+                    }
+                }
+                if (best >= 0) deviceCol = best;
+            }
+        }
+    }
     return {
         addr_col: addrCol,
-        name_col: r && Number.isInteger(Number(r["name_col"])) ? Number(r["name_col"]) : -1,
-        device_col:
-            r && Number.isInteger(Number(r["device_col"])) && Number(r["device_col"]) >= 0
-                ? Number(r["device_col"])
-                : undefined,
+        name_col: nameCol,
+        device_col: deviceCol,
         point_type: typeof r?.["point_type"] === "string" ? (r["point_type"] as string) : undefined,
         declared_count:
             typeof r?.["declared_count"] === "number" ? (r["declared_count"] as number) : null,
@@ -495,6 +756,7 @@ export function transcribe_block(
     // 只在边界行取段类型时中段行全部落空 ident.point_type，跨段序列被误判回落）
     type SegmentIdent = NonNullable<BlockIdent["segments"]>[number];
     let cur: SegmentIdent | undefined;
+    let lastDevice = "";
     for (let i = 0; i < block.rows.length; i++) {
         const seg = segs.find((s) => s.row === i + 1);
         if (seg !== undefined) cur = seg;
@@ -521,7 +783,12 @@ export function transcribe_block(
         const name = ident.name_col >= 0 ? String(raw[ident.name_col] ?? "").trim() : "";
         p["name"] = name;
         if (ident.device_col !== undefined) {
-            p["_device"] = String(raw[ident.device_col] ?? "").trim();
+            // 设备语境列空缺行 = 合并单元格续行（SheetJS 展开为组首值 + null）：
+            // 向下填充继承上方最近非空值；列首空缺无继承来源方视为无语境
+            // （RP-03 实测：设备名称列仅组首行有值）
+            const dv = String(raw[ident.device_col] ?? "").trim();
+            if (dv !== "") lastDevice = dv;
+            p["_device"] = lastDevice;
         }
         rows.push(p);
     }
@@ -561,27 +828,40 @@ export function assign_point_ids(
     points: RawPoint[],
     opts: {
         existing?: ReadonlySet<string>;
+        /** 既有草稿 id（小写）→ 点类型的映射：跨类型同名共存判定用（缺省视为
+         * 类型未知——未知按同类型从严判拒收，与 2026-10-08 口径兼容） */
+        existingTypes?: ReadonlyMap<string, string>;
         placeholderNames?: ReadonlyArray<string>;
         placeholderBase?: string;
+        typeField?: string;
     } = {},
 ): AssignPointIdsResult {
     const placeholderNames = opts.placeholderNames ?? DEFAULT_PLACEHOLDER_NAMES;
     const placeholderBase = opts.placeholderBase ?? DEFAULT_PLACEHOLDER_BASE;
+    const typeField = opts.typeField ?? "point_type";
     const used = new Set<string>(
         [...(opts.existing ?? [])].map((x) => x.toLowerCase()),
     );
-    const byNid = new Map<string, { p: RawPoint; nameRaw: string; addrs: string[] }>();
+    const usedTypes = new Map<string, string>(opts.existingTypes ?? []);
+    const byNid = new Map<string, { type: string; addrs: string[] }>();
     const conflicts = new Map<string, { name: string; addrs: string[] }>();
     let filled = 0;
     let failed = 0;
+    // 跨类型同名 → 后到类型以类型后缀限定（RP-01 实测：同一装置的「…箱变备用」
+    // 遥信与遥测各一条——信号类型不同即不同物理点，点表结构性可区分，不属于
+    // 「同名是否同物理点需厂家确认」的拒收语义；但点 key 实例内唯一，id 必须互异）
+    const typeQualified = (nid: string, type: string): string =>
+        type !== "" ? `${nid}_${type}` : nid;
     for (const p of points) {
         const nameRaw = String(p["name"] ?? "").trim();
         const device = String(p["_device"] ?? "").trim();
+        const type = String(p[typeField] ?? "").trim().toLowerCase();
         if (nameRaw === "") {
             failed++;
             continue;
         }
-        // 占位判定在点名分量（原文精确匹配白名单）；撞名判定在合成后的裸 id 上
+        // 占位判定在点名分量（原文精确匹配白名单）；撞名判定在合成后的裸 id 上，
+        // 作用域收窄为同类型（跨类型同名共存，见 typeQualified）
         const isPlaceholder = placeholderNames.includes(nameRaw);
         const bare = device !== "" ? `${device}_${nameRaw}` : nameRaw;
         let nid = normalize_point_name(bare);
@@ -591,19 +871,28 @@ export function assign_point_ids(
         }
         const seen = byNid.get(nid);
         if (seen === undefined) {
-            // 撞名顺延取最小未占用后缀
             if (used.has(nid)) {
-                if (!isPlaceholder) {
+                const usedType = usedTypes.get(nid);
+                if (!isPlaceholder && type !== "" && usedType !== undefined && usedType !== type) {
+                    nid = typeQualified(nid, type);
+                    if (used.has(nid)) {
+                        conflicts.set(nid, { name: bare, addrs: [String(p["addr"] ?? "").trim()] });
+                        continue;
+                    }
+                } else if (!isPlaceholder) {
                     const addr = String(p["addr"] ?? "").trim();
                     conflicts.set(nid, { name: bare, addrs: [addr] });
                     continue;
+                } else {
+                    // 撞名顺延取最小未占用后缀
+                    let n = 2;
+                    while (used.has(`${nid}_${n}`)) n++;
+                    nid = `${nid}_${n}`;
                 }
-                let n = 2;
-                while (used.has(`${nid}_${n}`)) n++;
-                nid = `${nid}_${n}`;
             }
-            byNid.set(nid, { p, nameRaw, addrs: [String(p["addr"] ?? "").trim()] });
+            byNid.set(nid, { type, addrs: [String(p["addr"] ?? "").trim()] });
             used.add(nid);
+            if (type !== "") usedTypes.set(nid, type);
             p["id"] = nid;
             filled++;
             continue;
@@ -617,6 +906,18 @@ export function assign_point_ids(
             p["id"] = nid;
             used.add(nid);
             filled++;
+        } else if (type !== "" && seen.type !== "" && seen.type !== type) {
+            // 同表跨类型同名：后到类型加类型后缀共存（addrs 归属原裸 id 记录）
+            const q = typeQualified(nid, type);
+            if (used.has(q)) {
+                conflicts.set(nid, { name: bare, addrs: [...seen.addrs] });
+                continue;
+            }
+            byNid.set(q, { type, addrs: [String(p["addr"] ?? "").trim()] });
+            used.add(q);
+            if (type !== "") usedTypes.set(q, type);
+            p["id"] = q;
+            filled++;
         } else {
             // 整表拒收：冲突项列出该裸 id 下全部 colliding addr（含首点）
             conflicts.set(nid, { name: bare, addrs: [...seen.addrs] });
@@ -624,6 +925,38 @@ export function assign_point_ids(
     }
     void placeholderBase;
     return { filled, failed, conflicts: [...conflicts.values()] };
+}
+
+/** 拒收/追问文案的解析面前缀（解析能力可见：提取数/类型分布/排除组随缺陷一并回报
+ * ——func_test_case_real_points.md 拒收口径「解析面断言成立」）。类型中文名经
+ * enumMap 映射（yx→遥信），未知值原样；各类型附归一化前地址区间（RP-09：地址
+ * 起点 16385 可见——「地址」陷阱列未混入 addr 的证据载体）。 */
+export function parse_face_summary(
+    points: RawPoint[],
+    excluded: ExcludedGroup[] | null | undefined,
+    typeField: string,
+    enumMap: Record<string, string>,
+): string {
+    const counts = new Map<string, { n: number; min: number; max: number }>();
+    for (const p of points) {
+        const t = String(p[typeField] ?? "?");
+        const a = Number(p["addr"]);
+        const cur = counts.get(t) ?? { n: 0, min: Infinity, max: -Infinity };
+        cur.n += 1;
+        if (!Number.isNaN(a)) {
+            cur.min = Math.min(cur.min, a);
+            cur.max = Math.max(cur.max, a);
+        }
+        counts.set(t, cur);
+    }
+    const typeTxt = [...counts.entries()]
+        .map(([k, c]) => {
+            const label = `${enumMap[k] ?? k} ${c.n}`;
+            return c.min <= c.max ? `${label}（addr ${c.min}~${c.max}）` : label;
+        })
+        .join(" + ");
+    const exclTxt = (excluded ?? []).map((g) => `${g.name}（${g.count} 点）`).join("、");
+    return `已解析 ${points.length} 行（${typeTxt}${exclTxt !== "" ? `；排除：${exclTxt}` : ""}）`;
 }
 
 export function canonicalize_types(
