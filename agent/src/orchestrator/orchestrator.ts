@@ -95,6 +95,16 @@ import {
     type RawPoint,
     type ResetInfo,
 } from "./point_pipeline.js";
+import {
+    mb_finalize_block,
+    mb_dedupe_copies,
+    mb_bind_fun_answer,
+    mb_is_textual_addr_sheet,
+    mb_rescue_variable_sheet,
+    expand_template,
+    is_type_word,
+    type MbFinalResult,
+} from "./point_pipeline_modbus.js";
 import type { ServiceStep } from "../types/index.js";
 import {
     detect_group_access,
@@ -130,6 +140,15 @@ interface SideDraft {
     extractedFiles: string[];
     /** 提取层异常（识别失败等）——side_gaps 呈现为可读缺口 */
     extractError: string | null;
+    /** modbus 域解析面（类型分布/换算/字序/推断等明示行）——随解析结果可见 */
+    mbFace?: string | null;
+    /** modbus 台数展开上下文（模板行 + 步长 + 设备标签 + 模板块标题；台数应答后展开） */
+    mbExpand?: {
+        rows: Array<Record<string, unknown>>;
+        stride: number;
+        label: string;
+        src: string;
+    } | null;
 }
 
 function fresh_side(): SideDraft {
@@ -1850,10 +1869,58 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                     const perExcluded: Array<ExcludedGroup[] | null> = [];
                     let declared: number | null = null;
                     let extractError: string | null = null;
+                    // modbus 域完成层累加器（逐块 finalize；解析面/类型分布/连接声明）
+                    const isMb = protocol === "modbus";
+                    const mbNotes: string[] = [];
+                    const mbTypeDist = new Map<string, number>();
+                    const mbDataRows = new Map<string, number>();
+                    let mbConn: { ip?: string; port?: number; uid?: number } = {};
+                    let mbNeedFun = false;
+                    let mbNeedTurbines = false;
+                    let mbExpand: MbFinalResult["expand"] = null;
+                    let mbDups: MbFinalResult["dups"] = [];
                     for (const b of pending) {
                         try {
                             note_step(conversation, "解析点表文件", `${b.name}`);
                             for (const blk of b.data.blocks) {
+                                // modbus 说明/码表类 sheet 确定性跳过（如「华锐风电测点
+                                // 说明」——与主表内容重叠的说明页，照解析会产出垃圾点并
+                                // 误触发撞名拒收；故障/告警/状态类码表页每张省一次识别
+                                // LLM 调用，多 sheet 文件解析时长从分钟级降到秒级）：
+                                // 不产点、不计对账，随解析面带过
+                                if (isMb && /(说明|码表|帮助|参考表?|故障|告警|状态|解析|白名单|限电)/.test(blk.title)) {
+                                    mbNotes.push(`${blk.title}：说明/码表页（sheet 名命中），不产点、不计入对账`);
+                                    continue;
+                                }
+                                // modbus 控制组 sheet 确定性整组排除（规则 4；识别层偶发
+                                // 不声明排除段——「单机控制点数据」纵向多组形态会因无
+                                // 地址列抛识别错误）：表内显式点数 = 含类型词且含数值的行
+                                if (isMb && /(?<!非)(?:遥控|遥调|控制)|powercontrol|可写/i.test(blk.title)) {
+                                    const n = blk.rows.filter((r) => {
+                                        const cells = (r ?? []).map((c) => String(c ?? "").trim());
+                                        return (
+                                            cells.some((c) => /^\d{1,5}$/.test(c)) &&
+                                            cells.some((c) => is_type_word(c))
+                                        );
+                                    }).length;
+                                    mbNotes.push(
+                                        `${blk.title}：控制组（写）整组不接入（表内显式 ${n} 点）`,
+                                    );
+                                    continue;
+                                }
+                                // 域规则 8 + RP-MB-07 裁定（2026-10-11）：无具体地址列
+                                // 的 sheet（地址语义只以文字式「X起始地址：N」单元格出现）
+                                // 按码表/说明页处理——整 sheet 丢弃（0 点、不计对账、
+                                // 不追问）；置于识别层之前，省一次 LLM 调用
+                                if (
+                                    isMb &&
+                                    mb_is_textual_addr_sheet(blk.header, blk.rows)
+                                ) {
+                                    mbNotes.push(
+                                        `${blk.title}：无具体地址列（文字式起始地址单元格）——按码表/说明页处理，0 点、不计对账`,
+                                    );
+                                    continue;
+                                }
                                 const res = await extract_file_block(
                                     b.data,
                                     blk,
@@ -1863,17 +1930,134 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                                         point_fields: JSON.stringify(fields),
                                         point_field_hints: hints,
                                         side_rules: RECEIVE_SIDE_RULES,
+                                        identify_ext: String(
+                                            hintsObj["identify_ext"] ?? "",
+                                        ),
                                     },
                                     recvScoped.trim() !== "" ? recvScoped : semanticAll,
                                     call,
                                 );
+                                    if (isMb && res.rows.length === 0) {
+                                        // Variable 声明式分表救提取（RP-MB-09 四表口径）：
+                                        // 「遥测」形态 = 声明行 + 成段普通数据行，识别层
+                                        // 见 Variable 易整页判 lookup——确定性兜底转录，
+                                        // 与主表段同址同名 → 跨块同点合并计对账
+                                        const rescued = mb_rescue_variable_sheet(blk);
+                                        if (rescued !== null) {
+                                            res.rows = rescued.rows;
+                                            res.excluded = [];
+                                            res.decls = {
+                                                ...rescued.decls,
+                                                ...(res.decls ?? {}),
+                                            };
+                                            res.lookup = false;
+                                        }
+                                    }
                                 canonicalize_types(
                                     res.rows,
                                     normSpec?.type_field ?? "point_type",
                                     enumMap,
                                 );
-                                rawPoints.push(...res.rows);
-                                perExcluded.push(res.excluded.length > 0 ? res.excluded : null);
+                                if (isMb) {
+                                    // 连接/功能码声明确定性兜底（识别层偶发漏提）：非数据行
+                                    // + 前 5 个数据行（高力板形态——「数据类型：int16 功能码：
+                                    // 03 Device Id: 1」「ip:86.76.0.133」「port:502」在数据行
+                                    // 备注格）。识别层声明优先；数据行的 IP 用严格前缀
+                                    // （ip:/采集IP）防误捞无关服务器地址（上海电气备注形态）
+                                    const ndText = (blk.nonData ?? [])
+                                        .map((n) => String(n.text ?? ""))
+                                        .join("\n");
+                                    const leadText = blk.rows
+                                        .slice(0, 5)
+                                        .map((r) => (r ?? []).map((c) => String(c ?? "").trim()).join(" "))
+                                        .join("\n");
+                                    // 表头单元格也是声明载体（上海电气分表形态：
+                                    // 「VariableName="…"…功能码02」整行落在表头——
+                                    // RP-MB-09：功能码/类型权威声明须随块提取）
+                                    const headText = (blk.header ?? [])
+                                        .map((c) => String(c ?? "").trim())
+                                        .join(" ");
+                                    const declText = [ndText, headText, leadText]
+                                        .filter((s) => s !== "")
+                                        .join("\n");
+                                    const codeDecl: Record<string, unknown> = {};
+                                    const mIpNd = ndText.match(/(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/);
+                                    if (mIpNd) codeDecl["ip"] = mIpNd[1];
+                                    if (codeDecl["ip"] === undefined) {
+                                        const mIpLead = leadText.match(
+                                            /(?:采集\s*IP[^\d]{0,6}|\bip\s*[：:])\s*(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/i,
+                                        );
+                                        if (mIpLead) codeDecl["ip"] = mIpLead[1];
+                                    }
+                                    const mPort =
+                                        declText.match(/端口号?\s*[：:]\s*(\d{2,5})/) ??
+                                        declText.match(/\bport\s*[：:]\s*(\d{2,5})/i);
+                                    if (mPort) codeDecl["port"] = Number(mPort[1]);
+                                    const mUid =
+                                        declText.match(/(?:设备地址|从站号?)\s*[：:]?\s*(\d{1,3})/i) ??
+                                        declText.match(
+                                            // 「设备ID（Device Id）: 1」括号后随冒号（高力板备注形态）
+                                            /Device\s*Id\s*[）)]?\s*[：:]?\s*(\d{1,3})/i,
+                                        );
+                                    if (mUid) codeDecl["uid"] = Number(mUid[1]);
+                                    // 功能码块级声明来源分档（上海电气主表实测）：非数据行/
+                                    // 表头声明用宽匹配；数据行备注格仅认「功能码：0N」冒号
+                                    // 形态——首行数据格的裸「功能码04」是列值文字（列被类型
+                                    // 文字污染的混编列），作块级声明会把整块 fun 钉死、
+                                    // 堵死跨块同点合并的增量判定
+                                    const mFun =
+                                        declText.match(/功能码\s*[：:]\s*0?([1-4])(?![0-9])/) ??
+                                        (ndText + "\n" + headText).match(/功能码\s*0?([1-4])(?![0-9])/);
+                                    if (mFun) codeDecl["fun_default"] = Number(mFun[1]);
+                                    // 识别层非空值优先、codeDecl 兜底——LLM decls 的
+                                    // null/空串键不得冲掉确定性提取（MB-07 实测：识别层
+                                    // 未提 fun_default 时返回 null 键，全量点 fun/uid 缺失）
+                                    const mbDecls = { ...codeDecl };
+                                    for (const [dk, dv] of Object.entries(res.decls ?? {})) {
+                                        if (dv !== null && dv !== undefined && dv !== "") {
+                                            mbDecls[dk] = dv;
+                                        }
+                                    }
+                                    // uid 装置级兜底（MB-07 实测）：从站号/Device Id 是
+                                    // 装置级参数，厂家表常只在首个数据块的备注格声明一次
+                                    //（高力板：仅遥测1 有）——前序块已提取（mbConn.uid）
+                                    // 而本块缺失时沿用，后续块不再各自缺 uid
+                                    if (mbDecls["uid"] === undefined && mbConn["uid"] !== undefined) {
+                                        mbDecls["uid"] = mbConn["uid"];
+                                    }
+                                    // 功能码声明随解析面明示（RP-MB-09 互证口径：分表
+                                    // 声明——如遥信点表功能码02——是主表缺口补全来源，
+                                    // 禁止静默取值）
+                                    const declFun = Number(mbDecls["fun_default"]);
+                                    if (Number.isInteger(declFun) && declFun >= 1 && declFun <= 4) {
+                                        mbNotes.push(`功能码0${declFun} 声明（${blk.title}）`);
+                                    }
+                                    const mb = mb_finalize_block(res.rows, res.excluded, mbDecls, {
+                                        lookupTitle: res.lookup === true ? blk.title : undefined,
+                                    });
+                                    if (mb.points.length === 0 && res.rows.length >= 10 && res.lookup !== true) {
+                                        // 整块无有效点行（华创 Sheet2 逗号串形态）——处置
+                                        // 随解析面可见（不产点、不计入对账）
+                                        mbNotes.push(
+                                            `${blk.title}：数据块无有效点行（${res.rows.length} 行），不产点、不计入对账`,
+                                        );
+                                    }
+                                    mbDataRows.set(blk.title, (mbDataRows.get(blk.title) ?? 0) + mb.dataRows);
+                                    rawPoints.push(...mb.points);
+                                    perExcluded.push(mb.excluded.length > 0 ? mb.excluded : null);
+                                    mbNotes.push(...mb.notes);
+                                    for (const [k, n] of mb.typeDist) {
+                                        mbTypeDist.set(k, (mbTypeDist.get(k) ?? 0) + n);
+                                    }
+                                    mbConn = { ...mbConn, ...Object.fromEntries(Object.entries(mb.conn).filter(([, v]) => v !== undefined)) };
+                                    mbNeedFun = mbNeedFun || mb.needFun;
+                                    mbNeedTurbines = mbNeedTurbines || mb.needTurbines;
+                                    if (mb.expand !== null) mbExpand = mb.expand;
+                                    if (mb.dups.length > 0) mbDups = mb.dups;
+                                } else {
+                                    rawPoints.push(...res.rows);
+                                    perExcluded.push(res.excluded.length > 0 ? res.excluded : null);
+                                }
                                 if (declared === null && res.declared !== null) {
                                     declared = res.declared;
                                 }
@@ -1884,10 +2068,91 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                             break;
                         }
                     }
+                    cfg.agentLogger.memory(conversation, "mb_probe_extract", {
+                        isMb,
+                        raw: rawPoints.length,
+                        err: extractError,
+                        needFun: mbNeedFun,
+                        needTurbines: mbNeedTurbines,
+                        blocks: pending.map((b) => `${b.name}#${b.data.blocks.length}`).join(","),
+                    });
+                    try {
+                    if (isMb) {
+                        // 同内容副本剔除（域规则 8：京城 Sheet1/华创 sheet1 形态——
+                        // 照解析将与主表撞键，剔除后不产点不计对账）+ 跨块同点
+                        // 合并（RP-MB-09/10 裁定：上海电气分表合并计对账、华创
+                        // sheet1 纯视图副本不计）——recon 携带对账口径
+                        const dataRowsBySrc = new Map<string, number>(mbDataRows);
+                        const ded = mb_dedupe_copies(rawPoints, dataRowsBySrc);
+                        // dedupe 无剔除时原样返回同一引用——先判再清（自清除别名）
+                        if (ded.points !== rawPoints) {
+                            rawPoints.length = 0;
+                            for (const q of ded.points) rawPoints.push(q);
+                            // 类型分布按存留点重算（剔除副本不得计入分布——
+                            // MB-10 bool 80→40 口径）
+                            mbTypeDist.clear();
+                            for (const q of rawPoints) {
+                                const lbl = String(q["_type_label"] ?? "");
+                                if (lbl !== "") {
+                                    mbTypeDist.set(lbl, (mbTypeDist.get(lbl) ?? 0) + 1);
+                                }
+                            }
+                        }
+                        mbNotes.push(...ded.notes);
+                        if (ded.recon !== null && (ded.recon.merged > 0 || ded.recon.pureView > 0)) {
+                            const bits: string[] = [];
+                            if (ded.recon.merged > 0) {
+                                bits.push(`跨表同点合并 ${ded.recon.merged} 行计入对账`);
+                            }
+                            if (ded.recon.pureView > 0) {
+                                bits.push(`副本视图 ${ded.recon.pureView} 行不计`);
+                            }
+                            mbNotes.push(`全表对账 ${ded.recon.total} 行（${bits.join("、")}）`);
+                        }
+                        // 故障字段段口径（RP-MB-09：段 5 故障 1575 点计入接入口径，
+                        // 非排除、非码表——解析面明示）
+                        const errCount = rawPoints.filter((p) =>
+                            /^Error\d*\s*"?$/i.test(String(p["name"] ?? "").trim()),
+                        ).length;
+                        if (errCount >= 100) {
+                            mbNotes.push(`故障字段段（ErrorN"）${errCount} 点计入接入`);
+                        }
+                        // 编码段号设备语境明示（RP-MB-09/10：跨台同名消解来源随解析面可见）
+                        if (rawPoints.some((p) => p["_seg_dev"] === 1)) {
+                            mbNotes.push(
+                                "设备语境来源：机器编码内嵌台别段号（edos 编码数字段/风机号），跨台同名已消解",
+                            );
+                        }
+                        // 表头/非数据行连接声明 → 草稿连接参数缺口填充（规则 7：
+                        // 表内声明可采纳；仍缺省的 ip/port 走既有缺口追问）
+                        if (mbConn["ip"] !== undefined && state.recv.conn["ip"] === undefined) {
+                            state.recv.conn["ip"] = mbConn.ip;
+                        }
+                        if (mbConn["port"] !== undefined && state.recv.conn["port"] === undefined) {
+                            state.recv.conn["port"] = mbConn.port;
+                        }
+                        const connParts: string[] = [];
+                        if (mbConn["ip"] !== undefined) connParts.push(String(mbConn.ip));
+                        if (mbConn["port"] !== undefined) {
+                            connParts.push(`端口 ${String(mbConn.port)}`);
+                        }
+                        if (mbConn["uid"] !== undefined) {
+                            connParts.push(`从站 ${String(mbConn.uid)}`);
+                        }
+                        if (connParts.length > 0) {
+                            mbNotes.push(`连接参数（表内声明）：${connParts.join("，")}`);
+                        }
+                        state.recv.mbFace = [
+                            `modbus 解析（接入 ${rawPoints.length} 点）：${[...mbTypeDist.entries()].map(([k, n]) => `${k} ${n}`).join("、")}`,
+                            ...mbNotes,
+                        ].join("；");
+                    }
                     if (extractError !== null) {
                         state.recv.extractError = extractError;
                     } else if (rawPoints.length > 0) {
-                        const merged = merge_and_normalize(rawPoints, perExcluded, normSpec);
+                        const merged = merge_and_normalize(rawPoints, perExcluded, normSpec, {
+                            detectReset: !isMb,
+                        });
                         if (merged.reset) {
                             // 序列回落（多设备分段/吞址脏数据）：不静默接入，追问；
                             // 已在草稿中的既有点保留不动（回落缺口阻断方案）
@@ -1916,6 +2181,12 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                                 placeholderNames: cfg.pointId?.placeholder_names ?? DEFAULT_PLACEHOLDER_NAMES,
                                 placeholderBase: cfg.pointId?.placeholder_base ?? DEFAULT_PLACEHOLDER_BASE,
                             });
+                            cfg.agentLogger.memory(conversation, "mb_probe_merge", {
+                                merged: merged.points.length,
+                                reset: merged.reset !== null,
+                                conflicts: pid.conflicts.length,
+                                incompletePoints: incomplete(merged.points),
+                            });
                             if (pid.conflicts.length > 0) {
                                 // 业务点名撞名 → 整表拒收（§3.2.1.3b 裁决 2，禁用「顺延」字样）；
                                 // 解析面（提取数/类型分布/排除组）随冲突一并回报（解析能力可见）
@@ -1935,10 +2206,72 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                                     .slice(0, 5)
                                     .map((c) => `「${c.name}」×${c.addrs.length}（addr ${c.addrs.filter(Boolean).join("/") || "见点表"}）`)
                                     .join("；");
+                                // modbus 拒收面增强（域口径）：解析面明示行 + 重复地址
+                                // 清单 + 按类型撞名计数 + 占位顺延说明
+                                let mbRej = "";
+                                if (isMb) {
+                                    const parts: string[] = [];
+                                    if (state.recv.mbFace) parts.push(state.recv.mbFace);
+                                    const typeOfId = new Map(
+                                        (merged.points as Array<Record<string, unknown>>).map((p) => [
+                                            String(p["id"] ?? ""),
+                                            String(p["point_type"] ?? ""),
+                                        ]),
+                                    );
+                                    const perType = new Map<string, number>();
+                                    for (const c of pid.conflicts) {
+                                        const t = typeOfId.get(c.name) ?? "";
+                                        perType.set(t, (perType.get(t) ?? 0) + 1);
+                                    }
+                                    if (perType.size > 0) {
+                                        parts.push(
+                                            `按类型撞名：${[...perType.entries()].map(([t, n]) => `${t || "未分类"} ${n} 组`).join("、")}`,
+                                        );
+                                    }
+                                    if (mbDups.length > 0) {
+                                        parts.push(
+                                            `重复地址 ${mbDups.length} 组：${mbDups
+                                                .slice(0, 5)
+                                                .map((d) => `${d.key}（${d.names[0] ?? ""}）×${d.addrs.length}，addr ${[...new Set(d.addrs)].join("/")}`)
+                                                .join("；")}`,
+                                        );
+                                    }
+                                    if (pid.filled > 0) {
+                                        parts.push(
+                                            `「备用」等占位点名 ${pid.filled} 处已按白名单顺延（不影响业务名撞名拒收）`,
+                                        );
+                                    }
+                                    if (parts.length > 0) mbRej = `。${parts.join("。")}`;
+                                }
                                 state.recv.extractError =
                                     `${parse_face_summary(merged.points, merged.excluded, normSpec?.type_field ?? "point_type", enumMap ?? {})}。` +
                                     `业务点名必须唯一：${pid.conflicts.length} 组同名点（${list}${pid.conflicts.length > 5 ? " 等" : ""}）` +
-                                    `——同名点是否为不同物理点需设备厂家确认。请按装置拆分文件分别接入，或修正点名后重传；回复「取消」结束本次接入。`;
+                                    `——同名点是否为不同物理点需设备厂家确认。请按装置拆分文件分别接入，或修正点名后重传；回复「取消」结束本次接入。` +
+                                    mbRej;
+                                progress = true;
+                            } else if (isMb && pid.conflicts.length === 0 && mbDups.length > 0) {
+                                // 重复地址拒收（域口径 MB-05：addr 109/110 各 ×2——
+                                // 重复地址按 (uid,fun,addr) 身份冲突整表拒绝）
+                                state.recv.extractError =
+                                    `${parse_face_summary(merged.points, merged.excluded, normSpec?.type_field ?? "point_type", enumMap ?? {})}。` +
+                                    `${state.recv.mbFace ?? ""}。` +
+                                    `点表存在重复地址 ${mbDups.length} 组：${mbDups
+                                        .slice(0, 5)
+                                        .map((d) => `addr ${[...new Set(d.addrs)].join("/")}（「${d.names[0] ?? "?"}」×${d.addrs.length}）`)
+                                        .join("；")}${mbDups.length > 5 ? " 等" : ""}` +
+                                    `——重复地址无法唯一标识物理点，请修正点表后重传；回复「取消」结束本次接入。`;
+                                progress = true;
+                            } else if (isMb && mbNeedTurbines && mbExpand !== null) {
+                                // 台数缺口（域规则 5）：横向列组/偏移量展开台数表内不可
+                                // 确定（「……」不算声明）——模板保留，追问台数后展开
+                                state.recv.mbExpand = {
+                                    rows: merged.points as Array<Record<string, unknown>>,
+                                    stride: mbExpand.stride,
+                                    label: mbExpand.label,
+                                    src: mbExpand.src,
+                                };
+                                state.recv.extractError =
+                                    `${state.recv.mbFace ?? ""}。点表为多台机组模板（每台 ${merged.points.length} 点，地址偏移 ${mbExpand.stride}），但台数表内未显式声明——请提供机组台数（如「33 台风机」），或回复「取消」结束本次接入。`;
                                 progress = true;
                             } else if (!incomplete(merged.points)) {
                                 // 异名分次上传：新块归一化结果拼接到既有草稿（§2.13.4）
@@ -1975,6 +2308,12 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                                 progress = true;
                             }
                         }
+                    }
+                    } catch (eMb) {
+                        cfg.agentLogger.memory(conversation, "mb_probe_error", {
+                            msg: eMb instanceof Error ? eMb.message : String(eMb),
+                            stack: String(eMb instanceof Error ? eMb.stack ?? "" : "").split("\n").slice(0, 4).join(" | "),
+                        });
                     }
                 } else if (blocks.length === 0) {
                     // 纯文字路径（既有单次提取；点入管道做回落检测与归一化）
@@ -2540,6 +2879,19 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             });
             problems.push(...issues.map((it) => `${label}点表问题：${it}`));
         }
+        // modbus 功能码缺口（域规则 7 必填不猜）：列/声明/应答均未提供时单列
+        // 缺口追问（答「遥测是功能码 4、遥信是 2」等，按点类型语境绑定）
+        const isMbSide = normalize_protocol(side.protocol ?? "") === "modbus";
+        if (isMbSide && (side.points ?? []).some((p) => p["fun"] === undefined)) {
+            gaps.push(
+                mk(
+                    `${keyPrefix}.modbus.fun`,
+                    `${label}点表未提供功能码——modbus 采集必须明确各点用哪个功能码读取` +
+                        `（1 读线圈 / 2 读离散输入 / 3 读保持寄存器 / 4 读输入寄存器）。` +
+                        `可按类型给出，如「遥测全部是功能码 4，遥信是功能码 2」。`,
+                ),
+            );
+        }
         if (problems.length > 0) {
             // 解析面前缀（解析能力可见，RP-12 口径）：提取数/类型分布随缺陷一并回报
             // ——仅在点携带 point_type 字段的协议形态下前置（其他协议类型字段名不同）
@@ -2556,6 +2908,16 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 .map(pt_label)
                 .join("、")}${side.points.length > 5 ? "等" : ""}`,
         );
+        // modbus 解析面明示行（类型分布/换算/字序/推断——域规则要求可见）+
+        // 全表对账（接入 + 排除 = 数据行总数）
+        if (side.mbFace) {
+            const exclN = (side.excluded ?? []).reduce((a, g) => a + g.count, 0);
+            const acct =
+                exclN > 0 && side.points !== null
+                    ? `；全表对账 ${side.points.length + exclN} = 接入 ${side.points.length} + 排除 ${exclN}`
+                    : "";
+            recap.push(side.mbFace + acct);
+        }
         if (side.excluded && side.excluded.length > 0) {
             recap.push(
                 `${label}不接入组：${side.excluded.map((g) => `${g.name}（${g.count} 点）`).join("、")}`,
@@ -8059,6 +8421,69 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                                 uid,
                                 bound,
                             });
+                        }
+                    }
+                } else if (
+                    state.pendingGap === "recv.modbus.fun" &&
+                    state.recv.points !== null
+                ) {
+                    // modbus 功能码应答绑定（域规则 7）：按点类型语境绑定——
+                    // 「遥测全部是输入寄存器（功能码 4），遥信是离散输入（功能码 2）」
+                    const boundFun = mb_bind_fun_answer(
+                        state.recv.points as Array<Record<string, unknown>>,
+                        userText,
+                    );
+                    if (boundFun > 0) {
+                        extraction_progress = true;
+                        cfg.agentLogger.memory(conversation, "pending_bind", {
+                            gap: "recv.modbus.fun",
+                            bound: boundFun,
+                        });
+                    }
+                } else if (
+                    (state.pendingGap === "recv.modbus.turbines" ||
+                        state.pendingGap === "recv.points.extract") &&
+                    state.recv.mbExpand !== null
+                ) {
+                    // modbus 台数应答绑定（域规则 5）：「33 台风机」→ 确定性展开
+                    // 模板 ×N → id 赋配 → 落槽（与阶段3 落槽同规：撞名拒收/空名追问）
+                    const tm = userText.match(/(\d{1,4})\s*台/);
+                    if (tm) {
+                        const n = Number(tm[1]);
+                        const exp = state.recv.mbExpand;
+                        if (n > 0 && n <= 5000 && exp != null) {
+                            // 展开只作用于模板块（按 _src 过滤）——同文件其他块
+                            // （场级调度点等）不随台数复制（MB-06 实测：调度 2 点
+                            // 被卷入展开 ×33 = 4983 ≠ 4919）
+                            const tmpl = (exp.rows as Array<Record<string, unknown>>).filter(
+                                (q) => String(q["_src"] ?? "") === exp.src,
+                            );
+                            const rest = (exp.rows as Array<Record<string, unknown>>).filter(
+                                (q) => String(q["_src"] ?? "") !== exp.src,
+                            );
+                            const expanded = [
+                                ...expand_template(tmpl as RawPoint[], exp.stride, exp.label, n),
+                                ...rest,
+                            ];
+                            const pidT = assign_point_ids(expanded, {
+                                placeholderNames:
+                                    cfg.pointId?.placeholder_names ?? DEFAULT_PLACEHOLDER_NAMES,
+                                placeholderBase:
+                                    cfg.pointId?.placeholder_base ?? DEFAULT_PLACEHOLDER_BASE,
+                            });
+                            if (pidT.conflicts.length > 0) {
+                                state.recv.extractError = `展开后业务点名撞名 ${pidT.conflicts.length} 组（如「${pidT.conflicts[0]!.name}」）——请核对台数或点名后重试；回复「取消」结束本次接入。`;
+                            } else {
+                                state.recv.points = expanded as Array<Record<string, unknown>>;
+                                state.recv.extractError = null;
+                                state.recv.mbExpand = null;
+                                extraction_progress = true;
+                                cfg.agentLogger.memory(conversation, "pending_bind", {
+                                    gap: "recv.modbus.turbines",
+                                    turbines: n,
+                                    points: expanded.length,
+                                });
+                            }
                         }
                     }
                 } else {

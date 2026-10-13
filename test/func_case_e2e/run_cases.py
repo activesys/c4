@@ -263,9 +263,8 @@ def is_safe_point_key(s: str) -> bool:
     return bool(s) and len(s.encode("utf-8")) <= 1024 and normalize_point_name(s) == s.lower()
 
 
-# ── 测试模型（2026-10-10 用户指令：glm-4.5-air / glm-4.6v 依次耗尽——测试一律
-#    改用 glm-4.7，不另询问）──
-MODEL_PRIMARY = "glm-4.7"
+# ── 测试模型（2026-10-11 用户指令：modbus 真实点表测试改用 glm-5.3-flash）──
+MODEL_PRIMARY = "glm-5.3-flash"
 MODEL_FALLBACK = "glm-4.7"
 MODEL_NAME = MODEL_PRIMARY
 _QUOTA_PROBED = False

@@ -128,7 +128,9 @@ export function createApp(options: AppOptions): express.Application {
     });
 
     // 2. JSON body parser
-    app.use(express.json({ limit: "1mb" }));
+    // 8mb：真实点表用例的多轮对话历史（RP-MB 大表分块提取回执）远超 1mb，
+// 413 会把已收敛的会话打死（MB-07 实测）；内网部署形态无放大风险
+    app.use(express.json({ limit: "8mb" }));
 
     // 3. Routes — dependency injected
     app.use(chatPath, createChatRouter(agent));

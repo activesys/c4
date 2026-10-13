@@ -220,13 +220,16 @@ function rows_from_matrix(matrix: unknown[][]): {
     // 单有效单元格行（表头前后均可能：文档标题/段标题）→ 非数据行，挂到其后
     // 首个数据行；首个多列行按 detect_header 判表头；其余为数据行，保序
     let headerDone = false;
-    let pendingTitle: string | null = null;
+    // 连续单格行累积（2026-10-11 modbus 通辽实测：表头前「通讯协议：…」「服务端：
+    // …」「设备地址：1 端口号：503」三行连续——单变量覆盖只留末行，连接声明
+    // 丢失）。全部挂到其后首个数据行
+    let pendingTitles: string[] = [];
     for (const raw of matrix) {
         const cells = (raw ?? []).map(cell_str);
         const filled = cells.filter((c) => c !== "");
         if (filled.length === 0) continue;
         if (filled.length === 1) {
-            pendingTitle = filled[0]!;
+            pendingTitles.push(filled[0]!);
             continue;
         }
         if (!headerDone) {
@@ -238,9 +241,11 @@ function rows_from_matrix(matrix: unknown[][]): {
             headerDone = true;
         }
         rows.push(cells);
-        if (pendingTitle !== null) {
-            nonData.push({ row: rows.length, text: pendingTitle });
-            pendingTitle = null;
+        if (pendingTitles.length > 0) {
+            for (const t of pendingTitles) {
+                nonData.push({ row: rows.length, text: t });
+            }
+            pendingTitles = [];
         }
     }
     return { header, nonData, rows };

@@ -283,6 +283,7 @@ export function merge_and_normalize(
     rawPoints: RawPoint[],
     perBlockExcluded: Array<ExcludedGroup[] | null>,
     spec: NormSpec | null | undefined,
+    opts: { detectReset?: boolean } = {},
 ): PipelineResult {
     const excluded = aggregate_excluded(perBlockExcluded);
     const typeField = spec?.type_field ?? "point_type";
@@ -295,7 +296,7 @@ export function merge_and_normalize(
         const t = key.split("×")[0] ?? "";
         const decode = seq_decode_mode(seq, spec?.per_type[t], spec?.hex_markers ?? ["0x", "H"]);
         const numerified = seq.map((sp) => ({ ...sp, num: decode(sp.raw) }));
-        const drop = first_drop(numerified);
+        const drop = opts.detectReset === false ? null : first_drop(numerified);
         if (drop !== null) {
             const dupAddrs = new Map<string, number>();
             let missing = 0;
@@ -427,13 +428,85 @@ export interface BlockIdent {
     name_col: number;
     /** 设备语境列（§3.2.1.3b）：识别到时裸 id = 设备语境值_点名 */
     device_col?: number;
+    /** 编码段号设备语境列（RP-MB-09/10 2026-10-12 裁定 ④）：列值逐点唯一
+     * （device_col 护栏正确拒绝的点号/edos 编码形态），但编码内嵌台别段号
+     * （DT_JCFJU_FJ03400001 → 段 034）——转录时按段号派生 _device，
+     * 跨台同名消解、段内残余撞名照常拒收 */
+    device_seg_col?: number;
     point_type?: string;
     declared_count?: number | null;
     segments?: Array<{ row: number; point_type?: string; excluded?: boolean }>;
     notes?: string;
+    /** 附加列语义袋（协议无关机制，键名约定来自注册信息 identify_ext——modbus
+     *  的 fun/类型/数量等列由此声明；值在转录时随行携带为 _aux_<key>） */
+    aux_cols?: Record<string, number>;
+    /** 块级声明袋（协议无关机制：识别层从非数据行/表头读出的声明——字序、
+     *  连接参数、偏移、公式、码表页等；解释权在协议侧完成模块） */
+    decls?: Record<string, unknown>;
+    /** 块形态：data（常规数据块）/ lookup（码表/说明页——0 点不计对账） */
+    sheet_kind?: string;
 }
 
 /** 两遍法第一遍：结构识别（列语义/类型/分段/排除），输入仅语境+样例 */
+
+/**
+ * 编码段号设备语境派生（RP-MB-09/10 2026-10-12 裁定 ④）。候选列值形如
+ * 「非数字前缀 + 3 位台别段号 + ≥3 位段内流水」（DT_JCFJU_FJ03400001）：
+ * 逐点唯一故 device_col 护栏正确拒绝，但段号与点名结构正交（(段,点名) 碰撞
+ * 行 < 20%）时，段号即台别——派生 _device = 段号数值（034 → "34"，与分表
+ * 风机号列数值对齐），跨台同名消解、段内残余撞名（发电机冷却水温度 ×2）
+ * 照常进入撞名拒收。前缀全列一致（同一编码模板）；纯数字列（地址/序号）
+ * 天然不匹配。返回段号列号，无候选返回 undefined。
+ */
+export function derive_seg_device_col(
+    block: ParsedPointBlock,
+    addrCol: number,
+    nameCol: number,
+): number | undefined {
+    if (block.rows.length <= 20 || nameCol < 0) return undefined;
+    const width = Math.max(...block.rows.map((row) => row.length));
+    let best: number | undefined;
+    let bestSegs = 0;
+    for (let c = 0; c < width; c++) {
+        if (c === addrCol || c === nameCol) continue;
+        const segRe = /^(\D+)(\d{3})(\d{3,})$/;
+        const segs = new Set<string>();
+        let prefix = "";
+        let prefixOk = true;
+        let hit = 0;
+        let collide = 0;
+        const seen = new Set<string>();
+        for (const row of block.rows) {
+            const v = String(row[c] ?? "").trim();
+            const m = v.match(segRe);
+            if (m === null) continue;
+            hit++;
+            if (prefix === "") prefix = m[1];
+            else if (prefix !== m[1]) prefixOk = false;
+            segs.add(String(Number(m[2])));
+            const nm = String(row[nameCol] ?? "").trim();
+            if (nm !== "") {
+                const key = `${Number(m[2])}\x00${nm}`;
+                if (seen.has(key)) collide++;
+                else seen.add(key);
+            }
+        }
+        if (
+            hit === block.rows.length &&
+            prefixOk &&
+            segs.size >= 2 &&
+            segs.size <= Math.ceil(block.rows.length / 3) &&
+            collide * 5 < hit
+        ) {
+            if (segs.size > bestSegs) {
+                best = c;
+                bestSegs = segs.size;
+            }
+        }
+    }
+    return best;
+}
+
 export async function identify_block(
     file: ParsedPointFile,
     block: ParsedPointBlock,
@@ -461,15 +534,34 @@ export async function identify_block(
         block.header ? `表头: ${block.header.join(",")}` : "表头: 无（首行即数据）",
         ndLines !== "" ? `非数据行（段标题）:\n${ndLines}` : "非数据行: 无",
     ].join("\n");
-    const r = await call("point_identify_prompt.txt", params, `${context}\n\n<user_input>\n${userText}\n</user_input>\n\n样例（行号: 原始行）:\n${sample.join("\n")}`);
+    // identify_ext：注册信息驱动的附加识别规则（协议侧域规则——如 modbus 的
+    // 附加列语义/块级声明/码表页判定）。为空时输入与既有形态逐字节一致（IEC104
+    // 路径零扰动）
+    const ext = (params["identify_ext"] ?? "").trim();
+    const extSection = ext !== "" ? `\n\n<extra_identify_rules>\n${ext}\n</extra_identify_rules>` : "";
+    const r = await call("point_identify_prompt.txt", params, `${context}${extSection}\n\n<user_input>\n${userText}\n</user_input>\n\n样例（行号: 原始行）:\n${sample.join("\n")}`);
     // 列号判定用 Number.isInteger(原值)——Number(null) === 0 会把识别层的
     // 「null = 未识别」误读成第 0 列
     const colOf = (v: unknown): number => (Number.isInteger(v) ? (v as number) : -1);
     let addrCol = colOf(r?.["addr_col"]);
-    if (addrCol < 0) {
+    const identSheetKind =
+        typeof r?.["sheet_kind"] === "string" ? (r["sheet_kind"] as string) : undefined;
+    if (addrCol < 0 && identSheetKind !== "lookup") {
         throw new Error(
             `无法识别「${file.name}/${block.title}」的地址列——请检查点表或补充说明文字`,
         );
+    }
+    if (addrCol < 0 && identSheetKind === "lookup") {
+        // 码表/说明页（无地址语义）：0 点不计对账，声明袋照常透传
+        return {
+            addr_col: -1,
+            name_col: -1,
+            sheet_kind: "lookup",
+            decls:
+                r && typeof r["decls"] === "object" && r["decls"] !== null
+                    ? (r["decls"] as Record<string, unknown>)
+                    : undefined,
+        };
     }
     // addr 列表头语义优先（RP-12 实测：信息体地址列（hex 形态 000A~）落选、
     // 发送编号列误选）——表头精确命中地址语义者直接取用；随后仍经小基数离散
@@ -655,6 +747,41 @@ export async function identify_block(
             }
         }
     }
+    // name 列数值形态守卫（歌美飒 csv 实测：#index 流水号列被识别为点名列
+    // ——数值列不是点名，撞名检测随之失效）：所选列 ≥90% 全数字且存在非数值
+    // 文本列时，改选其中 distinct 最大者；addr/device 列不参与
+    if (nameCol >= 0 && block.rows.length > 10) {
+        const stats = (c: number): { numeric: number; total: number; distinct: number } => {
+            let numeric = 0;
+            let total = 0;
+            const vals = new Set<string>();
+            for (const row of block.rows) {
+                const v = String(row[c] ?? "").trim();
+                if (v === "") continue;
+                total += 1;
+                if (!Number.isNaN(Number(v))) numeric += 1;
+                vals.add(v);
+            }
+            return { numeric, total, distinct: vals.size };
+        };
+        if (nameCol !== addrCol) {
+            const st = stats(nameCol);
+            if (st.total > 0 && st.numeric / st.total >= 0.9) {
+                const width = Math.max(...block.rows.map((row) => row.length));
+                let best = -1;
+                let bestN = -1;
+                for (let c = 0; c < width; c++) {
+                    if (c === nameCol || c === addrCol || c === deviceCol) continue;
+                    const st2 = stats(c);
+                    if (st2.total === block.rows.length && st2.numeric === 0 && st2.distinct > bestN) {
+                        best = c;
+                        bestN = st2.distinct;
+                    }
+                }
+                if (best >= 0) nameCol = best;
+            }
+        }
+    }
     // device 候选组合消歧（RP-11 实测：通道名称/装置名称同为设备语境列，仅
     // 装置名称与点名组合唯一——c4_iec104_client.md §10.2「与点名组合可消歧」
     // 的操作化）。候选 = LLM device_col + 表头精确设备语义列（设备名称/装置
@@ -729,10 +856,34 @@ export async function identify_block(
             }
         }
     }
+    // 编码段号设备语境派生（RP-MB-09/10 2026-10-12 裁定 ④）——语境来源的
+    // 最终兜底：device_col 护栏与候选消歧均未成立，而逐点唯一编码列内嵌
+    // 3 位台别段号且与点名结构正交时派生（裸 id = 段号_点名）
+    let device_seg_col: number | undefined;
+    if (deviceCol === undefined) {
+        device_seg_col = derive_seg_device_col(block, addrCol, nameCol);
+    }
+    // 附加列/声明袋（协议无关机制，识别输出不作信任：列号须非负整数才采纳；
+    // 声明袋原样透传，解释权在协议侧完成模块）
+    const auxCols: Record<string, number> = {};
+    if (r && typeof r["aux_cols"] === "object" && r["aux_cols"] !== null) {
+        for (const [k, v] of Object.entries(r["aux_cols"] as Record<string, unknown>)) {
+            if (Number.isInteger(v) && (v as number) >= 0) auxCols[k] = v as number;
+        }
+    }
+    const decls =
+        r && typeof r["decls"] === "object" && r["decls"] !== null
+            ? (r["decls"] as Record<string, unknown>)
+            : undefined;
+    const sheetKind = typeof r?.["sheet_kind"] === "string" ? (r["sheet_kind"] as string) : undefined;
     return {
         addr_col: addrCol,
         name_col: nameCol,
         device_col: deviceCol,
+        device_seg_col,
+        aux_cols: Object.keys(auxCols).length > 0 ? auxCols : undefined,
+        decls,
+        sheet_kind: sheetKind,
         point_type: typeof r?.["point_type"] === "string" ? (r["point_type"] as string) : undefined,
         declared_count:
             typeof r?.["declared_count"] === "number" ? (r["declared_count"] as number) : null,
@@ -777,17 +928,37 @@ export function transcribe_block(
         const p: RawPoint = {
             _src: block.title,
             _row: i + 1,
+            // 原始行引用（脏行展示等下游回退用；共享引用不复制）
+            _raw: raw,
         };
         if (type !== "") p[typeName] = type;
         p["addr"] = String(raw[ident.addr_col] ?? "").trim();
         const name = ident.name_col >= 0 ? String(raw[ident.name_col] ?? "").trim() : "";
         p["name"] = name;
+        if (ident.aux_cols) {
+            // 附加列原样携带（_aux_<key>，解释权在协议侧完成模块；空值不携带）
+            for (const [k, c] of Object.entries(ident.aux_cols)) {
+                const v = String(raw[c] ?? "").trim();
+                if (v !== "") p[`_aux_${k}`] = v;
+            }
+        }
         if (ident.device_col !== undefined) {
             // 设备语境列空缺行 = 合并单元格续行（SheetJS 展开为组首值 + null）：
             // 向下填充继承上方最近非空值；列首空缺无继承来源方视为无语境
             // （RP-03 实测：设备名称列仅组首行有值）
             const dv = String(raw[ident.device_col] ?? "").trim();
             if (dv !== "") lastDevice = dv;
+            p["_device"] = lastDevice;
+        } else if (ident.device_seg_col !== undefined) {
+            // 编码段号设备语境（RP-MB-09/10 2026-10-12 裁定 ④）：段号数值作
+            // 语境（034 → "34"，与分表风机号列数值对齐，跨表同点合并可键合）
+            const m = String(raw[ident.device_seg_col] ?? "")
+                .trim()
+                .match(/^(\D+)(\d{3})(\d{3,})$/);
+            if (m !== null) {
+                lastDevice = String(Number(m[2]));
+                p["_seg_dev"] = 1;
+            }
             p["_device"] = lastDevice;
         }
         rows.push(p);
@@ -985,7 +1156,15 @@ export async function extract_file_block(
     params: Record<string, string>,
     userText: string,
     call: LlmCall,
-): Promise<{ rows: RawPoint[]; excluded: ExcludedGroup[]; declared: number | null }> {
+): Promise<{
+    rows: RawPoint[];
+    excluded: ExcludedGroup[];
+    declared: number | null;
+    /** 识别层块级声明袋（协议侧完成模块解释） */
+    decls?: Record<string, unknown>;
+    /** 码表/说明页（0 点不计对账） */
+    lookup?: boolean;
+}> {
     if (block.kind === "text") {
         // 自由文本块：按字符块 LLM 提取（表格块一律两遍法——2026-10-07 RP 实测：
         // 逐块 LLM 转写对 excluded 锚定（用户文字数量被照抄进每块）与 JSON 合法性
@@ -1023,6 +1202,11 @@ export async function extract_file_block(
     }
     // 表格块：两遍法（识别 1 次 + 确定性转录，块数不再决定 LLM 调用量）
     const ident = await identify_block(file, block, params, userText, call);
+    if (ident.sheet_kind === "lookup" || ident.addr_col < 0) {
+        // 码表/说明页（无地址语义）：0 点不计对账（func_test_case_real_points.md
+        // modbus 域规则 8），声明袋照常上交（说明页可能携带连接/字序声明）
+        return { rows: [], excluded: [], declared: null, decls: ident.decls, lookup: true };
+    }
     const t = transcribe_block(block, ident, "point_type");
     // 声明守卫：declared_count 只能来自用户文字（识别层偶发把文件行数/地址
     // 计数当声明——RP-03 实测幻觉 256＝遥信行数，触发虚假对账追问）。数字未
@@ -1036,5 +1220,7 @@ export async function extract_file_block(
         rows: t.rows,
         excluded: t.excluded,
         declared,
+        decls: ident.decls,
+        lookup: false,
     };
 }
