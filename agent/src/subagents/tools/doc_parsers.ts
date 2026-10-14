@@ -17,9 +17,12 @@ interface TabularData {
 }
 
 function parse_csv_raw(content: string): TabularData {
-    const lines = content.split(/\r?\n/).filter((l) => l.trim().length > 0);
+    // RFC4180 行切分（2026-10-14 RP-IF 实测修复）：引号字段内的逗号/换行/双引号
+    // 转义（""）不得分裂——AZGF 入库点表第 5 列（"device,plant_id=…"，内嵌逗号
+    // 的 tags 串）被裸 split(",") 拆成 7 列，列语义与逐点映射全废
+    const lines = split_csv_lines(content);
     if (lines.length === 0) return { headers: [], rows: [], rowCount: 0 };
-    const first = lines[0]!.split(",").map((h) => h.trim());
+    const first = split_csv_line(lines[0]!);
     // 无表头检测（2026-09-29 用例11）：点表文件常无表头行，首行即数据（如
     // 「1000,风速」）——被当表头会吞掉第一个点（10 点解析成 9 点）。首格为纯数字
     // （地址/序号值，列名几乎不可能是纯数字）时判定为无表头，整表按数据行处理，
@@ -27,7 +30,7 @@ function parse_csv_raw(content: string): TabularData {
     if (/^\d+$/.test(first[0] ?? "")) {
         const rows: string[][] = [];
         for (const line of lines) {
-            const cols = line.split(",").map((c) => c.trim());
+            const cols = split_csv_line(line);
             if (cols.length === 0 || cols.every((c) => c.length === 0)) continue;
             rows.push(cols);
         }
@@ -40,11 +43,76 @@ function parse_csv_raw(content: string): TabularData {
     const headers = first;
     const rows: string[][] = [];
     for (let i = 1; i < lines.length; i++) {
-        const cols = lines[i]!.split(",").map((c) => c.trim());
+        const cols = split_csv_line(lines[i]!);
         if (cols.length === 0 || cols.every((c) => c.length === 0)) continue;
         rows.push(cols);
     }
     return { headers, rows, rowCount: rows.length };
+}
+
+/** RFC4180 内容级行切分：引号字段内的逗号/换行/"" 转义不分裂行（引号保留在
+ *  返回行内，由 split_csv_line 剥除并解转义） */
+function split_csv_lines(content: string): string[] {
+    const rows: string[] = [];
+    let cur = "";
+    let inQ = false;
+    for (let i = 0; i < content.length; i++) {
+        const ch = content[i]!;
+        if (inQ) {
+            cur += ch;
+            if (ch === '"') {
+                if (content[i + 1] === '"') {
+                    cur += '"';
+                    i++;
+                } else {
+                    inQ = false;
+                }
+            }
+        } else if (ch === '"') {
+            inQ = true;
+            cur += ch;
+        } else if (ch === "\n" || ch === "\r") {
+            if (ch === "\r" && content[i + 1] === "\n") i++;
+            rows.push(cur);
+            cur = "";
+        } else {
+            cur += ch;
+        }
+    }
+    if (cur.trim().length > 0) rows.push(cur);
+    return rows.filter((l) => l.trim().length > 0);
+}
+
+/** 单行 CSV 分列（RFC4180）：双引号字段内逗号不分裂、"" 解转义为 "；无引号行
+ *  与裸 split(",")+trim 等价 */
+function split_csv_line(line: string): string[] {
+    const cols: string[] = [];
+    let cur = "";
+    let inQ = false;
+    for (let i = 0; i < line.length; i++) {
+        const ch = line[i]!;
+        if (inQ) {
+            if (ch === '"') {
+                if (line[i + 1] === '"') {
+                    cur += '"';
+                    i++;
+                } else {
+                    inQ = false;
+                }
+            } else {
+                cur += ch;
+            }
+        } else if (ch === '"') {
+            inQ = true;
+        } else if (ch === ",") {
+            cols.push(cur.trim());
+            cur = "";
+        } else {
+            cur += ch;
+        }
+    }
+    cols.push(cur.trim());
+    return cols;
 }
 
 function parse_xlsx_raw(buf: Buffer): TabularData {
@@ -270,8 +338,10 @@ export function parse_point_file(filePath: string, originalName: string): Parsed
     }
     if (filePath.endsWith(".csv")) {
         const text = decode_bytes(buf);
-        const lines = text.split(/\r?\n/).filter((l) => l.trim().length > 0);
-        const matrix = lines.map((l) => l.split(",").map((c) => c));
+        // RFC4180 切分（2026-10-14 RP-IF 实测修复）：引号字段内逗号不分裂——
+        // AZGF 入库点表第 5 列 tags 串被裸 split(",") 拆碎，逐点映射全废
+        const lines = split_csv_lines(text);
+        const matrix = lines.map((l) => split_csv_line(l));
         const { header, nonData, rows } = rows_from_matrix(matrix);
         return {
             name: originalName,

@@ -160,7 +160,7 @@ InfluxDB 写入实例。
 |------|------|------|
 | `key` | string | 引用的 Writer 采集点标识，格式为 `{service_id}.{point_id}`（如 `channel1.wt1_windspeed`）。`c4_shm_manager` 根据此 key 填入与 Writer 端相同的 shm_id |
 | `measurement` | string | InfluxDB measurement 名（如 `wind_turbine`），对应一条时序数据的表名。仅允许英文字母/数字/下划线/点/连字符，**不得中文**（2026-10-09 用户裁定：点表各标识字段不得中文） |
-| `field` | string | field key（如 `windspeed`）。**必填，无默认值、不推导**（2026-10-01 用户裁定：field 是点表必填项，由点表/用户提供；废除旧「缺省时取 `key` 的 `{point_id}` 部分」推导——该推导在新点 key 含数字的形态下不成立）。仅允许英文字母与下划线，**不得中文**（2026-10-09 用户裁定）——「字段名跟点名对应」类表述不能直接采用中文名，Agent 必须追问显式 field 名 |
+| `field` | string | field key（如 `windspeed`）。**必填，无默认值、不推导**（2026-10-01 用户裁定：field 是点表必填项，由点表/用户提供；废除旧「缺省时取 `key` 的 `{point_id}` 部分」推导——该推导在新点 key 含数字的形态下不成立）。字母/下划线开头、后续允许数字（`[a-zA-Z_][a-zA-Z0-9_]*`，2026-10-13 用户裁定放宽，兼容真实点表数字编号 field——AZGF 入库点表 `yx0001`/`yc0001` 形态；原 2026-10-09 口径为「仅允许英文字母与下划线」），**不得中文**——「字段名跟点名对应」类表述不能直接采用中文名，Agent 必须追问显式 field 名 |
 | `type` | string | 入库类型，决定 value 编码为 line protocol field 的类型：`"float"` / `"int"` / `"uint"` / `"bool"`。缺省时跟随采集类型（见 §4.4.1） |
 | `tags` | object | 附加 tag 键值对（可选），用于区分设备 / 区域 / 协议等维度。键须匹配 `[a-zA-Z_]+`，值可为任意字符串（含中文） |
 | `shm_id` | integer | 全局 shm_id，默认 0（未分配），由 `c4_shm_manager` 分配后回填 |
@@ -169,7 +169,7 @@ InfluxDB 写入实例。
 
 - `type` 取值须为 `"float"` / `"int"` / `"uint"` / `"bool"` 之一，或省略（跟随采集类型）
 - `measurement` 非空
-- `field` **非空**（2026-10-01 裁定：必填、无默认值、不推导）且与 `tags` 的键名须匹配 `[a-zA-Z_]+`（`tags` 的值可为任意字符串，含中文）
+- `field` **非空**（2026-10-01 裁定：必填、无默认值、不推导）且须匹配 `[a-zA-Z_][a-zA-Z0-9_]*`（2026-10-13 裁定放宽：字母/下划线开头、允许数字编号）；`tags` 的键名仍须匹配 `[a-zA-Z_]+`（`tags` 的值可为任意字符串，含中文）
 - `measurement` 须匹配 `[A-Za-z0-9_.-]+`——点表各标识字段不得中文（2026-10-09 用户裁定）
 - 同一实例内 `shm_id` 不得重复
 
@@ -674,7 +674,7 @@ var index map[uint32]*PointMapping
 | `CONFIG_PATH_MISSING` | `config_path` 参数缺失或无法读取指定文件 |
 | `CONFIG_PARSE_ERROR` | 配置文件格式错误或 `c4_influxdb_client` 段缺失 |
 | `INVALID_CONFIG` | 配置字段非法——`url` 缺失或格式错误、`token`/`org`/`bucket` 缺失、`batch_size` ≤ 0、`flush_interval` < 0 |
-| `INVALID_POINT` | point 配置非法——`type` 取值非法（非 float/int/uint/bool）、`measurement` 为空、`field` 为空（必填，2026-10-01）或 `field`/`tags` 键名违反 `[a-zA-Z_]+`、同实例内 shm_id 重复 |
+| `INVALID_POINT` | point 配置非法——`type` 取值非法（非 float/int/uint/bool）、`measurement` 为空、`field` 为空（必填，2026-10-01）或 `field` 违反 `[a-zA-Z_][a-zA-Z0-9_]*`（2026-10-13 放宽）/ `tags` 键名违反 `[a-zA-Z_]+`、同实例内 shm_id 重复 |
 | `SHM_CORRUPTED` | 共享内存 magic 校验失败 |
 | `SHM_OPEN_FAILED` | 无法打开共享内存（可能 `c4_shm_manager` 未创建） |
 | `SHM_ID_NOT_ASSIGNED` | 配置中存在 shm_id 未分配（=0）的 point——shm_id 必须由 `c4_shm_manager` 回填后才能使用 |
@@ -725,7 +725,7 @@ var index map[uint32]*PointMapping
 | `POINT_DUP` | 同实例内 (`measurement`, `field`) 组合重复——启动校验以 `shm_id` 查重为等价物（shm_id 执行期分配，本工具用业务键查重）。**等价性边界**：两个不同业务键引用同一 Writer 点（key 重复 → 运行期 duplicate shm_id）属 **L1 reader-key 唯一性**职责（阶段 6 出口拦截，agent.md §2.7），本工具不查 key | `INVALID_POINT: duplicate shm_id` |
 | `MEASUREMENT_EMPTY` | `measurement` 为空（可推导字段：场站缩写推导由方案层填充，见 agent.md §2.7.1 确定性推导） | `INVALID_POINT: empty measurement` |
 | `INVALID_TYPE` | `type` 非法值（∉ {`float`, `int`, `uint`, `bool`}）在本工具拦截；源点类型映射由方案层填充（可推导字段）。空值（`type=""`）**两路径均放行**——启动期按实际值推导运行期编码，方案期由方案层推导填充保证（校验层无路径差异，差异仅在运行期编码语义） | `INVALID_POINT: invalid type` |
-| `FIELD_FORMAT` | `field` 为空或匹配 `^[a-zA-Z_]+$` 失败；点含 `tags` 时各 tag key 同校验（tags 运行期支持、接入流程 v1 不采集，本检查条件生效）。**空值不再容忍**（2026-10-01 裁定：field 必填、无默认值、不推导，废除空值放行与运行期回退点名的旧语义），该变更已在共享函数 `validatePointSet`（validation.go）中以 opts 参数化建模 | `INVALID_POINT: empty or invalid field / tag key` |
+| `FIELD_FORMAT` | `field` 为空或匹配 `^[a-zA-Z_][a-zA-Z0-9_]*$` 失败（2026-10-13 放宽：字母/下划线开头、允许数字编号，兼容 AZGF 真实点表 `yx0001` 形态）；点含 `tags` 时各 tag key 仍按 `^[a-zA-Z_]+$` 校验（tags 运行期支持、接入流程 v1 不采集，本检查条件生效）。**空值不再容忍**（2026-10-01 裁定：field 必填、无默认值、不推导，废除空值放行与运行期回退点名的旧语义），该变更已在共享函数 `validatePointSet`（validation.go）中以 opts 参数化建模 | `INVALID_POINT: empty or invalid field / tag key` |
 
 **实现要求**：不得另写第二套校验逻辑——`validate_points` 与启动校验调用**同一校验函数**
 `validatePointSet`（validation.go，已落地），行为差异以 opts 参数化：
@@ -744,7 +744,7 @@ var index map[uint32]*PointMapping
 | `config_path` 参数缺失或无法读取指定文件 | `start` | 返回 `CONFIG_PATH_MISSING` |
 | 配置文件格式错误 | `start` | 返回 `isError: true` + `CONFIG_PARSE_ERROR` |
 | 配置字段非法（url/token/org/bucket 缺失或格式错、batch_size ≤ 0、flush_interval < 0） | `start` | 返回 `INVALID_CONFIG` |
-| point 配置非法（`type` 取值非法 / `measurement` 为空 / `field` 为空（必填）或 `field`·`tags` 键名违反 `[a-zA-Z_]+` / 同实例 shm_id 重复） | `start` | 返回 `INVALID_POINT`（消息指明字段与取值） |
+| point 配置非法（`type` 取值非法 / `measurement` 为空 / `field` 为空（必填）或违反 `[a-zA-Z_][a-zA-Z0-9_]*`（2026-10-13 放宽）/ `tags` 键名违反 `[a-zA-Z_]+` / 同实例 shm_id 重复） | `start` | 返回 `INVALID_POINT`（消息指明字段与取值） |
 | 共享内存 magic 校验失败 | `start` | 返回 `SHM_CORRUPTED`，拒绝并报告，等待人工处理；恢复经外部手段（整机重启或清理脚本，见 c4_deployment.md shm 损坏恢复） |
 | 无法打开共享内存 | `start` | 返回 `SHM_OPEN_FAILED` |
 | 配置中存在 shm_id 未分配（=0） | `start` | 返回 `SHM_ID_NOT_ASSIGNED`——`c4_shm_manager` 必须先回填 |

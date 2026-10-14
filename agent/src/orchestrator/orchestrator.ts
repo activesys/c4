@@ -778,13 +778,15 @@ export interface OrchestratorConfig {
 const FIELD_ISSUE =
     'field 必填、不推导（2026-10-01 裁定）——本目标的入库点表未逐点提供 field，无法装配：请提供逐点含 field 的入库点表后重试。';
 
-/** influxdb 点表标识字段字符集（c4_influxdb_client.md §2，2026-10-09 用户裁定：
- *  点表各标识字段不得中文）——field/tag key 仅 [A-Za-z_]；measurement 另放行
+/** influxdb 点表标识字段字符集（c4_influxdb_client.md §2；field 2026-10-13 用户
+ *  裁定放宽：字母/下划线开头、允许数字编号——AZGF 入库点表 yx0001/yc0001 形态；
+ *  原 2026-10-09 口径 [A-Za-z_]+。tag key 维持 [A-Za-z_]。measurement 另放行
  *  数字/点/连字符。提取层产出的非法值（如按「跟点名对应」规则映射出的中文名
  *  field）一律剥除——剥除后按「缺字段」缺口追问，由用户显式提供（field 必填、
  *  不推导、不翻译；measurement 缺失走确定性推导）；既有草稿同序位的合法值优先
  *  保留（历史轮重提取不得清掉已确认映射）。 */
-const INFLUX_FIELD_RE = /^[A-Za-z_]+$/;
+const INFLUX_FIELD_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const INFLUX_TAGKEY_RE = /^[A-Za-z_]+$/;
 const INFLUX_MEAS_RE = /^[A-Za-z0-9_.-]+$/;
 /** 从文本提取括号内 field 清单 token（全部命中 [A-Za-z_]+ 才返回，否则 null）——
  *  单目标落 field 与 mt 目标绑定共用（宁可放过不可错绑）。 */
@@ -843,8 +845,12 @@ function sanitize_influx_fields(
             const clean: Record<string, unknown> = {};
             let dropped = false;
             for (const [k, v] of Object.entries(tags as Record<string, unknown>)) {
-                if (INFLUX_FIELD_RE.test(k)) clean[k] = v;
-                else dropped = true;
+                // 空值 tag（如占位 token "device" 无 = 值被误提）同键非法一并剔除
+                if (INFLUX_TAGKEY_RE.test(k) && v !== undefined && v !== null && String(v) !== "") {
+                    clean[k] = v;
+                } else {
+                    dropped = true;
+                }
             }
             if (dropped) {
                 if (Object.keys(clean).length === 0) {
@@ -2164,6 +2170,23 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                         } else {
                             // id 赋配（2026-10-07 裁定：翻译退役，id = 点名/设备语境
                             // 确定性归一化；业务名撞名拒收，空名追问汇总）
+                            // influx 入库映射表（2026-10-13 裁定，RP-IF 组）：点身份由
+                            // series (measurement, tags, field) 承载——描述列重复标签
+                            // （厂家占位寄存器）不构成业务撞名，业务名冲突一律后缀顺延、
+                            // 不拒收；提取层把 CSV 第 5 列引号内首 token（"device"）泄漏
+                            // 进点名的形态在赋配前剥除
+                            const isInfluxFwd =
+                                normalize_protocol(state.fwd.protocol ?? "") === "influxdb";
+                            if (isInfluxFwd) {
+                                for (const p of merged.points) {
+                                    const nm = String(p["name"] ?? "");
+                                    if (nm.startsWith("\"")) {
+                                        p["name"] = nm
+                                            .replace(/^"+/, "")
+                                            .replace(/^device_?/, "");
+                                    }
+                                }
+                            }
                             const pid = assign_point_ids(merged.points, {
                                 existing: new Set(
                                     (state.recv.points ?? []).map((q) =>
@@ -2180,6 +2203,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                                 ),
                                 placeholderNames: cfg.pointId?.placeholder_names ?? DEFAULT_PLACEHOLDER_NAMES,
                                 placeholderBase: cfg.pointId?.placeholder_base ?? DEFAULT_PLACEHOLDER_BASE,
+                                conflictSuffix: isInfluxFwd,
                             });
                             cfg.agentLogger.memory(conversation, "mb_probe_merge", {
                                 merged: merged.points.length,
@@ -2370,6 +2394,23 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                             // id 赋配（2026-10-07 翻译退役）：文字路径与文件管道同规——
                             // id = 点名确定性归一化，LLM 提取不再产出 id；业务撞名整表
                             // 拒收，空名/纯符号汇总追问（2026-10-08 空名裁定）
+                            // influx 入库映射表（2026-10-13 裁定，RP-IF 组）：点身份由
+                            // series (measurement, tags, field) 承载——描述列重复标签
+                            // （厂家占位寄存器）不构成业务撞名，业务名冲突一律后缀顺延、
+                            // 不拒收；提取层把 CSV 第 5 列引号内首 token（"device"）泄漏
+                            // 进点名的形态在赋配前剥除
+                            const isInfluxFwd =
+                                normalize_protocol(state.fwd.protocol ?? "") === "influxdb";
+                            if (isInfluxFwd) {
+                                for (const p of merged.points) {
+                                    const nm = String(p["name"] ?? "");
+                                    if (nm.startsWith("\"")) {
+                                        p["name"] = nm
+                                            .replace(/^"+/, "")
+                                            .replace(/^device_?/, "");
+                                    }
+                                }
+                            }
                             const pid = assign_point_ids(merged.points, {
                                 existing: new Set(
                                     (state.recv.points ?? []).map((q) =>
@@ -2386,6 +2427,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                                 ),
                                 placeholderNames: cfg.pointId?.placeholder_names ?? DEFAULT_PLACEHOLDER_NAMES,
                                 placeholderBase: cfg.pointId?.placeholder_base ?? DEFAULT_PLACEHOLDER_BASE,
+                                conflictSuffix: isInfluxFwd,
                             });
                             if (pid.conflicts.length > 0) {
                                 // 冲突清单按点名分量（裸 id 去设备前缀）去重展示
@@ -2460,7 +2502,10 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             }
             // 转发点表 LLM 提取（首提/重提共用）：输入只能是用户对转发侧的显式表述
             //（文本重述或文件通道），空结果不落槽位
-            const extract_fwd_points = async (input: string): Promise<void> => {
+            const extract_fwd_points = async (
+                input: string,
+                acc?: Map<string, Record<string, unknown>>,
+            ): Promise<void> => {
                 const hit = entry_of_side(state.fwd, "reader");
                 if (!hit) {
                     return;
@@ -2489,9 +2534,18 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                     r && Array.isArray(r["points"])
                         ? (r["points"] as Array<Record<string, unknown>>)
                         : null;
-                if (pts && pts.length > 0 && !same_points_deep(state.fwd.points, pts)) {
-                    state.fwd.points = sanitize_influx_fields(pts, state.fwd.points, state.fwd.protocol);
-                    progress = true;
+                if (pts && pts.length > 0) {
+                    if (acc) {
+                        // 分块提取累积模式（RP-IF 2026-10-14）：按 addr 去重合并到
+                        // 累积器，由调用方统一 sanitize 后落草稿
+                        for (const p of pts) {
+                            const k = String(p["addr"] ?? "");
+                            if (k !== "") acc.set(k, p);
+                        }
+                    } else if (!same_points_deep(state.fwd.points, pts)) {
+                        state.fwd.points = sanitize_influx_fields(pts, state.fwd.points, state.fwd.protocol);
+                        progress = true;
+                    }
                 }
             };
             const rangeM = fwdScopedNow.match(
@@ -2529,8 +2583,134 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                     // 点名对应（windspeed…）」是用户提供而非推导——确定性骨架先行会
                     // 吞掉首轮语义（field 按裁定不推导，缺口又无法从历史文本闭合，
                     // 死循环）；提取为空（用户真未给映射）→ 回落 §2.7.1 确定性推导
-                    // 骨架（measurement/type 由方案层源点映射填充）
-                    await extract_fwd_points(fwdScopedNow);
+                    // 骨架（measurement/type 由方案层源点映射填充）。
+                    // 入库映射表（2026-10-14 RP-IF 裁定）：measurement/tags/field/type
+                    // 逐行在文件里——file_data 是解析器文本且截断 8000 字符（RP-IF-01
+                    // 实测不可用），改用 state.fileBlocks 结构化行（与接收侧同源）。
+                    // 确定性直读优先：映射列由用户文本指定（第 N 列 X 是 measurement）
+                    // + 值形态识别（纯整数→addr、k=v 串→tags、带数字编号标识→field、
+                    // bool/int/uint/float 枚举→type），逐行机械构建——LLM 分块重提取
+                    // 对 1212 行过慢（RP-IF-01 实测 ~10 分钟/80 行块），仅作兜底
+                    const rowsAll: string[][] = [];
+                    for (const b of state.fileBlocks ?? []) {
+                        for (const blk of b.data.blocks ?? []) {
+                            if (blk.kind === "table") rowsAll.push(...blk.rows);
+                        }
+                    }
+                    const isTagList = (v: string): boolean =>
+                        v.includes("=") && v.includes(",");
+                    const isFieldType = (v: string): boolean =>
+                        INFLUX_FIELD_RE.test(v) && /\d/.test(v);
+                    const isPointType = (v: string): boolean =>
+                        ["bool", "int", "uint", "float"].includes(v);
+                    let addrCol = -1;
+                    let measCol = -1;
+                    let tagsCol = -1;
+                    let fieldCol = -1;
+                    let typeCol = -1;
+                    if (rowsAll.length > 0) {
+                        const colN = Math.max(...rowsAll.map((r) => r.length));
+                        const colAll = (c: number, test: (v: string) => boolean): boolean =>
+                            rowsAll.every((r) => r.length > c && test(String(r[c] ?? "").trim()));
+                        for (let c = 0; c < colN; c++) {
+                            if (addrCol < 0 && colAll(c, (v) => /^\d+$/.test(v))) addrCol = c;
+                            else if (tagsCol < 0 && colAll(c, isTagList)) tagsCol = c;
+                            else if (fieldCol < 0 && colAll(c, isFieldType)) fieldCol = c;
+                            else if (typeCol < 0 && colAll(c, isPointType)) typeCol = c;
+                        }
+                        // measurement 列由用户文本指定（「第 N 列 X 是 measurement」，
+                        // RP-IF-01 输入口径）；列号支持阿拉伯与中文数字
+                        const measM = fwdScopedNow.match(
+                            /第\s*([0-9一二三四五六七八九十]+)\s*列[^，。；\n]{0,16}?是\s*measurement/i,
+                        );
+                        if (measM) {
+                            const zh = "一二三四五六七八九十";
+                            const t = measM[1]!;
+                            const n = /^[0-9]+$/.test(t)
+                                ? Number(t)
+                                : t.length === 1
+                                  ? zh.indexOf(t) + 1
+                                  : t === "十"
+                                    ? 10
+                                    : 0;
+                            if (n >= 1 && n <= colN && n - 1 !== addrCol) measCol = n - 1;
+                        }
+                    }
+                    if (rowsAll.length > 0 && addrCol >= 0 && fieldCol >= 0) {
+                        const acc = new Map<string, Record<string, unknown>>();
+                        for (const r of rowsAll) {
+                            const addr = Number(String(r[addrCol] ?? "").trim());
+                            if (!Number.isInteger(addr) || addr < 0) continue;
+                            const p: Record<string, unknown> = {
+                                addr,
+                                field: String(r[fieldCol] ?? "").trim(),
+                            };
+                            if (measCol >= 0) p["measurement"] = String(r[measCol] ?? "").trim();
+                            if (typeCol >= 0) p["type"] = String(r[typeCol] ?? "").trim();
+                            if (tagsCol >= 0) {
+                                const tags: Record<string, string> = {};
+                                for (const kv of String(r[tagsCol] ?? "").split(",")) {
+                                    const eq = kv.indexOf("=");
+                                    if (eq > 0) {
+                                        const k = kv.slice(0, eq).trim();
+                                        const v = kv.slice(eq + 1).trim();
+                                        // 键 [A-Za-z_] 且值非空——第 5 列首 token "device"
+                                        // 占位（无 = 值）自然跳过
+                                        if (INFLUX_TAGKEY_RE.test(k) && v !== "") tags[k] = v;
+                                    }
+                                }
+                                if (Object.keys(tags).length > 0) p["tags"] = tags;
+                            }
+                            acc.set(String(addr), p);
+                        }
+                        if (acc.size > 0) {
+                            const sanitized = sanitize_influx_fields(
+                                [...acc.values()],
+                                state.fwd.points,
+                                state.fwd.protocol,
+                            );
+                            if (!same_points_deep(state.fwd.points, sanitized)) {
+                                state.fwd.points = sanitized;
+                                progress = true;
+                            }
+                        }
+                    }
+                    if (!state.fwd.points && rowsAll.length > 0) {
+                        // 确定性直读未成立（列形态不匹配）→ LLM 分块提取兜底：
+                        // 单次输出上限 16384 装不下大表，80 行/块、按 addr 去重合并
+                        const CHUNK = 80;
+                        const acc = new Map<string, Record<string, unknown>>();
+                        for (let off = 0; off < rowsAll.length; off += CHUNK) {
+                            const part = rowsAll
+                                .slice(off, off + CHUNK)
+                                .map((r) => JSON.stringify(r))
+                                .join("\n");
+                            const head =
+                                `（入库映射表第 ${off + 1}~${Math.min(off + CHUNK, rowsAll.length)} 行，` +
+                                `共 ${rowsAll.length} 行；每行一个 JSON 数组=一行 CSV。列语义（用户口径）：` +
+                                `索引 0=asfp2 点地址 addr；索引 3=measurement；索引 4=tags——首 token ` +
+                                `"device"（无 = 值）为厂家占位忽略、其余逗号分隔 k=v 逐对采纳；索引 5=field；` +
+                                `索引 6=type。逐行输出一个 point，measurement/tags/field/type 原样采纳）`;
+                            await extract_fwd_points(
+                                `<file_data>\n${part}\n</file_data>\n${head}\n${fwdScopedNow}`,
+                                acc,
+                            );
+                        }
+                        if (acc.size > 0) {
+                            const sanitized = sanitize_influx_fields(
+                                [...acc.values()],
+                                state.fwd.points,
+                                state.fwd.protocol,
+                            );
+                            if (!same_points_deep(state.fwd.points, sanitized)) {
+                                state.fwd.points = sanitized;
+                                progress = true;
+                            }
+                        }
+                    }
+                    if (!state.fwd.points) {
+                        await extract_fwd_points(fwdScopedNow);
+                    }
                     if (!state.fwd.points) {
                         state.fwd.points = (state.recv.points ?? []).map((p) => ({
                             addr: p["addr"],
@@ -2854,7 +3034,18 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             side.points.forEach((p, i) => {
                 const parts = idFields.map((f) => {
                     const v = p[f];
-                    return v === undefined || v === null || v === "" ? null : String(v).trim();
+                    if (v === undefined || v === null || v === "") return null;
+                    if (typeof v === "object") {
+                        // tags 对象规范化（键排序 k=v 逗号串）——series 身份分量；
+                        // 裸 String(v) 产出 [object Object]，跨装置同名 field 会
+                        // 被误报重复（RP-IF-01 实测：jd|…|yx0005 ×4）
+                        const obj = v as Record<string, unknown>;
+                        return Object.keys(obj)
+                            .sort()
+                            .map((k) => `${k}=${String(obj[k])}`)
+                            .join(",");
+                    }
+                    return String(v).trim();
                 });
                 if (parts.some((v) => v === null)) return;
                 const key = parts.join("|");

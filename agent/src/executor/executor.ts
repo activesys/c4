@@ -429,7 +429,9 @@ export function sanitize_identifier(text: string): string {
     return text.replace(/[^a-zA-Z0-9_]/g, "_").toLowerCase();
 }
 
-/** 身份字段组合键（如 "uid=1, fun=3, addr=1000"）；任一身份字段缺值 → null */
+/** 身份字段组合键（如 "uid=1, fun=3, addr=1000"）；任一身份字段缺值 → null。
+ *  对象字段（influx tags）规范化为键排序 k=v 串——series 身份分量；裸 String(v)
+ *  产出 [object Object]，跨装置同名 field 误报重复（RP-IF-01 实测） */
 export function identity_field_key(
     rec: Record<string, unknown>,
     identity_fields: string[],
@@ -440,7 +442,17 @@ export function identity_field_key(
         if (v === undefined || v === null || v === "") {
             return null;
         }
-        parts.push(`${f}=${String(v)}`);
+        if (typeof v === "object") {
+            const obj = v as Record<string, unknown>;
+            parts.push(
+                `${f}=${Object.keys(obj)
+                    .sort()
+                    .map((k) => `${k}=${String(obj[k])}`)
+                    .join(",")}`,
+            );
+        } else {
+            parts.push(`${f}=${String(v)}`);
+        }
     }
     return parts.join(", ");
 }

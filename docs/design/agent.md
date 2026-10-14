@@ -346,7 +346,7 @@ Agent 系统覆盖数据接入流程中 Agent 侧的全部职能：
 | c4_modbus_client | UID_OUT_OF_RANGE / ADDR_OUT_OF_RANGE（>0xFFFF）/ FUN_TYPE_MISMATCH（fun∈{1,2}→type∈{0,15}；fun∈{3,4}→8 个寄存器型）/ BAD_SWAP（合法值 {0,1,2,4}；单数据单元点必须 0；须整除字节跨度）/ POINT_DUP（uid+fun+addr）/ POINT_OVERLAP（同 uid+fun 组内，跨度=pointSpan） | ✅ 已从 validateConfig 源码确认（完整规则见该文档） |
 | c4_asfp2_client / c4_asfp2_server | POINT_DUP（addr 为 24 位 key，重复即映射静默覆盖；**dup 检测加入共享校验函数，启动校验随之修复现状缺口**）/ ADDR_OUT_OF_RANGE（> MaxAddr 0xFFFFFF）；addr 非区间编址，无重叠概念。**同目标转发 addr 查重**（两个转发实例发往同一 ip:port 目标时 addr 不得重复——下游按 addr 唯一区分数据，重复即互踩）属**跨实例合并比较域**，本工具无状态查不到，归方案层装配 / merge 前置（下接入层 2/4，2026-10-02 补） | ✅ 已确认 |
 | c4_iec104_client | POINT_DUP（信息对象地址重复）；addr 上限归启动校验（依赖实例级 ioa_size，本工具参数不含实例字段） | ✅ 已确认 |
-| c4_influxdb_client | POINT_DUP（measurement+field 组合）/ MEASUREMENT_EMPTY / INVALID_TYPE / FIELD_FORMAT（空值或 `^[a-zA-Z_]+$` 不符——field 必填，tags 若提供则同校验）。**同 Writer key 双映射**（同一实例内两个不同 measurement+field 引用同一 Writer 点 → 运行期 duplicate shm_id）由 **L1 reader-key 唯一性**在阶段 6 出口拦截（作用域 = Reader 实例内；跨实例共享读合法，c4_architecture.md §3.1.3——本工具参数含 key 字段可查，但职责归 L1——key 是结构引用非协议语义） | ✅ 已确认 |
+| c4_influxdb_client | POINT_DUP（measurement+field 组合）/ MEASUREMENT_EMPTY / INVALID_TYPE / FIELD_FORMAT（空值或 `^[a-zA-Z_][a-zA-Z0-9_]*$` 不符——field 必填，2026-10-13 放宽允许数字编号，tags 键仍 `^[a-zA-Z_]+$`）。**同 Writer key 双映射**（同一实例内两个不同 measurement+field 引用同一 Writer 点 → 运行期 duplicate shm_id）由 **L1 reader-key 唯一性**在阶段 6 出口拦截（作用域 = Reader 实例内；跨实例共享读合法，c4_architecture.md §3.1.3——本工具参数含 key 字段可查，但职责归 L1——key 是结构引用非协议语义） | ✅ 已确认 |
 
 价值：消除 agent（TS）与 server（Go）双源漂移，把「执行期才发现重叠 → 回滚」前移到
 方案确认之前（批次内 L2 在阶段出口；批次 × 既有点的合并比较域在方案层装配/merge 前置，
@@ -1709,7 +1709,9 @@ reader key 反解析（执行模块/编排器共 7 处）与 shm 唯一键 `serv
 > 转发端（Reader，如 InfluxDB）无自身点名——按序引用对应采集点点名，不生成、不落盘。
 > **Reader 的业务字段（如 InfluxDB field）同样必须显式提供**（c4_influxdb_client.md §2，
 > 2026-10-01 裁定：必填、无默认值、**不推导**；2026-10-09 裁定：点表各标识字段
-> 不得中文——field 仅 `[a-zA-Z_]+`、measurement 仅 `[A-Za-z0-9_.-]+`，「字段名跟
+> 不得中文——field 仅 `[a-zA-Z_][a-zA-Z0-9_]*`（2026-10-13 放宽：字母/下划线
+> 开头、允许数字编号，AZGF 真实点表 yx0001 形态）、measurement 仅
+> `[A-Za-z0-9_.-]+`，「字段名跟
 > 点名对应」类表述不得直接落中文名，Agent 须追问显式 field 名）——与点 id 分属两个独立供给，点 id 改为
 > 中文原名不影响 field；编排器 mirrorAll/expr 路径现存的「从 id 剥前缀派生 field」
 > 违反本条，随本裁定同批修正为「field 缺失即走缺口追问」。

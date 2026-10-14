@@ -137,7 +137,25 @@ func loadConfig(configPath string) ([]serverInstance, error) {
 	rawJSON, _ := json.Marshal(section)
 	var instances []serverInstance
 	if err := json.Unmarshal(rawJSON, &instances); err != nil {
-		return nil, fmt.Errorf("CONFIG_PARSE_ERROR: failed to parse 'c4_asfp2_server' section: %v", err)
+		// 诊断增强（2026-10-14 RP-IF 实测）：携带首个出错点的原文片段，避免只有
+		// 字段路径没有值形态（string addr 无从定位来源）
+		var rawPts []map[string]any
+		if pts, ok := section.(map[string]any); ok {
+			if arr, ok := pts["points"].([]any); ok && len(arr) > 0 {
+				for _, p := range arr {
+					if pm, ok := p.(map[string]any); ok {
+						if s, ok := pm["addr"].(string); ok {
+							rawPts = append(rawPts, map[string]any{"addr": s, "id": pm["id"], "name": pm["name"]})
+							if len(rawPts) >= 3 {
+								break
+							}
+						}
+					}
+				}
+			}
+		}
+		dump, _ := json.Marshal(rawPts)
+		return nil, fmt.Errorf("CONFIG_PARSE_ERROR: failed to parse 'c4_asfp2_server' section: %v；string addr 采样: %s", err, string(dump))
 	}
 
 	// KeepAlive 字节缺省归一化：forward_kack 取规范典型值 0xFF。显式或隐式为 0 均视为

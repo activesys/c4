@@ -1,20 +1,27 @@
-# C4 真实点表接入功能测试用例（IEC104 / modbus × asfp2）
+# C4 真实点表接入功能测试用例（IEC104 / modbus / influxdb × asfp2）
 
 > 本文件是**独立于 [func_test_case.md](func_test_case.md) 的测试用例描述文件**，用例编号
-> 使用独立前缀 `RP-xx`（Real Points，IEC104 组）与 `RP-MB-xx`（modbus 组），与主用例
+> 使用独立前缀 `RP-xx`（Real Points，IEC104 组）、`RP-MB-xx`（modbus 组）与
+> `RP-IF-xx`（influxdb 组，2026-10-13 新增），与主用例
 > 1~77 互不占用。测试目的单一明确：**验证 c4 对真实厂家点表的解析能力**——类型语境
 > 识别、地址列消歧、地址归一化、排除组回报、多文件累积、脏数据鲁棒性。IEC104 组
 > （RP-01~RP-13）采集侧一律 IEC104；modbus 组（RP-MB-01~RP-MB-12，2026-10-11 新增）
 > 采集侧一律 Modbus/TCP；转发侧一律**一个** asfp2 实例（统一样板，见下）。
+> influxdb 组（RP-IF-01~02）方向相反：**asfp2 接收（c4 作 asfp2 server）→
+> InfluxDB 入库（c4_influxdb_client）**，验证真实厂家「入库映射表」的逐点
+> measurement/tags/field/type 映射与数据面端到端。
 >
 > 依据：设计 [agent.md](../docs/design/agent.md) §2.13（点表解析与归一化）、
 > [c4_iec104_client.md](../docs/design/c4_iec104_client.md) §10（注册信息点表约束，
 > §10.1 厂家实测形态、§10.6 本地真实点表验收）、
 > [c4_modbus_client.md](../docs/design/c4_modbus_client.md) §2.3（point 字段）、
-> §4.6（type/swap 语义与字节序）。
+> §4.6（type/swap 语义与字节序）、
+> [c4_influxdb_client.md](../docs/design/c4_influxdb_client.md) §2.3（points 映射，
+> field 护栏 2026-10-13 放宽为 `[a-zA-Z_][a-zA-Z0-9_]*`）。
 > 建议套件：`func_case_e2e/run_chain_real_points.py`（RP-01→RP-13 串行）、
 > `func_case_e2e/run_chain_real_points_mb.py`（RP-MB-01→RP-MB-11 串行，
-  RP-MB-12 暂不测试标注 SKIP-MB12，待实现）。
+  RP-MB-12 暂不测试标注 SKIP-MB12，待实现）、
+> `func_case_e2e/run_chain_real_points_if.py`（RP-IF-01→RP-IF-02 串行）。
 
 ## 规格地位与断言基准（实现测试代码前必读）
 
@@ -784,6 +791,113 @@
 
 ---
 
+# influxdb 组真实点表接入测试用例（RP-IF 系列，2026-10-13 新增）
+
+> 数据源 `<工作区根>/points/influxdb/AZGF_172.24.1.46_2404.csv`（仓库外，套件
+> 启动探测、缺失整组 SKIP-DIR 口径同前两组）。本组方向与前两组相反：**asfp2
+> 接收（c4 作 asfp2 server 被动收）→ InfluxDB 入库（c4_influxdb_client）**，
+> 验证真实厂家「入库映射表」的解析与逐点 measurement/tags/field/type 落地，
+> 以及 asfp2→influxdb 数据面端到端。驱动器建议套件：
+> `func_case_e2e/run_chain_real_points_if.py`（RP-IF-01→RP-IF-02 串行，InfluxDB
+> 托管与链首清库复用主套件 influx 链设施）。
+>
+> **field 护栏放宽（2026-10-13 用户裁定）**：本表 field 为 `yx0001`/`yc0001`
+> 数字编号形态，与原「field 仅字母+下划线」（2026-10-09）冲突——裁定放宽为
+> `[a-zA-Z_][a-zA-Z0-9_]*`（字母/下划线开头、允许数字），tags 键仍 `[a-zA-Z_]+`；
+> c4_influxdb_client.md / agent.md 已同步修订。本组即该裁定的验收用例。
+
+## 域规则（influxdb 组断言口径，2026-10-13）
+
+1. **asfp2 地址为点唯一键**：CSV 无点名列，点 id/addr 即第 1 列 asfp2 地址
+   （1000~2211）；field 按装置重起编号、跨装置同名属**合法形态**（InfluxDB
+   series = measurement + tag set + field，device_id tag 区分装置）——不得因
+   field 同名报撞名/去重。
+2. **measurement = 第 4 列 `jd`（2026-10-13 用户裁定）**：恒值列 jd 即入库
+   measurement（厂家集电层名目），逐点落 config；第 5 列**首 token `device` 为
+   厂家表格占位、非 line protocol 合法 tag，不读**，其余 `k=v` 为 tags——
+   plant_id/project_id/line_id/device_id/device_type_id/type_id 六键逐点采纳，
+   16 台装置 device_id 互异，映射关系以附录 C 基准为准。
+3. **撞名口径 = series 组合**（2026-10-13 用户裁定）：入库映射表的点身份由
+   (measurement, tags, field) 承载——全表 1212 组 (jd, device_id, field) 零
+   重复即合法；**描述列重复标签（如「变压器节点保留」×4 占位寄存器）不判撞名、
+   不拒收**——采集点表的「装置+点名三裁」不适用于本组（身份模型不同：采集点
+   无 tags/field，入库点有）。
+4. **field/type 原样采纳**：不推导、不翻译、不改写（2026-10-01 裁定延续）；
+   bool↔yx、float↔yc 严格对应（附录 C）。
+5. **必填不猜**：asfp2 接收端口、influx url/token/org/bucket 点表未提供——
+   追问或文本补齐后采纳，禁止按惯例自动填充（与主套件用例 31 同口径）。
+6. **CSV 解析**：GB18030 编码（utf-8 强读乱码）；无表头（首行即数据）；第 5 列
+   内嵌逗号由引号包裹（CSV 引号规则）。
+
+## 统一环境与样板（influxdb 组）
+
+- **场站**：华能阿拉善（沿用主套件前置）；各用例独立会话。
+- **InfluxDB server**：复用主套件 influx 链设施——本机 1.8.10
+  （/home/wangbo/backup/influxdb）绑定 127.0.0.1:18086、auth 关闭（token 头被
+  忽略，鉴权形态不在被测范围）；链首清库（influx_reset_db，db=hnals 自建）。
+  套件文本统一写 `http://172.16.109.12:8086`（map_ports → 127.0.0.1:18086，
+  断言按映射后值）。
+- **token/org/bucket**：hnals-influx-2026 / activesys / hnals。
+- **asfp2 接收端口**：9002（避开主套件 9001 与 e2e 常驻 19001/19002）。
+- **数据面**：asfp2_client 注入（-s 127.0.0.1 -p 9002 -b 1000 -e 2211）→
+  c4_influxdb_client flush → `/query`（v1，db=hnals）验证。
+- **通过标准**：配置断言（1 个 asfp2 server 接收实例 + 1 个 c4_influxdb_client
+  入库实例、1212 点映射逐项成立）+ 方案确认执行成功 + 数据面断言
+  （series/field/值可见）全部成立。
+
+## RP-IF-01：真实入库映射表全链路——GBK 无表头 CSV + 逐点 tags + 跨装置同名 field（AZGF）
+
+- **测试特性**：① 真实厂家入库映射表——GBK/GB18030 编码、无表头 7 列、第 5 列
+  内嵌逗号由引号包裹（CSV 引号解析）；② 1212 点 asfp2 地址 1000~2211 **连续零
+  重复**，作点唯一键；③ 双类型分块——yx（bool）393 点 @1000~1392 + yc（float）
+  819 点 @1393~2211；④ **measurement = 第 4 列 `jd`**（恒值列即 measurement，
+  2026-10-13 用户裁定；第 5 列首 token `device` 为厂家占位不读）+ 每点 6 tag，
+  16 台装置 device_id 互异（2 箱变 + 2 逆变器 + 12 汇流箱，附录 C 映射表）；
+  ⑤ **field 按装置重起编号**（唯一 field 名 yx 113 个 + yc 54 个 = 167 个）——
+  跨装置同名 field 靠 device_id tag 区分 series（如 `yx0001` ×16 台、`yc0001`
+  ×16 台），**描述列重复标签（变压器节点保留 ×4 等 25 行占位点）不判撞名**——
+  撞名口径 = (measurement, tags, field) series 组合，全表零重复（域规则 3，
+  2026-10-13 用户裁定）；⑥ field 含数字（`yx0001` 形态）——2026-10-13 field
+  护栏放宽裁定的直接验收；⑦ 1212 点规模的入库映射解析与方案装配
+- **测试输入**：上传 `AZGF_172.24.1.46_2404.csv` + 文本样板的必要项：
+  「第三方厂家通过 asfp2 协议把数据转给我们，接收端口 9002。CSV 第 1 列是
+  asfp2 点地址，第 4 列 jd 是 measurement，tags、字段名（field）、类型都按
+  CSV 里的列来，1212 个点全部入库。数据写入 InfluxDB：写入地址
+  http://172.16.109.12:8086，token 是 hnals-influx-2026，org 是 activesys，
+  bucket 是 hnals。」
+- **预期**：
+  - 配置面【文件】：1 个 `c4_asfp2_server` 接收实例（9002，1212 点，addr
+    1000~2211 原样连续——asfp2 点无 type 字段，c4_asfp2_server.md §2.3）+
+    1 个 `c4_influxdb_client` 入库实例（1212 映射点，key 引用采集点；url
+    映射后 127.0.0.1:18086、org activesys、bucket hnals；type bool 393 /
+    float 819 与 CSV 第 7 列一致）；
+  - 映射断言【文件】：measurement 全 `jd`（第 4 列裁定口径）；tags 六键齐全、
+    device_id 集合 == 16 台且逐点与附录 C 映射表对应；field/type 原样
+    （首 1000→jd/AZGF_XB_014/yx0001/bool、交界 1393→jd/AZGF_XB_014/yc0001/
+    float、尾 2211→jd/AZGF_HLX_014_012/yc0054/float，另抽样多行）；
+    **不因描述列重复标签拒收**（25 行占位点合法共存）；
+  - 数据面【过程】：asfp2_client 注入 1000~2211 → flush 后 `/query` 可见
+    measurement=jd 下 **16 个 device_id**；跨装置同名 field 各自成 series
+    （按 device_id 分组计数与附录 C 一致）；bool field 值 true/false 形态、
+    float field 有数值；
+  - 【对话】接入回执可见 1212 点、装置分组、入库去向（InfluxDB bucket）。
+
+## RP-IF-02：缺 bucket 追问后接入（同主套件 39 精神）
+
+- **测试特性**：influx 连接信息缺口（bucket）→ fail-visible 追问 → 补齐后接入
+  落地；field 由 CSV 承载**不触发 field/字段名追问**（对照主套件 39 的
+  「字段名跟点名对应」追问——真实映射表场景 field 无缺口）
+- **测试输入**：上传同一 CSV + 样板仅给 asfp2 端口与 influx url/token/org
+  （**不给 bucket**）→ 追问后应答「bucket是hnals」
+- **预期**：
+  - 追问可见【对话】：明确指向 bucket 缺口（必填不猜，禁止缺省 bucket）；
+  - 补齐后配置落地【文件】：1+1 实例、1212 点映射（断言同 RP-IF-01 配置面，
+    允许抽样：点数/measurement/首中尾映射）；
+  - 数据面抽样【过程】：注入后任一 device_id 的任一 field 可查即可；
+  - field 无追问【对话】：全程不出现 field/字段名类追问。
+
+---
+
 ## 附录 A：点表基准数据（断言唯一来源，2026-10-07 实测）
 
 > 提取方法：xls/xlsx 经 SheetJS `sheet_to_json(header:1)`；csv 以 GB18030 解码
@@ -852,3 +966,31 @@ RP-MB-10（Sheet3 1971 对账，场级段撞名 3 组；副本/逗号串不产�
 Bachmann 5 组）；excluded——MB-01 遥控 144、MB-02 powercontrol 344、MB-03 可写 5
 （均 I16）、MB-04 遥控 72、MB-06 控制组整组（表内显式 20 点）、MB-07 遥调、
 MB-08 遥控 75、MB-09 控制组 75（含「遥控」分表合并）；暂缓——MB-12（SKIP-MB12）。
+
+---
+
+## 附录 C：influxdb 组点表基准数据（断言唯一来源，2026-10-13 实测）
+
+> 提取方法：csv 模块 GB18030 解码（`points/influxdb/AZGF_172.24.1.46_2404.csv`）。
+> 断言基准与 c4 实现行为无关。
+
+| 项 | 基准 |
+|---|---|
+| 总行数 | 1212（**无表头**，首行即数据） |
+| 编码 | GB18030（utf-8 强读乱码） |
+| 列 | 7 列：addr / 装置名 / 描述 / 恒值 `jd` / measurement+tags / field / type |
+| addr | 1000~2211 连续零重复（asfp2 地址即点唯一键） |
+| 类型分块 | yx（bool）393 点 @1000~1392；yc（float）819 点 @1393~2211 |
+| measurement | `jd` ×1212（第 4 列恒值即 measurement，2026-10-13 用户裁定；第 5 列首 token `device` 为厂家占位不读） |
+| tags 键 | plant_id / project_id / line_id / device_id / device_type_id / type_id（六键每点齐全；plant_id=AZGF、project_id=AZGF_01、line_id=AZGF_01_01 恒值） |
+| 装置 → device_id（16 台） | #14箱变→AZGF_XB_014（yx32+yc25）；14区1#逆变器→AZGF_NBQ_014_001（yx113+yc48）；14区2#逆变器→AZGF_NBQ_014_002（yx113+yc48）；#14-1箱变→AZGF_XB_014_1（yx99+yc50）；14区1#逆变器1#~6#汇流箱→AZGF_HLX_014_001~006（各 yx3+yc54）；14区2#逆变器7#~12#汇流箱→AZGF_HLX_014_007~012（各 yx3+yc54） |
+| field 唯一名 | 167 个：yx 113（yx0001~yx0113）+ yc 54（yc0001~yc0054），**按装置重起编号** |
+| 首行 | 1000 → #14箱变 / AZGF_XB_014 / yx0001 / bool |
+| yx/yc 交界 | 1392 → 14区2#逆变器12#汇流箱 / yx0003 / bool；1393 → #14箱变 / yc0001 / float |
+| 尾行 | 2211 → 14区2#逆变器12#汇流箱 / AZGF_HLX_014_012 / yc0054 / float |
+| 跨装置同名 field | `yx0001` ×16 台、`yc0001` ×16 台……series 由 device_id tag 区分，合法共存 |
+| 撞名口径 | (measurement, tags, field) series 组合全表 1212 组零重复；描述列重复标签（「变压器节点保留」×4、「变压器节点1保留」×10、「变压器节点2保留」×11，共 25 行占位点）**不判撞名**（2026-10-13 用户裁定） |
+
+**对账速查（2026-10-13）**：RP-IF-01 接入 1212 点（asfp2 接收实例 1212 + influx
+入库映射 1212，双侧成对，数据面 16 device_id series）；RP-IF-02 追问 bucket 后
+同 RP-IF-01。

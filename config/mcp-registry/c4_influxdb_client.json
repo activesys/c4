@@ -25,16 +25,22 @@
       {
         "name": "field",
         "type": "string",
-        "description": "field 名（字段名；仅英文字母与下划线，不得中文，必填不推导）"
+        "description": "field 名（字段名；字母/下划线开头、允许数字编号（[a-zA-Z_][a-zA-Z0-9_]*，2026-10-13 裁定放宽），不得中文，必填不推导）"
       },
       {
         "name": "type",
         "type": "string",
         "description": "数据类型（枚举见 point_field_hints.type）"
+      },
+      {
+        "name": "tags",
+        "type": "object",
+        "description": "附加 tag 键值对（可选）：键 [a-zA-Z_]+、值任意字符串（含中文）；点表 tags 列的 k=v 对逐点原样采纳"
       }
     ],
     "identity_fields": [
       "measurement",
+      "tags",
       "field"
     ]
   },
@@ -120,7 +126,7 @@
       },
       "field": {
         "description": "field 名（字段名）",
-        "extraction": "仅允许英文字母与下划线（[a-zA-Z_]+），不得中文、不得含数字/点/连字符（2026-10-09 裁定）；必填、不推导、不翻译——「字段名跟点名对应」「按点名作为字段名」类表述不能直接采用中文名，必须向用户逐点询问显式 field 名（按点表行序对应）"
+        "extraction": "字母/下划线开头、允许数字编号（[a-zA-Z_][a-zA-Z0-9_]*，2026-10-13 裁定放宽，如 yx0001/yc0001 入库点表形态），不得中文（2026-10-09 裁定）；必填、不推导、不翻译——「字段名跟点名对应」「按点名作为字段名」类表述不能直接采用中文名，必须向用户逐点询问显式 field 名（按点表行序对应）；点表自带 field 列时逐点原样采纳"
       },
       "type": {
         "description": "数据类型",

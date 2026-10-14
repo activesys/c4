@@ -9,10 +9,18 @@ package main
 //   工具路径 validateInfluxPoints：requireShmID=false + dupByBusinessKey=true
 //   （(measurement,field) 业务键查重）。
 
-import "regexp"
+import (
+	"regexp"
+	"sort"
+	"strings"
+)
 
 var (
-	// keyRe：field / tag key 的合法字符集（[a-zA-Z_]+，tags 值可为任意字符串）
+	// fieldRe：field 合法字符集——2026-10-13 用户裁定放宽：字母/下划线开头、
+	// 允许数字编号（AZGF 入库点表 yx0001/yc0001 形态；原 2026-10-09 口径
+	// [a-zA-Z_]+），不得中文
+	fieldRe = regexp.MustCompile("^[a-zA-Z_][a-zA-Z0-9_]*$")
+	// keyRe：tag key 合法字符集（[a-zA-Z_]+ 维持不变，tags 值可为任意字符串）
 	keyRe = regexp.MustCompile("^[a-zA-Z_]+$")
 	// measRe：measurement 合法字符集（ASCII 字母/数字/下划线/点/连字符）——
 	// 点表标识字段不得中文（2026-10-09 用户裁定；line protocol 兼容、展示无损）
@@ -40,7 +48,7 @@ type pointValidateOpts struct {
 func validatePointSet(points []influxPoint, opts pointValidateOpts) []pointIssue {
 	issues := []pointIssue{}
 	seenShm := make(map[int]bool)
-	seenMF := make(map[[2]string]string)
+	seenMF := make(map[[3]string]string)
 	for _, pt := range points {
 		if opts.requireShmID && pt.ShmID == 0 {
 			issues = append(issues, pointIssue{Code: "SHM_ID", Key: pt.Key})
@@ -56,7 +64,7 @@ func validatePointSet(points []influxPoint, opts pointValidateOpts) []pointIssue
 		// field 必填（2026-10-01 裁定：无默认值、不推导，废除空值放行与运行期回退）
 		if pt.Field == "" {
 			issues = append(issues, pointIssue{Code: "FIELD_EMPTY", Key: pt.Key})
-		} else if !keyRe.MatchString(pt.Field) {
+		} else if !fieldRe.MatchString(pt.Field) {
 			issues = append(issues, pointIssue{Code: "FIELD_FORMAT", Key: pt.Key, Field: pt.Field})
 		}
 		for k := range pt.Tags {
@@ -71,7 +79,12 @@ func validatePointSet(points []influxPoint, opts pointValidateOpts) []pointIssue
 			seenShm[pt.ShmID] = true
 		}
 		if opts.dupByBusinessKey {
-			mk := [2]string{pt.Measurement, pt.Field}
+			// 业务键 = (measurement, tags, field)——series 身份含 tag set：
+			// 同 measurement+field 不同 tag set 属不同 series（2026-10-13 裁定：
+			// AZGF 入库点表 jd 恒值 measurement + device_id tag 区分 16 台装置，
+			// 跨台同名 field 合法共存）；无 tags 点退化为 (measurement, "", field)
+			// 与原口径兼容
+			mk := [3]string{pt.Measurement, canonTags(pt.Tags), pt.Field}
 			if prev, ok := seenMF[mk]; ok {
 				issues = append(issues, pointIssue{
 					Code: "POINT_DUP", Key: pt.Key, PrevKey: prev,
@@ -82,4 +95,18 @@ func validatePointSet(points []influxPoint, opts pointValidateOpts) []pointIssue
 		}
 	}
 	return issues
+}
+
+// canonTags tags 规范化：键排序后 k=v 逗号串（series 身份的 tag set 分量）
+func canonTags(tags map[string]string) string {
+	keys := make([]string, 0, len(tags))
+	for k := range tags {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, k+"="+tags[k])
+	}
+	return strings.Join(parts, ",")
 }

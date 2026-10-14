@@ -204,6 +204,18 @@ function dedupe_seq(seq: SeqPoint[]): SeqPoint[] {
 
 // ── 确定性归一化 ──────────────────────────────────────────
 
+/** 纯整数地址字符串 → 数值。转录层契约是 addr 原样字符串（换算归管道），
+ * 但换算出口有二：registry point_normalization 规格（iec104）或 modbus 专属
+ * 管线；两者都不覆盖的协议（asfp2 接收等）此前字符串原样落配置，Go 侧
+ * integer 字段拒收（RP-IF-01 实测 cannot unmarshal string into addr）——
+ * 透传/无规格分支统一补此缺省换算，非纯整数（缺址/脏值）仍原样交追问 */
+function numerify_addr_value(v: unknown): unknown {
+    if (typeof v === "string" && /^\d+$/.test(v.trim())) {
+        return Number(v.trim());
+    }
+    return v;
+}
+
 function norm_points_of_seq(
     seqKey: string,
     seq: SeqPoint[],
@@ -217,7 +229,11 @@ function norm_points_of_seq(
     if (!conf || typeof conf.start !== "number") {
         // 规格未覆盖该类型 → 原样转写
         for (const { p, raw } of seq) {
-            out.push({ ...p, addr: raw, _norm_reason: `类型 ${t} 无归一化规格，原样转写` });
+            out.push({
+                ...p,
+                addr: numerify_addr_value(raw),
+                _norm_reason: `类型 ${t} 无归一化规格，原样转写`,
+            });
             asis++;
         }
         return { points: out, asis };
@@ -343,10 +359,13 @@ export function merge_and_normalize(
     for (const [key, seq] of seqs) {
         const deduped = dedupe_seq(seq);
         if (!spec) {
-            points.push(...deduped.map((sp) => sp.p));
+            points.push(...deduped.map((sp) => {
+                const p = sp.p;
+                p["addr"] = numerify_addr_value(p["addr"]);
+                return p;
+            }));
             continue;
-        }
-        const r = norm_points_of_seq(key, deduped, spec);
+        }        const r = norm_points_of_seq(key, deduped, spec);
         points.push(...r.points);
         asisCount += r.asis;
     }
@@ -1005,6 +1024,10 @@ export function assign_point_ids(
         placeholderNames?: ReadonlyArray<string>;
         placeholderBase?: string;
         typeField?: string;
+        /** influx 入库映射表（2026-10-13 裁定，RP-IF 组）：点身份由 series
+         * (measurement, tags, field) 承载，描述列重复标签不构成业务撞名——
+         * 业务名冲突按占位同款后缀顺延、conflicts 恒空（不整表拒收） */
+        conflictSuffix?: boolean;
     } = {},
 ): AssignPointIdsResult {
     const placeholderNames = opts.placeholderNames ?? DEFAULT_PLACEHOLDER_NAMES;
@@ -1032,8 +1055,11 @@ export function assign_point_ids(
             continue;
         }
         // 占位判定在点名分量（原文精确匹配白名单）；撞名判定在合成后的裸 id 上，
-        // 作用域收窄为同类型（跨类型同名共存，见 typeQualified）
-        const isPlaceholder = placeholderNames.includes(nameRaw);
+        // 作用域收窄为同类型（跨类型同名共存，见 typeQualified）。
+        // conflictSuffix（influx 入库映射表 2026-10-13 裁定）：业务名冲突视同占位
+        // 后缀顺延——身份在 series 不在点名
+        const isPlaceholder = opts.conflictSuffix === true
+            || placeholderNames.includes(nameRaw);
         const bare = device !== "" ? `${device}_${nameRaw}` : nameRaw;
         let nid = normalize_point_name(bare);
         if (nid === "") {

@@ -1,3 +1,48 @@
+2026-10-14  activesys  <activesys@sina.com>
+    Version 2.1.75
+    * agent: Fix — CSV 引号字段分列（RP-IF-01 实测）：doc_parsers 对 CSV 沿用
+      裸 split(",")，AZGF 点表第 5 列引号 tags 串内嵌逗号被拆成 7 列（colN=14），
+      列识别全废——新增 split_csv_lines（RFC4180 内容级行切分：引号内逗号/
+      换行/"" 不分裂）与 split_csv_line（引号字段分列），parse_csv_raw 与
+      parse_point_file 的 CSV 分支改走之。
+    * agent: Fix — influx 确定性直读（RP-IF-01 实测）：1212 行大表 LLM 分块
+      提取单块 10+ 分钟不可用——列形态机械识别（纯整数→addr、k=v 串→tags、
+      field 形态、类型枚举、用户文本「第 N 列是 measurement」）直读构建
+      fwd 点，LLM 分块提取降级兜底；身份查重与 executor identity_field_key
+      对 tags 对象值规范化为键排序 k=v 串（修 [object Object] 误报）。
+    * agent: Fix — 无归一化规格协议的 addr 数值化缺省（RP-IF-01 Start 阶段
+      实测）：转录层契约 addr 原样字符串、换算归管道，但换算出口仅 registry
+      point_normalization（iec104）与 modbus 专属管线覆盖——asfp2 接收路径
+      1212 个 "1000" 形态字符串 addr 原样落配置，c4_asfp2_server Go 侧
+      integer 字段拒收（cannot unmarshal string into addr）。merge_and_normalize
+      无规格透传分支与 norm_points_of_seq 无规格类型分支统一补纯整数地址
+      数值化（numerify_addr_value），非纯整数仍原样交追问。
+    * mcp: c4_asfp2_server loadConfig 诊断增强——段 unmarshal 失败时采样输出
+      string addr 点（addr/id/name 最多 3 个）辅助定位配置装配问题。
+    * docs: c4_influxdb_client.md / agent.md field 正则同步放宽
+      （[a-zA-Z_][a-zA-Z0-9_]*，tags 键维持 [a-zA-Z_]+）。
+
+2026-10-14  activesys  <activesys@sina.com>
+    Version 2.1.74
+    * agent: Fix — influx 入库映射表撞名误拒（RP-IF 组实测，2026-10-13 裁定）：
+      AZGF 真实点表（jd 恒值 measurement + device_id tag 区分 16 台装置 + field
+      按装置重起编号）被采集点表「装置+点名三裁」误拒——influx 转发路径业务名
+      冲突改为后缀顺延（conflictSuffix，assign_point_ids 新 opts），身份由
+      series (measurement, tags, field) 承载；提取层把第 5 列引号内占位首 token
+      （"device"）泄漏进点名的形态在赋配前剥除。
+    * agent: Fix — influx field 护栏放宽同步（c4_influxdb_client.md 2026-10-13
+      裁定）：INFLUX_FIELD_RE 放宽为 [A-Za-z_][A-Za-z0-9_]*（数字编号 field
+      yx0001 形态不再剥除），tag key 校验拆分独立 INFLUX_TAGKEY_RE 维持
+      [A-Za-z_]+。
+    * mcp: Fix — c4_influxdb_client validatePointSet 同步两项：field 正则放宽
+      （fieldRe）与 tag key（keyRe）拆分；业务键查重 dupByBusinessKey 纳入
+      tags 规范化串（canonTags 键排序 k=v）——同 measurement+field 不同
+      tag set 属不同 series（jd 恒值 + device_id 区分 16 台合法共存），无 tags
+      点退化为原 (measurement, field) 口径。
+    * config: c4_influxdb_client 注册表提示同步——field point_field_hints/
+      point_schema 描述放宽（允许数字编号）、identity_fields 纳入 tags
+      （series 身份）。
+
 2026-10-13  activesys  <activesys@sina.com>
     Version 2.1.73
     * agent: Fix — modbus 重复地址键跨空间塌键（MB-01 回归实测）：分段抖动使
