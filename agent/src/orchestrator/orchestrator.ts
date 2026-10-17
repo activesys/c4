@@ -100,6 +100,7 @@ import {
     mb_dedupe_copies,
     mb_bind_fun_answer,
     mb_is_textual_addr_sheet,
+    mb_is_numeric_dump_sheet,
     mb_rescue_variable_sheet,
     expand_template,
     is_type_word,
@@ -292,6 +293,29 @@ const NEW_DEVICE_CONFIRM_RE = /新增一台|另一台|就是新增|确认新增|
 // 会话累积文本（接入管线内与 state.userTexts 同源；语义层小助手，避免长表达式重复）
 function semanticOf(state: { userTexts: string[] }): string {
     return state.userTexts.join("\n");
+}
+
+// 类型统一声明确定性盖章（2026-10-17 全回归实测）：「类型统一X」为用户明示，
+// deepseek 两代口径（chat/flash+thinking）均不主动携带 optional 的 type——
+// D1-38/RP-IF-01/02 落库 type=None ≠ float/bool，GLM 能过属模型自觉；声明在案
+// 即逐点补齐缺失 type，摆脱对模型自律的依赖。显式逐点类型不受影响
+function stamp_uniform_type(side: { protocol?: string | null; points?: Array<Record<string, unknown>> | null }, cumulative: string): number {
+    if (!side.protocol || normalize_protocol(side.protocol) !== "influxdb" || !side.points) {
+        return -1;
+    }
+    const tm = cumulative.match(/类型统一\s*([A-Za-z][A-Za-z0-9_]*)/i);
+    if (tm === null) {
+        return -2;
+    }
+    let stamped = 0;
+    for (const p of side.points) {
+        const cur = String(p["type"] ?? "").trim();
+        if (cur === "") {
+            p["type"] = tm[1]!.toLowerCase();
+            stamped++;
+        }
+    }
+    return stamped;
 }
 
 // 转发意图：肯定表述命中且否定表述未命中（"不需要转发/仅采集"不激活转发链）。
@@ -1474,12 +1498,26 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
         // 裸协议名快捷命中（2026-09-29 用例11 循环实测）：整条消息恰为支持列表中的
         // 协议名（应答协议缺口的「asfp2」形态）——L0/L1 要求子句触发词、L2 可能被
         // protocolRaw 关死，裸名曾落在三级漏斗之外使缺口永不闭合。精确等值判定，
-        // 含变体（Modbus RTU 等）仍交 L2 按 match_hints 裁决
+        // 含变体（Modbus RTU 等）仍交 L2 按 match_hints 裁决。
+        // 口语裸协议应答（MB-104 链 33 实测 2026-10-17）：「就用asfp2吧」「用asfp2」
+        // 「asfp2吧」——等值判定接不住口语包裹形态，LLM 兜底亦偶发不绑（deepseek-flash
+        // 实测循环追问转发协议）→ 剥口语壳后仍按支持列表精确等值；锚定 ^…$ 仅限
+        // 整句即应答的短形态，长句声明仍走 L0/L1 语境匹配
+        const bareTokenOf = (text: string): string | null => {
+            const m = /^(?:好|行|对|嗯|是|ok|okay)?[，,。！!\s]*(?:就)?用\s*([A-Za-z0-9_-]+)\s*(?:吧|好了|即可|得了)?[。！!\s]*$/i.exec(
+                text.trim(),
+            );
+            return m !== null ? m[1]!.toLowerCase() : null;
+        };
+        const answerToken = bareTokenOf(semantic);
+        const tokenHit = (side: "reader" | "writer"): string | undefined =>
+            protocol_candidates(side).find((p) => {
+                const lp = p.toLowerCase();
+                return lp === semanticTrim || (answerToken !== null && lp === answerToken);
+            });
         const semanticTrim = semantic.trim().toLowerCase();
         if (!state.mtDevs && !state.recv.protocol && !state.locks.receive && semanticTrim.length > 0) {
-            const bareRecv = protocol_candidates("writer").find(
-                (p) => p.toLowerCase() === semanticTrim,
-            );
+            const bareRecv = tokenHit("writer");
             if (bareRecv !== undefined) {
                 state.recv.protocol = bareRecv;
                 state.recv.protocolRaw = null;
@@ -1492,9 +1530,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             !state.locks.forward &&
             semanticTrim.length > 0
         ) {
-            const bareFwd = protocol_candidates("reader").find(
-                (p) => p.toLowerCase() === semanticTrim,
-            );
+            const bareFwd = tokenHit("reader");
             if (bareFwd !== undefined) {
                 state.fwd.protocol = bareFwd;
                 state.fwd.protocolRaw = null;
@@ -1927,22 +1963,54 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                                     );
                                     continue;
                                 }
-                                const res = await extract_file_block(
-                                    b.data,
-                                    blk,
-                                    {
-                                        side: "receive",
-                                        protocol,
-                                        point_fields: JSON.stringify(fields),
-                                        point_field_hints: hints,
-                                        side_rules: RECEIVE_SIDE_RULES,
-                                        identify_ext: String(
-                                            hintsObj["identify_ext"] ?? "",
-                                        ),
-                                    },
-                                    recvScoped.trim() !== "" ? recvScoped : semanticAll,
-                                    call,
-                                );
+                                // 纯数值 dump 块（MB-10 华创 Sheet2 形态 2026-10-17 实测）：
+                                // 无表头、无任何文字单元格的原始数据导出（逗号串格 + 序号列
+                                // 800000+i）——照识别产出 1915 全占位名垃圾点污染对账；
+                                // 整块丢弃（不产点、不计对账），随解析面可见
+                                if (
+                                    isMb &&
+                                    mb_is_numeric_dump_sheet(blk.header, blk.rows)
+                                ) {
+                                    mbNotes.push(
+                                        `${blk.title}：纯数值 dump 块（无表头、无文字单元格），不产点、不计入对账`,
+                                    );
+                                    continue;
+                                }
+                                let res: Awaited<ReturnType<typeof extract_file_block>>;
+                                try {
+                                    res = await extract_file_block(
+                                        b.data,
+                                        blk,
+                                        {
+                                            side: "receive",
+                                            protocol,
+                                            point_fields: JSON.stringify(fields),
+                                            point_field_hints: hints,
+                                            side_rules: RECEIVE_SIDE_RULES,
+                                            identify_ext: String(
+                                                hintsObj["identify_ext"] ?? "",
+                                            ),
+                                        },
+                                        recvScoped.trim() !== "" ? recvScoped : semanticAll,
+                                        call,
+                                    );
+                                } catch (e) {
+                                    const msg = e instanceof Error ? e.message : String(e);
+                                    if (isMb) {
+                                        // MB 域单 sheet 识别失败不再中断整文件提取
+                                        //（MB-10 实测：sheet1 视图形态识别空响应 →
+                                        // 此前 break 使后续 Sheet2/Sheet3 整轮不提取，
+                                        // 且每轮重试都卡死在同一 sheet）——失败 sheet
+                                        // 记备注后继续提取后续 sheet；文件级中止语义
+                                        // 仅保留给非 MB 侧（catch 到外层走原 break）
+                                        mbNotes.push(
+                                            `${blk.title}：识别失败（${msg}），该 sheet 不产点、不计入对账`,
+                                        );
+                                        continue;
+                                    }
+                                    extractError = msg;
+                                    break;
+                                }
                                     if (isMb && res.rows.length === 0) {
                                         // Variable 声明式分表救提取（RP-MB-09 四表口径）：
                                         // 「遥测」形态 = 声明行 + 成段普通数据行，识别层
@@ -2043,12 +2111,15 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                                     });
                                     if (mb.points.length === 0 && res.rows.length >= 10 && res.lookup !== true) {
                                         // 整块无有效点行（华创 Sheet2 逗号串形态）——处置
-                                        // 随解析面可见（不产点、不计入对账）
+                                        // 随解析面可见（不产点、不计入对账）；dataRows 同步
+                                        // 不计入 Σ（MB-10 实测：Sheet2 1915 行废数据此前
+                                        // 混入全表对账总数）
                                         mbNotes.push(
                                             `${blk.title}：数据块无有效点行（${res.rows.length} 行），不产点、不计入对账`,
                                         );
+                                    } else {
+                                        mbDataRows.set(blk.title, (mbDataRows.get(blk.title) ?? 0) + mb.dataRows);
                                     }
-                                    mbDataRows.set(blk.title, (mbDataRows.get(blk.title) ?? 0) + mb.dataRows);
                                     rawPoints.push(...mb.points);
                                     perExcluded.push(mb.excluded.length > 0 ? mb.excluded : null);
                                     mbNotes.push(...mb.notes);
@@ -2069,6 +2140,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                                 }
                             }
                             state.recv.extractedFiles.push(b.name);
+                            if (extractError !== null) break;
                         } catch (e) {
                             extractError = e instanceof Error ? e.message : String(e);
                             break;
@@ -2738,6 +2810,12 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 bind_influx_field_list(fwdScopedNow || semantic, state.fwd.points)) {
                 progress = true;
             }
+            // 类型统一盖章须先于本回合的方案装配（装配工具读草稿早于回合末缺口
+            // 检查——D1-38 实测：首条消息齐备→同回合出方案按钮，side_gaps 处的
+            // 盖章来不及生效，落库 type=None）
+            if (stamp_uniform_type(state.fwd, semanticOf(state)) > 0) {
+                progress = true;
+            }
         }
 
         // 阶段7 转发连接：ip:port 确定性捕获只依赖转发意图（协议未明也要保住去向信息，
@@ -2988,22 +3066,42 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
         }
         const svc = find_service_type(registry, normalize_protocol(side.protocol), role);
         const entry = svc ? registry.get_entry(svc) : null;
-        const fields: string[] = (entry?.point_schema?.fields ?? []).map(
-            (f: { name: string }) => f.name,
-        );
         // 推导字段放行（§2.7.1 确定性推导：influxdb 的 measurement/type、点名）。
         // field 已于 2026-10-01 裁定必填、无默认值、不推导（c4_influxdb_client.md §2）——
         // 缺失即走缺口追问，不再放行
         const derivable = new Set<string>(["name", "measurement", "type"]);
-        // L1 必填检查对可推导字段放行缺失（方案层填充兜底，§2.7.1）
-        const missingFields = fields.filter((f) => !derivable.has(f));
+        // registry optional 字段放行（2026-10-15：influx tags/type Go 侧本就可选，
+        // registry 描述亦标记「可选」）——用户未提供不构成缺口，与 zod 层
+        // pointFieldsToZod 的 optional 语义一致（用例 38/39 实测）
+        const pointFields = (entry?.point_schema?.fields ?? []) as Array<{
+            name: string;
+            optional?: boolean;
+        }>;
+        const missingFields = pointFields.filter(
+            (f) => !derivable.has(f.name) && f.optional !== true,
+        );
+        // 缺口文本带中文字段名（2026-10-15 用例 31 实测）：只写「缺 uid」时用户
+        // 无从对答——中文名即用户词汇，追问必须可答（uid=从站号）
+        const FIELD_ZH: Record<string, string> = {
+            addr: "地址（addr）",
+            uid: "从站号（uid）",
+            fun: "功能码（fun）",
+            type: "数据类型（type）",
+            swap: "字节序（swap）",
+            field: "field 字段名",
+            tags: "tags 标签",
+            forward_addr: "转发地址",
+        };
+        const zhField = (f: string): string => FIELD_ZH[f] ?? f;
         const missing: string[] = [];
         for (const p of side.points) {
-            const miss = missingFields.filter(
-                (f) => p[f] === undefined || p[f] === null || p[f] === "",
-            );
+            const miss = missingFields
+                .map((f) => f.name)
+                .filter((f) => p[f] === undefined || p[f] === null || p[f] === "");
             if (miss.length > 0) {
-                missing.push(`点「${String(p["name"] || p["addr"] || "?")}」缺 ${miss.join("、")}`);
+                missing.push(
+                    `点「${String(p["name"] || p["addr"] || "?")}」缺 ${miss.map(zhField).join("、")}`,
+                );
             }
         }
         // 校验类缺口聚合为单条（2026-10-02 用例 32 口径：逐项指出全部问题）——点表
@@ -3065,7 +3163,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
         }
         if (svc) {
             const issues = validate_point_table(side.points as never[], {
-                required: missingFields,
+                required: missingFields.map((f) => f.name),
                 label: svc,
             });
             problems.push(...issues.map((it) => `${label}点表问题：${it}`));
@@ -3181,6 +3279,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 );
             }
         } else {
+        stamp_uniform_type(state.recv, semanticOf(state));
         const rg = side_gaps("接入", state.recv, "writer");
         gaps.push(...rg.gaps);
         recap.push(...rg.recap);
@@ -3289,6 +3388,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             }
         } else if (state.forwardIntent) {
             if (!state.fwd.protocol) recap.push("转发：意向已明确，细节待补充");
+        stamp_uniform_type(state.fwd, semanticOf(state));
             const fg = side_gaps("转发", state.fwd, "reader");
             gaps.push(...fg.gaps);
             recap.push(...fg.recap);
@@ -7786,6 +7886,37 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                     });
                     if (!lastGen.fatal) {
                         steps = lastGen.steps;
+                        // 类型统一输出层兜底（D1-38 实测 2026-10-17）：装配 reader
+                        // 重排点集会丢 optional type（草稿 type=float → 方案点 type
+                        // 缺失 → 落库 None）——执行前按会话累积声明对 influx 实例点
+                        // 补齐缺失 type；显式逐点类型不受影响
+                        for (const sp of steps) {
+                            const inst = sp.instance as Record<string, unknown> | undefined;
+                            const svcType = String(inst?.["service_type"] ?? "");
+                            if (!svcType.includes("influx")) continue;
+                            const pts = inst?.["points"] as
+                                | Array<Record<string, unknown>>
+                                | undefined;
+                            stamp_uniform_type(
+                                { protocol: "influxdb", points: pts ?? null },
+                                semanticOf(state),
+                            );
+                            // field/measurement 显式清单原样采纳（2026-10-09 裁定；
+                            // D2-39 复跑实测）：draft 映射为用户逐点明示（bind 层已
+                            // 确定性绑定），装配 reader 改写（air_temp→air_temperature）
+                            // 即违裁定——按位置以 draft 显式值覆盖方案值
+                            const draftPts = state.fwd.points ?? [];
+                            for (const [i, rp] of (pts ?? []).entries()) {
+                                const d = draftPts[i];
+                                if (d === undefined) break;
+                                for (const k of ["field", "measurement"] as const) {
+                                    const dv = d[k];
+                                    if (dv !== undefined && dv !== null && String(dv).trim() !== "") {
+                                        rp[k] = dv;
+                                    }
+                                }
+                            }
+                        }
                         // 并发撞号重校验：方案装配与确认之间另一会话可能已占用同一
                         // channel 序号（装配期分配、执行期单飞串行）——执行前重查，
                         // 占用则方案失效重新装配，而非静默并入他人实例

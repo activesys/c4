@@ -108,6 +108,9 @@ export function createOutputDeviceInfoTool(
                 for (let i = 0; i < dev.points.length; i++) {
                     const pt = dev.points[i] as Record<string, unknown>;
                     const lacking = entry.point_schema.fields
+                        // registry optional 字段不构成缺口（influx tags/type 形态，
+                        // 2026-10-16 与 plan-steps/编排器 L1 的 optional 语义同源）
+                        .filter((f) => f.optional !== true)
                         .filter((f) => {
                             const v = pt[f.name];
                             return v === undefined || v === null || v === "";

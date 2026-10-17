@@ -106,7 +106,11 @@ function typeToZod(type: string): z.ZodTypeAny {
 function pointFieldsToZod(pointFields: PointField[]) {
     const shape: Record<string, z.ZodTypeAny> = {};
     for (const f of pointFields) {
-        shape[f.name] = typeToZod(f.type);
+        // optional 字段（registry 显式标记，如 influx tags/type）不强制——
+        // 与 Go 侧语义对齐（type 空值放行、tags 缺省退化 (measurement,field)）；
+        // 此前全字段必填，模型忠实转写「用户未提供」即被拒（用例 38/39 实测）
+        shape[f.name] =
+            f.optional === true ? typeToZod(f.type).optional() : typeToZod(f.type);
     }
     return z.object(shape).passthrough();
 }
@@ -425,6 +429,18 @@ export function generate_steps(
             const reader_entry = registry.queryRegistry(svc_type);
             const system_fields = new Set(["key", "shm_id", "id", "name"]);
             const required_fields = (reader_entry?.point_schema.fields ?? [])
+                // registry optional 字段不进必填清单（2026-10-16 用例 reset 实测：
+                // influx tags 在 reader 侧同样可选——Go 侧缺省退化 (measurement,field)；
+                // 与 pointFieldsToZod/编排器 L1 的 optional 语义同源）
+                .filter((f) => f.optional !== true)
+                .map((f) => f.name)
+                .filter((f) => !system_fields.has(f));
+            // optional 字段显式提供时必须照拷（D1-38/RP-IF 实测 2026-10-17）：
+            // v2.1.76 起 type/tags 转可选后若只拷必填清单，用户/草稿明确给出的
+            // type=float 会在方案层静默丢失（落库 type=None ≠ float）——非编造、
+            // 只是透传，缺省仍走 Go 侧退化口径
+            const optional_fields = (reader_entry?.point_schema.fields ?? [])
+                .filter((f) => f.optional === true)
                 .map((f) => f.name)
                 .filter((f) => !system_fields.has(f));
 
@@ -505,6 +521,12 @@ export function generate_steps(
                         }
                         rp[f] = v;
                     }
+                    for (const f of optional_fields) {
+                        const v = src[f];
+                        if (v !== undefined && v !== null && String(v).trim() !== "") {
+                            rp[f] = v;
+                        }
+                    }
                     reader_points.push(rp as unknown as ServicePoint);
                 }
             } else if (ft_points_raw) {
@@ -528,6 +550,12 @@ export function generate_steps(
                                 };
                             }
                             rp[f] = v;
+                        }
+                        for (const f of optional_fields) {
+                            const v = src[f];
+                            if (v !== undefined && v !== null && String(v).trim() !== "") {
+                                rp[f] = v;
+                            }
                         }
                     }
                     reader_points.push(rp as unknown as ServicePoint);

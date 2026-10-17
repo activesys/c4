@@ -1,3 +1,98 @@
+2026-10-17  activesys  <activesys@sina.com>
+    Version 2.1.77
+    * agent: Fix — MB 块提取遇错不再中断整文件（MB-10 实测，deepseek-flash
+      全回归）：sheet1 视图形态识别空响应 ×3 → 降级报错此前 break 使同文件
+      后续 Sheet2/Sheet3 整轮不提取且每轮重试均卡死同 sheet；MB 域改单 sheet
+      记备注（「识别失败…不产点、不计入对账」）后继续，文件级中止语义仅
+      保留给非 MB 侧。
+    * agent: Fix — 跨块副本剔除接管区间地址 + 镜像守卫 + 视图侧裁定
+      （MB-10 实测 3926=1915+40+1971）：mb_dedupe_copies 的 addrOf 解析
+      「1254-1255」区间形态取起点（NaN 此前使 A/B 两级全体失明）；A 级
+      「后块对前块 ≥80%」在双侧互为全量镜像时交 B 级（副本块先于主表出现
+      的华创形态，旧逻辑会误剔主表）；B 级配对占比打平时按「区间地址占比」
+      剔视图侧（sheet1 视图列以区间展示跨度、主表 Sheet3 用标量地址）。
+      新增单测 2 例（区间镜像剔副本留主表 / 全同址镜像仍剔后块）。
+    * agent: Fix — 无有效点行块不再污染全表对账（MB-10 实测）：华创 Sheet2
+      逗号串形态 1915 行废数据此前计入 Σ dataRows，对账总数=1915+40+1971
+      =3926；该形态块（0 点 ≥10 行非码表）的 dataRows 不再计入 Σ，与其
+      「不产点、不计入对账」的解析面声明一致。
+    * agent: Fix — 口语裸协议应答绑定（MB-104 链 33 实测，deepseek-flash）：
+      「就用asfp2吧」应答转发协议缺口后仍被循环追问——裸名快捷命中要求整句
+      精确等于协议名，口语包裹形态落空且 LLM 兜底偶发不绑；剥口语壳
+      （就用/用/…吧/好了）后仍按支持列表精确等值判定，锚定 ^…$ 仅限整句
+      即应答的短形态，接入/转发两侧同享。
+    * agent: Fix — 方案输出层 optional 字段照拷 + 显式映射原样采纳（D1-38/39
+      复跑实测，真正的 type=None 机制）：generate_steps 构建 reader 点集此前
+      只拷 required_fields——v2.1.76 起 type/tags 转可选即被必填清单过滤，
+      用户/草稿明确给出的 type=float 在方案层静默丢失（落库 None，与模型无
+      关）；optional 字段显式提供时透传（缺省仍走 Go 退化口径）。装配
+      reader 改写显式清单（air_temp→air_temperature）违 2026-10-09「原样
+      采纳」裁定——确认执行前按位置以 draft 显式 field/measurement 覆盖
+      方案值；类型统一盖章同步挂到确认通道（输出层兜底，覆盖 reader 丢
+      optional 的全部路径）。
+    * agent: Fix — 纯数值 dump 块确定性丢弃（MB-10 复跑实测 raw=3926）：华创
+      Sheet2 形态（无表头、全行无文字单元格——裸浮点列 + 「508001001, 0, 0,
+      800000」四元组格 + 800000+i 序号列）被识别层转成 1915 全占位名垃圾点
+      计入对账；识别层之前按 mb_is_numeric_dump_sheet 整块丢弃（不产点、
+      不计入对账、随解析面可见），小表（<10 数据行）不误伤。
+    * agent: Fix — 类型统一声明确定性盖章（D1-38/RP-IF-01/02 实测）：用户明示
+      「类型统一float/bool」时 deepseek 两代口径（chat/flash+thinking）均不
+      主动携带 optional 的 type、落库 type=None（GLM 能过属模型自觉）；
+      L1 校验前对 influx 侧逐点补齐缺失 type，摆脱对模型自律的依赖。
+    * test: run_chain_site_change bad_key 按 provider 污染对应 key——
+      deepseek 开关下模型读 DEEPSEEK_API_KEY，此前只污染 ZHIPU_API_KEY
+      使 77 的 422 场景失效（2026-10-16 全回归失败⑦，测试基建缺口）。
+    * test: 用例 44 断言按用户裁定（方案 A）改为「缺失必要项之一被提问」
+      并集（功能码|从站号|uid|端口）+ 提问终局 + 不落盘，应答链改顺序自适应
+      模式匹配——实证：单缺口顺序提问的依赖序（gaps[0]）确定，但 MSG44
+      首个缺口是谁取决于识别层是否给 4xxxx 系地址推断填了 fun（GLM 与
+      deepseek-flash 各有填/不填，同一模型跨轮次也不稳定：17:21 轮先问
+      功能码、19:03 轮先问从站号，均为合法必要项提问），原断言只认
+      从站号|uid|端口 系把偶然行为固化成期望契约。uid/fun 绑定按 pendingGap
+      单缺口门控（orchestrator 8717/8748 行），综合应答只闭合当轮被问缺口，
+      故逐缺口顺序应答、顺序自适应。44 维持「fun 必填不猜」口径，modscan
+      段基推断（方案 B）未采纳。复验：两种首问形态各 PASS（30s/33s）。
+
+2026-10-16  activesys  <activesys@sina.com>
+    Version 2.1.76
+    * agent: Fix — zod/L1 校验尊重 registry optional 标记（用例 38/39 实测，
+      Deepseek 排查会话）：registry loader 的 PointFieldSchema 增解析
+      optional 布尔；pointFieldsToZod 对 optional 字段放行（不强制）——
+      influx tags/type 在 Go 侧本就可选（type 空值放行、tags 缺省退化
+      (measurement,field)），registry 描述亦标「可选」，此前 zod 全字段
+      必填严于 Go 语义，模型忠实转写「用户未提供」即被拒、缺口死循环；
+      L1 必填清单同步放行 optional 与可推导字段。
+    * agent: Fix — optional 过滤补全三处遗漏（2026-10-16 用例 reset/38 实测）：
+      output_plan_steps 的 reader 必填清单未滤 optional（influx tags 被执行层
+      拒收——「第 1 个转发点缺少必要字段 tags」）；output_device_info 逐点
+      缺字段检测未滤 optional；registry point_fields 下发给识别层的字段清单
+      未携带 optional 标记（识别层无从区分必填/可选）。
+    * mcp: Fix — c4_influxdb_client 缺省类型映射 uint 输出 "Nu" 字面量
+      （用例 38 实测）：行协议无 "u" 后缀，type 缺省（optional 放行）+
+      uint 采集类型（asfp2 注入 VT_UINT32）整批 400 丢弃——改为按 int64
+      整数字面量 "Ni" 输出（超 int64 上界退化为浮点）；400/401/404 响应体
+      随日志输出（行协议被拒的具体原因可见）。
+    * agent: Fix — 缺口追问文本带中文字段名（用例 31 实测）：只写「缺 uid」
+      用户无从对答——追问按 FIELD_ZH 映射携带用户词汇（uid=从站号、
+      fun=功能码、swap=字节序等），槽位应答可命中。
+    * config: c4_influxdb_client.json point_schema 的 type/tags 标记
+      optional:true（与 Go 语义对齐）；type 字段提示补「用户声明『类型统一
+      X』时逐点写入 type=X」（省略时 uint 整数字面量与既有 float 口径冲突
+      被 influxd 按 field type conflict 丢行）。
+    * test: run_cases.py 隔离环境地址切换（127.0.0.1:5020/5021/2404/2405/2406，
+      30~37/42 用例与断言同步）+ MSG31 地址补齐（case31 断言已是
+      127.0.0.1:5021 而消息仍写 192.168.110.52 的不一致）+ C4_E2E_PROVIDER
+      环境变量驱动 Deepseek OpenAI 兼容端点（2026-10-15 会话结论：用例
+      失败为 agent bug 与模型无关，本开关供双模型对照回归；thinking 置
+      enabled 枚举值防 deepseek-chat 400，外部 provider 下禁用智谱备用切换）
+      + 断言修复五处：shm_values 改 want 多重集容差覆盖（34/35/37 设备点数
+      多于 want 值数时 len 相等断言永不成立）、线圈点断言 type 0=BOOLEAN
+      （原期望 15 系 modbusd 从站枚举混用）、case37 前置快照按 ip:port 键
+      （同 ip 两实例按 ip 键互相覆盖）、case38 field 映射取 influx 实例点
+      （asfp2 接收侧点无 field，回退 id 拿中文名查列必 KeyError）、
+      influx_ensure_db DROP+CREATE（/api/v2/write 不自动建库整批 404 +
+      shard field 类型首写锁定）挂接 case_reset 链首清库。
+
 2026-10-14  activesys  <activesys@sina.com>
     Version 2.1.75
     * agent: Fix — CSV 引号字段分列（RP-IF-01 实测）：doc_parsers 对 CSV 沿用

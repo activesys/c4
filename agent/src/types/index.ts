@@ -90,9 +90,13 @@ export interface PointField {
     name: string;         // 字段名（如 addr/uid/fun/type/swap）
     type: string;         // 字段类型（如 "integer" / "string"）
     description?: string; // 字段描述（可缺省，L1 渲染时条件化）
+    optional?: boolean;   // 可选字段（如 influx tags/type：Go 侧本就可选，zod/L1 不再
+                          // 强制——2026-10-15 用例 38/39 实测 zod 严于 registry 自身
+                          // 描述与 Go 语义，模型不编造空值即被拒。缺省 false = 必填）
 }
 
-/** 点表 schema（agent.md §3.3）：fields = 业务字段声明；identity_fields = 身份字段（Writer 必填，Reader 不填） */
+/** 点表 schema（agent.md §3.3）：fields = 业务字段声明（optional 标记者除外）；
+ * identity_fields = 身份字段（Writer 必填，Reader 不填） */
 export interface PointSchema {
     fields: PointField[];        // 点表业务字段声明（全部必须提供、无默认值）
     identity_fields?: string[];  // 能唯一标识一个点的字段子集（按字段名声明，顺序即生成点名拼接顺序）

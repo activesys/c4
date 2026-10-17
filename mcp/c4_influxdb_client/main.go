@@ -509,7 +509,14 @@ func encodeFieldValue(raw interface{}, pointType string) (string, bool) {
 		case int8, int16, int32, int64:
 			return strconv.FormatInt(toInt64(raw), 10) + "i", true
 		case uint8, uint16, uint32, uint64:
-			return strconv.FormatUint(toUint64(raw), 10) + "u", true
+			// 行协议无无符号字面量（只有 i 整数）——uint 按 int64 输出；
+			// 超 int64 上界（采集侧不应出现）退化为浮点（2026-10-16 用例 38：
+			// type 缺省（optional 放行）+ uint 采集类型 → "Nu" 被 400 整批丢弃）
+			u := toUint64(raw)
+			if u <= math.MaxInt64 {
+				return strconv.FormatUint(u, 10) + "i", true
+			}
+			return formatFloat(float64(u)), true
 		case float32, float64:
 			f := toFloat64(raw)
 			if math.IsNaN(f) || math.IsInf(f, 0) {
@@ -648,12 +655,16 @@ func (ist *instanceState) doPost(writeURL, body string) error {
 		return fmt.Errorf("retryable: %v", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	_, _ = io.Copy(io.Discard, resp.Body)
 
 	switch resp.StatusCode {
 	case http.StatusNoContent:
+		_, _ = io.Copy(io.Discard, resp.Body)
 		return nil
 	case http.StatusBadRequest, http.StatusUnauthorized, http.StatusNotFound:
+		// 400/401/404 响应体随日志输出（行协议被拒的具体原因，2026-10-16 用例 38 排查）
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		log.Printf("instance '%s': write %d response: %s",
+			ist.cfg.Name, resp.StatusCode, strings.TrimSpace(string(respBody)))
 		return fmt.Errorf("nonretryable-%d", resp.StatusCode)
 	case http.StatusRequestEntityTooLarge:
 		return fmt.Errorf("retryable-413")

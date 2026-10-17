@@ -113,10 +113,18 @@ ANS75_FIELDS = ("字段名跟点名对应（" + "、".join(FIELDS_BY_NAME) + "�
 
 # ── agent 生命周期（76/77 需要「保留 agent.json 重启」与坏 key 实例）────────
 def agent_start(bad_key=False):
-    """启动隔离 agent，不重写 agent.json（76 持久化被测前提 / 77 坏 key 复用现态）。"""
+    """启动隔离 agent，不重写 agent.json（76 持久化被测前提 / 77 坏 key 复用现态）。
+    77 坏 key 须按当前 provider 污染对应变量——deepseek 开关下模型读
+    DEEPSEEK_API_KEY，只污染 ZHIPU_API_KEY 时 LLM 仍可用、422 场景失效
+    （2026-10-16 全回归失败⑦：测试基建缺口）。"""
     env = dict(os.environ)
-    env["ZHIPU_API_KEY"] = ("invalid-key-case77-llm-unavailable" if bad_key
-                            else rc.load_api_key())
+    if bad_key:
+        key_env = ("DEEPSEEK_API_KEY"
+                   if os.environ.get("C4_E2E_PROVIDER", "").strip().lower() == "deepseek"
+                   else "ZHIPU_API_KEY")
+        env[key_env] = "invalid-key-case77-llm-unavailable"
+    else:
+        env["ZHIPU_API_KEY"] = rc.load_api_key()
     env["C4_SOCK_DIR"] = rc.SOCK_DIR
     rc.AGENT.f = open(f"/tmp/e2e_agent_{time.strftime('%H%M%S')}.log", "w")
     rc.AGENT.p = subprocess_popen(env)

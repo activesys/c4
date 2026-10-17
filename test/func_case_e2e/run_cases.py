@@ -297,7 +297,25 @@ def _is_quota_error(status, body):
 
 
 def model_conf():
-    """agent.json 的 model 配置；进程内首次调用探测主模型额度，耗尽即切备用。"""
+    """agent.json 的 model 配置；进程内首次调用探测主模型额度，耗尽即切备用。
+
+    C4_E2E_PROVIDER=deepseek 时改用 Deepseek OpenAI 兼容端点（DEEPSEEK_API_KEY
+    驱动；2026-10-15 会话「Deepseek 失败排查」结论为 agent bug 与模型无关，
+    本开关用于双模型对照回归）。thinking 置 enabled 枚举值——agent 仅在
+    disabled 且模型名不含 5.3 时注入 thinking 参数，deepseek-chat 不认识
+    该参数（400），enabled 即不注入（thinking 为 zod 枚举，别值拒载）。"""
+    provider = os.environ.get("C4_E2E_PROVIDER", "").strip().lower()
+    if provider == "deepseek":
+        return {
+            "provider": "deepseek",
+            "name": os.environ.get("C4_E2E_MODEL", "deepseek-chat"),
+            "thinking": "enabled",
+            "base_url": os.environ.get(
+                "C4_E2E_BASE_URL", "https://api.deepseek.com/v1"),
+            "temperature": 0,
+            "max_tokens": 16384,
+            "api_key_env": "DEEPSEEK_API_KEY",
+        }
     global MODEL_NAME, _QUOTA_PROBED
     if not _QUOTA_PROBED and MODEL_NAME == MODEL_PRIMARY:
         _QUOTA_PROBED = True
@@ -324,8 +342,12 @@ def model_conf():
 
 def _switch_model_and_restart():
     """LLM 额度耗尽：切 MODEL_NAME、改写现存 agent.json 的 model.name 并重启
-    隔离 agent（state=filesystem，会话与配置现态保留）。已是备用模型时不重复切。"""
+    隔离 agent（state=filesystem，会话与配置现态保留）。已是备用模型时不重复切。
+    Deepseek 等外部 provider 覆盖生效时不切换（备用模型是智谱端点，混用会
+    拼出 deepseek base_url + 智谱模型的坏配置）。"""
     global MODEL_NAME
+    if os.environ.get("C4_E2E_PROVIDER", "").strip().lower() == "deepseek":
+        return False
     if MODEL_NAME != MODEL_PRIMARY:
         return False
     MODEL_NAME = MODEL_FALLBACK
@@ -660,9 +682,9 @@ CASE_ANSWERS = {
     "22": [("协议", "接收和转发都采用asfp2协议"), ("是否", "确认执行")],
     "25": [("是否", "是，确认删除2号风机"), ("整台|全部|数据点", "是，删除整台2号风机及其全部数据点")],
     "26": [("是否", "是，确认删除1号风机")],
-    "31": [("端口|从站", "端口502，从站号都是1。"), ("吗", "是asfp2协议。")],
+    "31": [("从站|端口", "从站号都是1。"), ("吗", "是asfp2协议。")],
     "33": [("协议", "就用asfp2吧。"), ("吗", "是asfp2协议。")],
-    "35": [("端口", "端口是2404。")],
+    "35": [],
     "38": [("吗", "对，写入influxdb。")],
     "39": [("bucket", "bucket是hnals。"), ("吗", "对，写入influxdb。")],
     "40": [("吗", "对，写入influxdb。")],
@@ -1426,7 +1448,7 @@ MODBUSD52_CFG = "/tmp/c4_env/modbusd_52.json"
 
 MSG30 = (
     "现在需要接入1号风机变桨控制器的数据，厂家在变桨控制器上开放了modbus采集口，"
-    "设备IP是192.168.110.51，端口502，从站号1。点表10个点：3000:桨叶角度、3002:变桨速度、"
+    "设备IP是127.0.0.1，端口5020，从站号1。点表10个点：3000:桨叶角度、3002:变桨速度、"
     "3004:变桨电机温度、3006:变桨电机电流、3008:后备电源电压、3010:后备电源温度、"
     "3012:桨叶1位置、3014:桨叶2位置、3016:桨叶3位置、3018:轮毂温度。"
     "除桨叶1/2/3位置是输入寄存器（功能码4）外，其余全是保持寄存器（功能码3），"
@@ -1434,7 +1456,7 @@ MSG30 = (
     "转发采用asfp2协议，目标地址是127.0.0.1:9900，点表5000~5009。"
 )
 MSG31 = (
-    "现在需要接入1号风机齿轮箱油泵控制器的数据，modbus协议，设备IP是192.168.110.52。"
+    "现在需要接入1号风机齿轮箱油泵控制器的数据，modbus协议，设备IP是127.0.0.1，端口5021。"
     "点表8个点：4000:油泵运行状态是线圈（功能码1、布尔类型、swap为0），"
     "其余7个点4100:油温、4102:油压、4104:油位、4106:泵后压力、4108:电机温度、4110:滤网压差、4112:油流量"
     "全是保持寄存器（功能码3）、32位浮点、swap=2。"
@@ -1453,12 +1475,12 @@ MSG33 = (
     "数据要送到II区127.0.0.1:9900，点表5300~5303。"
 )
 MSG34 = (
-    "现在需要接入1号主变测控装置的数据，装置是IEC104规约，IP是192.168.110.99，端口2404，公共地址1。"
+    "现在需要接入1号主变测控装置的数据，装置是IEC104规约，IP是127.0.0.1，端口2404，公共地址1。"
     "点表6个点：16385:UAB电压、16386:UBC电压、16387:UAC电压、1:弹簧未储能、2:装置异常、25601:正向有功电度。"
     "我们需要将这些数据转发到II区服务器上，转发采用asfp2协议，目标地址是127.0.0.1:9902，点表5400~5405。"
 )
 MSG35 = (
-    "接入2号主变测控装置，IEC104规约，装置IP是192.168.110.199，公共地址1。"
+    "接入2号主变测控装置，IEC104规约，装置IP是127.0.0.1，端口2405，公共地址1。"
     "点表4个点：16385:UAB电压、16386:UBC电压、1:弹簧未储能、25601:正向有功电度。"
     "转发到II区127.0.0.1:9903，转发采用asfp2协议，点表5500~5503。"
 )
@@ -1468,7 +1490,7 @@ MSG36 = (
     "转发到II区127.0.0.1:9904，转发采用asfp2协议，点表5600~5603。"
 )
 MSG37 = (
-    "再接入3号主变测控装置，IEC104规约，装置IP是192.168.110.102，端口2404，公共地址2。"
+    "再接入3号主变测控装置，IEC104规约，装置IP是127.0.0.1，端口2406，公共地址2。"
     "点表与2号主变完全一样：16385:UAB电压、16386:UBC电压、1:弹簧未储能、25601:正向有功电度。"
     "转发到II区127.0.0.1:9904，转发采用asfp2协议，点表5700~5703。"
 )
@@ -1542,9 +1564,21 @@ def shm_values(shm_ids, want=None, timeout=45):
                 return vals
             got = sorted(last.values())
             exp = sorted(want)
-            if len(got) == len(exp) and all(
-                    abs(a - b) <= 0.05 + 1e-3 * abs(b) for a, b in zip(got, exp)):
-                return vals
+            if len(got) >= len(exp):
+                # want 多重集在容差下可被 got 覆盖（34/35/37：设备点多于 want
+                # 值数——2404 六点 vs want 4 值，len 相等断言永不成立）
+                used = [False] * len(got)
+                ok = True
+                for b in exp:
+                    hit = next((i for i, a in enumerate(got)
+                                if not used[i]
+                                and abs(a - b) <= 0.05 + 1e-3 * abs(b)), None)
+                    if hit is None:
+                        ok = False
+                        break
+                    used[hit] = True
+                if ok:
+                    return vals
         except Exception:
             pass
         time.sleep(1.5)
@@ -1604,6 +1638,7 @@ def stop_modbusd51():
 
 
 def start_modbusd51():
+    os.makedirs("/tmp/oc", exist_ok=True)
     env = dict(os.environ)
     env["ACQUISITION"] = "/var/acquisition"
     with open("/tmp/oc/mb51_runner.out", "a") as f:
@@ -1612,7 +1647,7 @@ def start_modbusd51():
                          start_new_session=True)
     deadline = time.time() + 10
     while time.time() < deadline:
-        if listening(502) or any(_pids("modbusd -c /tmp/c4_env/modbusd.json$")):
+        if listening(5020) or any(_pids("modbusd -c /tmp/c4_env/modbusd.json$")):
             time.sleep(1)
             return
     raise Fail("modbusd(.51) 重启失败")
@@ -1632,6 +1667,7 @@ def stop_influxd():
 
 
 def start_influxd():
+    os.makedirs("/tmp/oc", exist_ok=True)
     with open("/tmp/oc/influxd_runner.out", "a") as f:
         subprocess.Popen([INFLUXD_BIN, "-config", INFLUXD_CONF],
                          stdin=subprocess.DEVNULL, stdout=f, stderr=subprocess.STDOUT,
@@ -1640,15 +1676,37 @@ def start_influxd():
     while time.time() < deadline:
         try:
             urllib.request.urlopen(INFLUX_URL + "/ping", timeout=2)
+            influx_ensure_db("hnals")
             return
         except Exception:
             time.sleep(0.5)
     raise Fail("influxd 30s 未就绪")
 
 
+def influx_ensure_db(db):
+    """链首清库建库（38 实测两连坑）：① /api/v2/write 兼容端点不自动建库
+    （缺库整批 404）；② shard 内 field 类型首写即锁定（先前 float 污染 +
+    整数写入 → field type conflict 400 丢行）——DROP+CREATE 保证口径干净。
+    表单体必须显式 Content-Type（缺省时 Go 不解析 body，静默 400「missing q」）。"""
+    import http.client
+    from urllib.parse import urlencode
+    conn = http.client.HTTPConnection("127.0.0.1", 18086, timeout=10)
+    for q in (f"DROP DATABASE {db}", f"CREATE DATABASE {db}"):
+        conn.request("POST", "/query", urlencode({"q": q}),
+                     {"Content-Type": "application/x-www-form-urlencoded"})
+        conn.getresponse().read()
+    conn.close()
+
+
 def case_reset():
-    """清空隔离环境（等价全新环境）：停实例、清 config/shm、重启 agent。"""
+    """清空隔离环境（等价全新环境）：停实例、清 config/shm、重启 agent；
+    influxdb 可达时链首清库（RP-IF D 链同款——shard 内 field 类型首写即锁定，
+    残留 schema 会把后续整数写入按 type conflict 丢行）。"""
     AGENT.reset()
+    try:
+        influx_ensure_db("hnals")
+    except Exception:
+        pass  # influxd 未在跑（38~40 之外用例）——不阻塞 reset
     log("  reset OK（全新环境）")
 
 
@@ -1721,12 +1779,12 @@ def case30():
             raise Fail(f"未进入确认流程: {text[:200]}")
 
         def check(cfg):
-            m = find_inst(cfg, "c4_modbus_client", ip="192.168.110.51", port=502)
+            m = find_inst(cfg, "c4_modbus_client", ip="127.0.0.1", port=5020)
             if not m or len(m.get("points", [])) != 10:
                 return False
             return forward_of(cfg, 5000) is not None
         cfg = wait_config(check, timeout=240, desc="modbus 实例(.51:502,10点) + 转发实例")
-        m = find_inst(cfg, "c4_modbus_client", ip="192.168.110.51", port=502)
+        m = find_inst(cfg, "c4_modbus_client", ip="127.0.0.1", port=5020)
         pts = {p["addr"]: p for p in m["points"]}
         for a, p in pts.items():
             exp_fun = 4 if a in (3012, 3014, 3016) else 3
@@ -1738,7 +1796,7 @@ def case30():
         fp = points_of(cfg, "c4_asfp2_client", fid)
         if sorted(fp) != list(range(5000, 5010)):
             raise Fail(f"转发点表异常: {sorted(fp)}")
-        established_to(502)
+        established_to(5020)
         values = points_values(cfg, "c4_modbus_client", m, MB30_VALS, desc="modbus 对点")
         log(f"  modbus 对点 OK（{len(values)} 点真实值）")
         fwd_deadline = time.time() + 60
@@ -1758,12 +1816,14 @@ def case31():
         raise Fail(f"未进入确认流程: {text[:200]}")
 
     def check(cfg):
-        m = find_inst(cfg, "c4_modbus_client", ip="192.168.110.52", port=502)
+        m = find_inst(cfg, "c4_modbus_client", ip="127.0.0.1", port=5021)
         return bool(m) and len(m.get("points", [])) == 8 and forward_of(cfg, 5100) is not None
     cfg = wait_config(check, timeout=240, desc="modbus 实例(.52:502,8点) + 转发实例")
-    m = find_inst(cfg, "c4_modbus_client", ip="192.168.110.52", port=502)
+    m = find_inst(cfg, "c4_modbus_client", ip="127.0.0.1", port=5021)
     pts = {p["addr"]: p for p in m["points"]}
-    if pts[4000].get("fun") != 1 or pts[4000].get("type") != 15 or pts[4000].get("swap") != 0:
+    # AGENT 类型枚举 BOOLEAN=0（MSG31「布尔类型」→ agent 写 type 0）；15 是
+    # modbusd 从站侧 DAM_TYPE_BIT 枚举——两套枚举不得混用
+    if pts[4000].get("fun") != 1 or pts[4000].get("type") != 0 or pts[4000].get("swap") != 0:
         raise Fail(f"线圈点字段异常: {pts[4000]}")
     for a in range(4100, 4113, 2):
         if pts[a].get("fun") != 3 or pts[a].get("type") != 10 or pts[a].get("swap") != 2:
@@ -1813,10 +1873,10 @@ def case34():
             raise Fail(f"未进入确认流程: {text[:200]}")
 
         def check(cfg):
-            i = find_inst(cfg, "c4_iec104_client", ip="192.168.110.99", port=2404)
+            i = find_inst(cfg, "c4_iec104_client", ip="127.0.0.1", port=2404)
             return bool(i) and len(i.get("points", [])) == 6 and forward_of(cfg, 5400) is not None
         cfg = wait_config(check, timeout=240, desc="iec104 实例(.99:2404,6点) + 转发实例")
-        i = find_inst(cfg, "c4_iec104_client", ip="192.168.110.99", port=2404)
+        i = find_inst(cfg, "c4_iec104_client", ip="127.0.0.1", port=2404)
         ca = None
         for k in ("common_address", "ca", "commonAddress"):
             if k in i:
@@ -1847,11 +1907,11 @@ def case35():
             raise Fail(f"未进入确认流程: {text[:200]}")
 
         def check(cfg):
-            i = find_inst(cfg, "c4_iec104_client", ip="192.168.110.199", port=2404)
+            i = find_inst(cfg, "c4_iec104_client", ip="127.0.0.1", port=2405)
             return bool(i) and len(i.get("points", [])) == 4 and forward_of(cfg, 5500) is not None
         cfg = wait_config(check, timeout=240, desc="iec104 实例(.199:2404,4点) + 转发实例")
-        i = find_inst(cfg, "c4_iec104_client", ip="192.168.110.199", port=2404)
-        established_to(2404)
+        i = find_inst(cfg, "c4_iec104_client", ip="127.0.0.1", port=2405)
+        established_to(2405)
         points_values(cfg, "c4_iec104_client", i, T104_35_VALS, timeout=60, desc="2号主变对点")
         log("  用例35 PASS ✓")
 
@@ -1886,10 +1946,11 @@ def case36():
 def case37():
     cfg0 = read_config()
     prev_snap = {}
-    for ip in ("192.168.110.99", "192.168.110.199"):
-        i = find_inst(cfg0, "c4_iec104_client", ip=ip, port=2404)
+    for ip, pt in (("127.0.0.1", 2404), ("127.0.0.1", 2405)):
+        i = find_inst(cfg0, "c4_iec104_client", ip=ip, port=pt)
         if i:
-            prev_snap[ip] = shm_ids_snapshot(cfg0, "c4_iec104_client", i["id"])
+            # 按 ip:port 键（两实例同 ip——按 ip 键相互覆盖、len 恒 1 误报前置缺失）
+            prev_snap[f"{ip}:{pt}"] = shm_ids_snapshot(cfg0, "c4_iec104_client", i["id"])
     if len(prev_snap) != 2:
         raise Fail(f"前置缺失 1号/2号主变: {sorted(prev_snap)}")
     recv = start_receiver(P_FWD1 + 4)
@@ -1900,27 +1961,33 @@ def case37():
             raise Fail(f"未进入确认流程: {text[:200]}")
 
         def check(cfg):
-            i = find_inst(cfg, "c4_iec104_client", ip="192.168.110.102", port=2404)
+            i = find_inst(cfg, "c4_iec104_client", ip="127.0.0.1", port=2406)
             return bool(i) and len(i.get("points", [])) == 4 and forward_of(cfg, 5700) is not None
         cfg = wait_config(check, timeout=240, desc="3号主变实例(.102:2404) + 转发实例")
-        i3 = find_inst(cfg, "c4_iec104_client", ip="192.168.110.102", port=2404)
-        for ip, snap in prev_snap.items():
+        i3 = find_inst(cfg, "c4_iec104_client", ip="127.0.0.1", port=2406)
+        for key, snap in prev_snap.items():
+            ip, pt = key.rsplit(":", 1)
             now = shm_ids_snapshot(read_config(), "c4_iec104_client",
-                                   find_inst(read_config(), "c4_iec104_client", ip=ip, port=2404)["id"])
+                                   find_inst(read_config(), "c4_iec104_client", ip=ip, port=int(pt))["id"])
             if now != snap:
                 raise Fail(f"{ip} 既有点 shm_id 被重排")
-        established_to(2404)
+        established_to(2406)
         points_values(cfg, "c4_iec104_client", i3, T104_35_VALS, timeout=60, desc="3号主变对点")
         log("  用例37 PASS ✓（同 IOA 跨实例并存，既有实例无损）")
 
 
     finally:
         recv.stop()
-def _influx_base_checks(cfg, reply):
+def _influx_base_checks(cfg, reply, before=None):
     svr = find_inst(cfg, "c4_asfp2_server", port=P_RECV1)
     if not svr or len(svr.get("points", [])) != 10:
         raise Fail(f"asfp2 接收实例(19001,10点)异常: {bool(svr)}")
-    if [k for (k, _i) in server_instances(cfg) if k == "c4_asfp2_client"]:
+    # 只禁本次流程新增的 asfp2 转发实例（全量 sweep 实测：套件序 38 紧跟
+    # 34~37，其 asfp2 转发实例是前序用例的合法产物——按流程前快照差集判定）
+    before_ids = {i.get("id") for i in (before or {}).get("c4_asfp2_client", []) if isinstance(i, dict)}
+    new_fwd = [i for i in (cfg.get("c4_asfp2_client") or [])
+               if isinstance(i, dict) and i.get("id") not in before_ids]
+    if new_fwd:
         raise Fail("出现了 asfp2 转发实例（用户声明的是入库不是外转）")
     inf = find_inst(cfg, "c4_influxdb_client")
     if not inf or len(inf.get("points", [])) != 10:
@@ -1934,6 +2001,7 @@ def _influx_base_checks(cfg, reply):
 
 
 def case38():
+    cfg_before = read_config()
     c = Conv()
     text, confirmed = send_flow(c, "38", MSG38)
     if not confirmed:
@@ -1943,14 +2011,16 @@ def case38():
         inf = find_inst(cfg, "c4_influxdb_client")
         return bool(inf) and len(inf.get("points", [])) == 10
     cfg = wait_config(check, timeout=240, desc="asfp2 接收 + influxdb 入库实例")
-    inf = _influx_base_checks(cfg, text)
+    inf = _influx_base_checks(cfg, text, cfg_before)
     if inf.get("bucket") != "hnals":
         raise Fail(f"bucket 未采纳: {inf.get('bucket')}")
     wait_port(P_RECV1, True)
     inject(P_RECV1, 1000, 1010, times=3)
     svr = find_inst(read_config(), "c4_asfp2_server", port=P_RECV1)
     ids = {p["shm_id"] for p in svr["points"]}
-    by_field = {p.get("field") or p.get("id"): p["shm_id"] for p in svr["points"]}
+    # field 映射取 influx 实例点（field+shm_id 在入库侧；asfp2 接收侧点是
+    # addr/id/name 形态、无 field——回退 id 拿中文名查 influx 列必然 KeyError）
+    by_field = {p["field"]: p["shm_id"] for p in inf["points"] if p.get("field")}
     deadline = time.time() + 120
     consistent = False
     while time.time() < deadline:
@@ -2049,7 +2119,7 @@ def case42():
             raise Fail(f"未进入确认流程: {text[:200]}")
 
         def check(cfg):
-            m = find_inst(cfg, "c4_modbus_client", ip="192.168.110.51", port=502)
+            m = find_inst(cfg, "c4_modbus_client", ip="127.0.0.1", port=5020)
             return bool(m) and len(m.get("points", [])) == 10 and forward_of(cfg, 5000) is not None
         cfg = wait_config(check, timeout=240, desc="设备不可达下仍完成接入")
         if re.search(r"已采集|数据正常|已连上|读取到", text):
@@ -2057,7 +2127,7 @@ def case42():
         log(f"  接入完成且未谎报（回复片段: {text[:120]}）")
         start_modbusd51()
         log("  变桨控制器已上电")
-        m = find_inst(read_config(), "c4_modbus_client", ip="192.168.110.51", port=502)
+        m = find_inst(read_config(), "c4_modbus_client", ip="127.0.0.1", port=5020)
         points_values(cfg, "c4_modbus_client", m, MB30_VALS, timeout=90, desc="恢复后对点")
         log("  用例42 PASS ✓（start 成功不谎报，设备上电后数据出现）")
     except Exception:

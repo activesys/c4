@@ -225,6 +225,7 @@ export class McpServiceRegistry {
         name: f.name,
         type: f.type,
         description: f.description,
+        optional: f.optional === true ? true : undefined,
       })),
       identity_fields: entry.point_schema.identity_fields
         ? [...entry.point_schema.identity_fields]

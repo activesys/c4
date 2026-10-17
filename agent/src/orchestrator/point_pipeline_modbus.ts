@@ -125,6 +125,32 @@ export function mb_is_textual_addr_sheet(
     return textual >= 2 && formula === 0;
 }
 
+// ── 纯数值 dump 块判定（MB-10 华创 Sheet2 形态，2026-10-17 实测）──────────
+// 无表头文字、数据行所有非空格均为数值/逗号串（原始内存 dump：col0 裸浮点、
+// 「508001001, 0, 0, 800000」四元组格、800000+i 序号列）——是数据导出残片
+// 非点表，照识别会产出全占位名垃圾点并污染全表对账（3926=1915+40+1971 实测）。
+// 判定：表头无文字 且 抽样数据行无任何文字单元格（≥10 行全数值）。
+export function mb_is_numeric_dump_sheet(
+    header: Array<string> | null,
+    rows: Array<Array<unknown> | null | undefined>,
+): boolean {
+    const TEXTY = /[A-Za-z\u4e00-\u9fff]/;
+    for (const h of header ?? []) {
+        if (TEXTY.test(String(h ?? ""))) {
+            return false; // 表头有文字 → 有列语义，不是 dump
+        }
+    }
+    let dataRows = 0;
+    let textyRows = 0;
+    for (const r of (rows ?? []).slice(0, 50)) {
+        const cells = (r ?? []).map((c) => String(c ?? "").trim());
+        if (cells.every((c) => c === "")) continue;
+        dataRows++;
+        if (cells.some((c) => TEXTY.test(c))) textyRows++;
+    }
+    return dataRows >= 10 && textyRows === 0;
+}
+
 // ── Variable 声明式分表救提取（RP-MB-09 2026-10-12 四表口径）──────────
 // 上海电气「遥测」形态：头部若干行 Variable 键值声明（VariableName/Desc/
 // Offset/Scale + 功能码），其后成段普通数据行（风机号/描述/缩放/偏移地址）。
@@ -839,7 +865,15 @@ export function mb_dedupe_copies(
     dataRowsBySrc?: ReadonlyMap<string, number>,
 ): MbDedupeResult {
     const srcOf = (p: RawPoint): string => String(p["_src"] ?? "?");
-    const addrOf = (p: RawPoint): number => Number(p["addr"]);
+    // 区间地址（华创 sheet1 视图列「1254-1255」形态）：以区间起点参与 ±1 配对
+    // ——Number("1254-1255")=NaN 会让两级剔除全体失明（MB-10 实测 3926=副本
+    // 全量并入）
+    const addrOf = (p: RawPoint): number => {
+        const v = Number(p["addr"]);
+        if (!Number.isNaN(v)) return v;
+        const m = /^(\d+)\s*-\s*\d+$/.exec(String(p["addr"] ?? "").trim());
+        return m !== null ? Number(m[1]!) : NaN;
+    };
     const bySrc = new Map<string, RawPoint[]>();
     const order: string[] = [];
     for (const p of points) {
@@ -867,7 +901,7 @@ export function mb_dedupe_copies(
                     const key = withDev
                         ? `${String(q["_device"] ?? "")}|${String(q["name"] ?? "")}`
                         : String(q["name"] ?? "");
-                    const a = Number(q["addr"]);
+                    const a = addrOf(q);
                     if (!Number.isNaN(a)) {
                         const arr = ref.get(key);
                         const fun = q["fun"] === undefined ? undefined : Number(q["fun"]);
@@ -878,6 +912,35 @@ export function mb_dedupe_copies(
             }
             return ref;
         };
+        const buildMapOf = (rows: RawPoint[], withDev: boolean): Map<string, Array<[number, number | undefined]>> => {
+            const ref = new Map<string, Array<[number, number | undefined]>>();
+            for (const q of rows) {
+                const key = withDev
+                    ? `${String(q["_device"] ?? "")}|${String(q["name"] ?? "")}`
+                    : String(q["name"] ?? "");
+                const a = addrOf(q);
+                if (Number.isNaN(a)) continue;
+                const fun = q["fun"] === undefined ? undefined : Number(q["fun"]);
+                const arr = ref.get(key);
+                if (arr !== undefined) arr.push([a, fun]);
+                else ref.set(key, [[a, fun]]);
+            }
+            return ref;
+        };
+        const refHits = (ref: Map<string, Array<[number, number | undefined]>>, probe: Map<string, Array<[number, number | undefined]>>): [number, number] => {
+            let meaningful = 0;
+            let matched = 0;
+            for (const [key, refs] of ref) {
+                for (const [b, f] of refs) {
+                    meaningful++;
+                    const qs = probe.get(key);
+                    if (qs !== undefined && qs.some(([a, f2]) => Math.abs(a - b) <= 1 && funOk(f2, f))) {
+                        matched++;
+                    }
+                }
+            }
+            return [meaningful, matched];
+        };
         const funOk = (x: number | undefined, y: number | undefined): boolean =>
             x === undefined || y === undefined || x === y;
         const tryPass = (withDev: boolean): RawPoint[] | null => {
@@ -885,7 +948,7 @@ export function mb_dedupe_copies(
             const drops: RawPoint[] = [];
             let meaningful = 0;
             for (const q of later) {
-                const a = Number(q["addr"]);
+                const a = addrOf(q);
                 if (Number.isNaN(a) && String(q["name"] ?? "") === "") continue;
                 meaningful++;
                 if (Number.isNaN(a)) continue;
@@ -900,7 +963,18 @@ export function mb_dedupe_copies(
                     drops.push(q);
                 }
             }
-            if (meaningful >= 10 && drops.length >= meaningful * 0.8) return drops;
+            if (meaningful >= 10 && drops.length >= meaningful * 0.8) {
+                // 镜像守卫（MB-10 华创形态）：副本块先于主表出现时，后块（主表）
+                // 对前块（副本）≥80% 命中且前块对后块同样 ≥80% 命中——双侧互为
+                // 全量镜像，A 级「后块对前块」会误剔主表。此形态交 B 级按配对
+                // 占比 + 视图侧裁定；A 级只处理「后块 ⊆ 前块」的真子集副本
+                // （京城 Sheet1/MB-08 ±1 副本在后的形态不受影响）
+                const [refMeaningful, refMatched] = refHits(ref, buildMapOf(later, withDev));
+                if (refMeaningful >= 10 && refMatched >= refMeaningful * 0.8) {
+                    return null;
+                }
+                return drops;
+            }
             return null;
         };
         const strict = tryPass(true);
@@ -982,14 +1056,28 @@ export function mb_dedupe_copies(
             const src = srcOf(p);
             perSrcPaired.set(src, (perSrcPaired.get(src) ?? 0) + 1);
         }
-        // 配对占比高的一侧为分表/副本侧（主表块大部分点无跨块对应）
+        // 配对占比高的一侧为分表/副本侧（主表块大部分点无跨块对应）；
+        // 占比打平（双侧互为全量镜像，华创 sheet1 视图在前形态）时按
+        // 「区间地址占比」裁定——人类可读视图以「1254-1255」区间列展示
+        // 跨度，主表用标量地址（Sheet3 mb_addr）
         const sideScore = (p: RawPoint): number => {
             const src = srcOf(p);
             return (perSrcPaired.get(src) ?? 0) / Math.max(1, perSrcTotal.get(src) ?? 1);
         };
+        const viewish = (p: RawPoint): number => {
+            const alive = (bySrc.get(srcOf(p)) ?? []).filter((q) => !dropRows.has(q));
+            if (alive.length === 0) return 0;
+            const rng = alive.filter((q) =>
+                /^(\d+)\s*-\s*\d+$/.test(String(q["addr"] ?? "").trim()),
+            ).length;
+            return rng / alive.length;
+        };
         const dropSides = new Map<string, Array<[RawPoint, RawPoint]>>();
         for (const [a, b] of pairs) {
-            const dropSide = sideScore(a) >= sideScore(b) ? a : b;
+            const dropSide =
+                Math.abs(sideScore(a) - sideScore(b)) <= 0.05
+                    ? (viewish(a) >= viewish(b) ? a : b)
+                    : (sideScore(a) >= sideScore(b) ? a : b);
             const keepSide = dropSide === a ? b : a;
             const src = srcOf(dropSide);
             const arr = dropSides.get(src);

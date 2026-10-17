@@ -30,12 +30,14 @@
       {
         "name": "type",
         "type": "string",
-        "description": "数据类型（枚举见 point_field_hints.type）"
+        "description": "数据类型（枚举见 point_field_hints.type）",
+        "optional": true
       },
       {
         "name": "tags",
         "type": "object",
-        "description": "附加 tag 键值对（可选）：键 [a-zA-Z_]+、值任意字符串（含中文）；点表 tags 列的 k=v 对逐点原样采纳"
+        "description": "附加 tag 键值对（可选）：键 [a-zA-Z_]+、值任意字符串（含中文）；点表 tags 列的 k=v 对逐点原样采纳",
+        "optional": true
       }
     ],
     "identity_fields": [
@@ -136,7 +138,7 @@
           "uint": "无符号整数",
           "bool": "布尔量"
         },
-        "extraction": "可由源点数据类型确定性推导（类型映射：modbus 浮点→float、整数→int/uint、位→bool）；用户明确给出时以用户为准；推导值在方案展示中标注供确认"
+        "extraction": "可由源点数据类型确定性推导（类型映射：modbus 浮点→float、整数→int/uint、位→bool）；用户明确给出时以用户为准；推导值在方案展示中标注供确认。用户声明「类型统一 X」「全部是 X 类型」时逐点写入 type=X（2026-10-16 用例 38：省略时 uint 采集值按整数字面量写库，与先前 float 口径冲突被 influxd 丢行）"
       }
     },
     "connection_hints": [

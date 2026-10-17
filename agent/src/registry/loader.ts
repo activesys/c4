@@ -39,6 +39,7 @@ const PointFieldSchema = z.object({
   name: z.string(),
   type: z.string(),
   description: z.string().optional(),
+  optional: z.boolean().optional(),
 });
 
 // ── PointSchemaSchema：point_schema（agent.md §3.3）──

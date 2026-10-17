@@ -13,7 +13,28 @@ import {
     mb_rescue_variable_sheet,
     mb_dedupe_copies,
     mb_finalize_block,
+    mb_is_numeric_dump_sheet,
 } from "../../src/orchestrator/point_pipeline_modbus.js";
+
+describe("mb_is_numeric_dump_sheet（MB-10 华创 Sheet2 形态）", () => {
+    it("无表头 + 全数值/逗号串行 → 纯数值 dump（不产点不计对账）", () => {
+        const rows: string[][] = [];
+        for (let i = 0; i < 20; i++) {
+            rows.push([`${i}.0`, "", "", "", ` 508001001, 0, 0, ${800000 + i}`, "", "", `${800000 + i}.0`, "", " 07,001,001, 700000, 1"]);
+        }
+        expect(mb_is_numeric_dump_sheet(null, rows)).toBe(true);
+        expect(mb_is_numeric_dump_sheet(["", "", ""], rows)).toBe(true);
+    });
+    it("有文字表头/数据含点名 → 不是 dump（正常识别）", () => {
+        const rows: string[][] = [];
+        for (let i = 0; i < 20; i++) rows.push([`DT_FJ${i}`, `测点${i}`, String(100 + i), "float", "3"]);
+        expect(mb_is_numeric_dump_sheet(["edos点表", "描述", "mb_addr", "类型", "功能码"], rows)).toBe(false);
+        expect(mb_is_numeric_dump_sheet(null, rows)).toBe(false);
+    });
+    it("行数不足（<10）不判 dump（避免误伤小表）", () => {
+        expect(mb_is_numeric_dump_sheet(null, [["1.0", "", "2.0"]])).toBe(false);
+    });
+});
 
 function blk(title: string, header: string[] | null, rows: string[][]): ParsedPointBlock {
     return { title, kind: "table", header, nonData: [], rows };
@@ -155,6 +176,49 @@ describe("mb_dedupe_copies B 级：跨块同点合并（RP-MB-09/10 裁定）", 
         expect(got.recon).toEqual({ total: 70, merged: 0, pureView: 40 });
         expect(got.notes.join("")).toContain("sheet1");
         expect(got.notes.join("")).toContain("不计入对账");
+    });
+
+    it("区间地址视图副本在前（华创镜像形态）→ 剔副本留主表（MB-10 3926 回归）", () => {
+        // 真实华创形态：sheet1 视图地址列为「1254-1255」区间（起点 = 主表 −1），
+        // 且副本块先于主表出现——A 级「后块对前块」会误剔主表（镜像守卫），
+        // B 级占比打平时按区间地址占比剔视图侧
+        const copy: RawPoint[] = [];
+        const main: RawPoint[] = [];
+        for (let i = 0; i < 40; i++) {
+            copy.push({
+                _src: "sheet1", name: `全场测点${i}`, addr: `${2 * i}-${2 * i + 1}`,
+                fun: 4, point_type: "float",
+            });
+        }
+        for (let i = 0; i < 40; i++) {
+            main.push({
+                _src: "Sheet3", name: `全场测点${i}`, addr: String(2 * i + 1),
+                fun: 4, point_type: "float",
+            });
+        }
+        const got = mb_dedupe_copies([...copy, ...main], new Map([["sheet1", 40], ["Sheet3", 40]]));
+        expect(got.points.length).toBe(40);
+        expect(got.points.every((p) => src(p) === "Sheet3")).toBe(true);
+        expect(got.recon).toEqual({ total: 40, merged: 0, pureView: 40 });
+        expect(got.notes.join("")).toContain("sheet1");
+    });
+
+    it("镜像双浮点全同址（无异形地址）→ 仍剔后块（A 级既有口径不回退）", () => {
+        // 后块 ⊆ 前块的完全镜像（京城无表头副本在后的旧口径）：前块 50 点中
+        // 10 点独有 → 后块对前块 100% 命中、前块对后块仅 80% = 40/50 —— 守卫
+        // 阈值边界（≥0.8 视为镜像交 B 级；B 级占比：后块 1.0 > 前块 0.8）→ 剔后块
+        const first: RawPoint[] = [];
+        const later: RawPoint[] = [];
+        for (let i = 0; i < 40; i++) {
+            first.push({ _src: "甲", name: `共点${i}`, addr: String(i), fun: 3, point_type: "float" });
+            later.push({ _src: "乙", name: `共点${i}`, addr: String(i), fun: 3, point_type: "float" });
+        }
+        for (let i = 0; i < 10; i++) {
+            first.push({ _src: "甲", name: `独点${i}`, addr: String(500 + i), fun: 3, point_type: "float" });
+        }
+        const got = mb_dedupe_copies([...first, ...later], new Map([["甲", 50], ["乙", 40]]));
+        expect(got.points.every((p) => src(p) === "甲")).toBe(true);
+        expect(got.points.length).toBe(50);
     });
 
     it("异 fun 同址同名 = 不同寄存器空间 → 不配对（MB-10 addr1 双空间口径）", () => {

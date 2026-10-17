@@ -220,21 +220,49 @@ def s4():
 
 
 def s44():
-    """提问即终局：缺必要项时单缺口提问（无方案不落盘）；补答后正常推进。"""
+    """提问即终局：缺必要项时单缺口提问（无方案不落盘）；补答后正常推进。
+    首问断言（2026-10-17 用户裁定 A + 复跑实证）：单缺口顺序提问的依赖序
+    （gaps[0]）是确定性的，但 MSG44 的**首个缺口是谁**取决于识别层是否给
+    4xxxx 系地址推断填了 fun——GLM 与 deepseek-flash 各有填/不填，同一模型
+    跨轮次也不稳定（17:21 轮先问功能码、19:03 轮先问从站号，均为合法必要
+    项提问）。故断言只能锁定「缺失必要项之一被提问 + 提问终局 + 不落盘」
+    这层确定性，不锁定顺序；应答链以一条综合应答同时闭合功能码与连接缺口，
+    与首问顺序解耦。"""
     conv = rc.Conv()
     before = rc.read_config()
     text1 = conv.send(MSG44)
-    if not re.search(r"从站号|uid|端口", text1):
+    if not re.search(r"功能码|从站号|uid|端口", text1):
         raise rc.Fail(f"44①: 缺失必要项未提问: {text1[:200]}")
     if "是否确认" in text1 or "确认执行" in text1:
         raise rc.Fail(f"44①: 信息不完整即出方案: {text1[:200]}")
     if not json_unchanged(before):
         raise rc.Fail("44①: 提问回合写入了 config")
-    base.flow(conv, "从站号都是1",
-              answers=[(r"端口", "端口502"),
-                       (r"转发协议|请提供.{0,12}转发", "转发采用asfp2协议到127.0.0.1:9900"),
-                       (r"转发点表", "点表5000~5007")],
-              done=lambda: modbus_writer_of(rc.read_config(), 40001) is not None)
+    # 综合应答不可行：uid/fun 绑定按 pendingGap 门控（单缺口绑定，orchestrator
+    # 8717/8748 行）——一答只闭合当轮被问的缺口。首问顺序又取决于识别层是否
+    # 给 4xxxx 推断 fun（跨轮次不稳定），故按模式匹配逐缺口顺序应答，顺序自适应
+    ans = [(r"功能码", "全部是功能码3"),
+           (r"从站号|uid", "从站号都是1"),
+           (r"端口", "端口502"),
+           (r"转发协议|请提供.{0,12}转发", "转发采用asfp2协议到127.0.0.1:9900"),
+           (r"转发点表", "点表5000~5007")]
+    consumed = [False] * len(ans)
+    text = text1
+    for _ in range(12):
+        if modbus_writer_of(rc.read_config(), 40001) is not None:
+            break
+        if ("是否确认" in text or "确认执行" in text or "确认后我将" in text
+                or ("方案" in text and "确认" in text)):
+            text = conv.send("[C4_BUTTON_CONFIRM] 确认")
+            rc.wait_idle()
+            continue
+        hit_idx = next((i for i, (p, a) in enumerate(ans)
+                        if not consumed[i] and re.search(p, text)), None)
+        if hit_idx is not None:
+            consumed[hit_idx] = True
+            text = conv.send(ans[hit_idx][1])
+            continue
+        time.sleep(10)
+        text = conv.send("继续")
     cfg = rc.wait_config(lambda c: modbus_writer_of(c, 40001) is not None,
                          timeout=240, desc="44②: 补答后接入完成")
     wid = modbus_writer_of(cfg, 40001)

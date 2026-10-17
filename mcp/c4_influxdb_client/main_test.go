@@ -82,3 +82,29 @@ func TestValidateConfigInstanceFields(t *testing.T) {
 		t.Fatalf("空 token 应报 INVALID_CONFIG, got %v", err)
 	}
 }
+
+// encodeFieldValue 缺省类型映射（2026-10-16 用例 38）：uint 采集类型必须输出
+// 整数字面量 "Ni"——行协议无 "u" 后缀，原 "Nu" 被 influxd 整批 400 丢弃
+func TestEncodeFieldValueUnsignedDefault(t *testing.T) {
+	var u32 uint32 = 3000
+	got, ok := encodeFieldValue(u32, "")
+	if !ok || got != "3000i" {
+		t.Fatalf("uint32 缺省类型应输出 3000i，got %q ok=%v", got, ok)
+	}
+	var u64 uint64 = 1234567890
+	got, ok = encodeFieldValue(u64, "")
+	if !ok || got != "1234567890i" {
+		t.Fatalf("uint64 缺省类型应输出整数字面量，got %q ok=%v", got, ok)
+	}
+	// 超 int64 上界退化为浮点（合法行协议，值域无损到 2^53）
+	var big uint64 = 1 << 63
+	got, ok = encodeFieldValue(big, "")
+	if !ok || !strings.Contains(got, "e") && !strings.Contains(got, ".") {
+		t.Fatalf("超界 uint64 应退化为浮点，got %q", got)
+	}
+	// float 采集类型保持浮点字面量
+	got, ok = encodeFieldValue(float64(12.5), "")
+	if !ok || got != "12.5" {
+		t.Fatalf("float 缺省类型应输出 12.5，got %q", got)
+	}
+}
