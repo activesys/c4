@@ -56,13 +56,11 @@ else
 fi
 if [ "$_ok" -eq 1 ]; then printf 'PASS V2\n'; else printf 'FAIL V2\n'; TOTAL_FAILS=$((TOTAL_FAILS + 1)); fi
 
-# ── V3：阶段 prompt 双路径 + dist/index.js ───────────────────
+# ── V3：阶段 prompt（dist/prompts，运行时 render_prompt 唯一解析路径）+ dist/index.js ──
 _ok=1
-for _p in protocol_prompt location_prompt connection_prompt change_prompt point_prompt forward_intent_prompt; do
-    [ -f "$STAGING/usr/local/lib/c4/agent/dist/super_worker/prompts/$_p.txt" ] \
-        || _fail "dist/super_worker/prompts/$_p.txt 缺失"
-    [ -f "$STAGING/usr/local/lib/c4/agent/src/super_worker/prompts/$_p.txt" ] \
-        || _fail "src/super_worker/prompts/$_p.txt 缺失"
+for _p in protocol_prompt location_prompt connection_prompt change_prompt point_prompt forward_intent_prompt point_identify_prompt; do
+    [ -f "$STAGING/usr/local/lib/c4/agent/dist/prompts/$_p.txt" ] \
+        || _fail "dist/prompts/$_p.txt 缺失"
 done
 [ -f "$STAGING/usr/local/lib/c4/agent/dist/index.js" ] \
     || _fail "dist/index.js 缺失"
