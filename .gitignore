@@ -67,3 +67,9 @@ test-results/
 playwright-report/
 test/func_case_e2e/results.log
 build/
+
+# 测试运行记录与日志（2026-10-17 用户指令：不入库，本地留存）
+test/func_case_e2e/results*.log
+test/func_case_e2e/*.records.json
+test/func_case_e2e/全回归记录-*.md
+test/func_case_e2e/RP-MB-进度记录.md
