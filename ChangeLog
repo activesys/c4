@@ -1,4 +1,11 @@
 2026-10-17  activesys  <activesys@sina.com>
+    Version 2.1.78
+    * packaging: Fix — build.sh 清理不存在的 src/super_worker/prompts 拷贝
+      （自 75d1fbb 初版即引用从未存在的目录，set -e 下 Agent 构建步必失败，
+      本机首次实测打包即触发）；运行时 render_prompt 仅解析 dist/prompts，
+      npm run build 已自带拷贝，两处死拷贝（dist 与 staging）移除。
+
+2026-10-17  activesys  <activesys@sina.com>
     Version 2.1.77
     * agent: Fix — MB 块提取遇错不再中断整文件（MB-10 实测，deepseek-flash
       全回归）：sheet1 视图形态识别空响应 ×3 → 降级报错此前 break 使同文件

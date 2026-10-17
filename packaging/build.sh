@@ -108,18 +108,15 @@ CUR=$((CUR + 1)); step "$CUR" "$TOTAL" "构建 Agent (npm ci && npm run build)"
     cd "$C4_ROOT/agent"
     npm ci
     npm run build
-    # tsc 不拷贝 .txt：补齐 dist 各阶段 prompt（orchestrator 渲染读取）
-    mkdir -p dist/super_worker/prompts
-    cp src/super_worker/prompts/*.txt dist/super_worker/prompts/
+    # npm run build 自带 src/prompts → dist/prompts 拷贝（运行时仅读 dist/prompts，
+    # render_prompt 以 dist/<dir>/../prompts 解析——历史 super_worker 路径自
+    # 初版即不存在，2026-10-17 v2.1.78 清理）
     # 仅保留生产依赖（设计 §4.2 预打包 node_modules）
     npm prune --omit=dev
 )
 install -d "$STAGING/usr/local/lib/c4/agent"
 cp -a "$C4_ROOT/agent/dist" "$STAGING/usr/local/lib/c4/agent/dist"
 cp -a "$C4_ROOT/agent/node_modules" "$STAGING/usr/local/lib/c4/agent/node_modules"
-mkdir -p "$STAGING/usr/local/lib/c4/agent/src/super_worker/prompts"
-cp "$C4_ROOT/agent/src/super_worker/prompts/"*.txt \
-    "$STAGING/usr/local/lib/c4/agent/src/super_worker/prompts/"
 
 # ── 4. 构建前端（vite）──────────────────────────────────────
 CUR=$((CUR + 1)); step "$CUR" "$TOTAL" "构建前端 (npm ci && npm run build)"
