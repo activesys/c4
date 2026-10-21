@@ -2,12 +2,13 @@
 # func_test_case.md 设备组批量接入串行驱动器（agent.md §2.11，用例 57~62，2026-10-03）
 # 链段（各自独立回零 A.2，场站询问答「华能阿拉善」）：
 #   57 —— 两组模板点表 + 每台独立 ip:port（倍福规则 ip / 巴赫曼显式列表）：
-#         5 个 modbus 实例、key wt{N}_*、模板相对点名后缀、注册表批量固化
+#         5 个 modbus 实例、key {N}号风机_*、模板相对点名后缀、注册表批量固化
 #   58 —— 共用 ip:port + 从站号范围 1~6：6 实例同 ip:port 不同 uid（永不并入）
-#   59 —— 地址偏移每台 +1000：key 模板相对（wt2_windspeed，不得出现 wt2_2000）
+#   59 —— 地址偏移每台 +1000：key 模板相对（2号风机_windspeed，不得出现 2号风机_2000）
 #   60 —— asfp2 逐台监听端口 + 组级回滚：占 9102 → 全组回滚空态无幽灵条目
 #         → 解除占用后整组重接成功
-#   61 —— IEC104 共用 IP + 端口范围 2404~2413 + 非纯数字编号 A01~A10（nbA01 型前缀）
+#   61 —— IEC104 共用 IP + 端口范围 2404~2413 + 非纯数字编号 A01~A10（成员名原样前缀
+#         a01逆变器，2026-10-19 命名切换）
 #   62 —— asfp2 共用监听端口 + 偏移：并入单实例 20 点、注册表双条目同 host、水位=2
 # 规则（用户指令）：逐项串行、不并行；任一链段 FAIL 立即停止、落盘诊断、不修改。
 import json
@@ -113,7 +114,7 @@ def assert_member_points(tag, prefix, inst, names, addrs, uid=None):
 
 
 def assert_suffix_shared(tag, prefixes, name, pname):
-    """模板相对 key 裁定：同一点名在各台的 key 后缀一致（wt1_windspeed / wt2_windspeed）。"""
+    """模板相对 key 裁定：同一点名在各台的 key 后缀一致（1号风机_windspeed / 2号风机_windspeed）。"""
     reg = reg_prefix_map()
     suffixes = set()
     for pre in prefixes:
@@ -165,10 +166,10 @@ def s57():
               done=lambda: len(insts_of(rc.read_config() or {}, "c4_modbus_client")) >= 5)
     cfg = rc.wait_config(lambda c: len(insts_of(c, "c4_modbus_client")) == 5,
                          timeout=240, desc="57: 5 个 modbus 实例")
-    # 组1：wt1~wt3 ip 递增 101~103；组2：wt4/wt5 显式列表；全部端口 502、从站号 1
-    expect = [("wt1", "192.168.1.101", 1000), ("wt2", "192.168.1.102", 1000),
-              ("wt3", "192.168.1.103", 1000), ("wt4", "192.168.2.10", 2000),
-              ("wt5", "192.168.2.11", 2000)]
+    # 组1：1号风机~3号风机 ip 递增 101~103；组2：4号风机/5号风机 显式列表；全部端口 502、从站号 1
+    expect = [("1号风机", "192.168.1.101", 1000), ("2号风机", "192.168.1.102", 1000),
+              ("3号风机", "192.168.1.103", 1000), ("4号风机", "192.168.2.10", 2000),
+              ("5号风机", "192.168.2.11", 2000)]
     for prefix, ip, base_addr in expect:
         inst = inst_by(cfg, "c4_modbus_client", lambda i, ip=ip: i.get("ip") == ip)
         if inst is None:
@@ -176,13 +177,13 @@ def s57():
                           f"{[(i.get('ip'), i.get('port')) for i in insts_of(cfg, 'c4_modbus_client')]}")
         assert_member_points("57", prefix, inst, NAMES10,
                              list(range(base_addr, base_addr + 19, 2)), uid=1)
-    assert_suffix_shared("57", ["wt1", "wt2", "wt3", "wt4", "wt5"], "风速", "windspeed")
+    assert_suffix_shared("57", ["1号风机", "2号风机", "3号风机", "4号风机", "5号风机"], "风速", "windspeed")
     assert_reader("57", 50)
     assert_template_once("57", 1000, "风速")
     # v2.1.41 表格化后按台前缀在成员设备表「点 key 前缀」列（反引号单元格）
     if not re.search(r"\| 设备名 \| 点 key 前缀 \|", dialog_text()) \
-            or "`wt1_`" not in dialog_text():
-        raise rc.Fail("57: 方案未按台明示前缀（成员设备表缺「点 key 前缀」列或 wt1_ 单元格）")
+            or "`1号风机_`" not in dialog_text():
+        raise rc.Fail("57: 方案未按台明示前缀（成员设备表缺「点 key 前缀」列或 1号风机_ 单元格）")
     reg = base.registry()
     if reg.get("channelHighWatermark") != 6:
         raise rc.Fail(f"57: 水位 {reg.get('channelHighWatermark')} ≠ 6（5 writer + 1 reader）")
@@ -195,8 +196,10 @@ def s58():
               done=lambda: len(insts_of(rc.read_config() or {}, "c4_modbus_client")) >= 6)
     cfg = rc.wait_config(lambda c: len(insts_of(c, "c4_modbus_client")) == 6,
                          timeout=240, desc="58: 6 个 modbus 实例")
+    # 2026-10-19 点 key 命名切换对齐：成员前缀 = 成员设备名原样（1号风机_…），
+    # key 后缀 = 归一化点名（中文原样，点名翻译已退役）
     for i in range(1, 7):
-        prefix = f"wt{i}"
+        prefix = f"{i}号风机"
         inst = inst_by(cfg, "c4_modbus_client",
                        lambda x, p=prefix: str((x.get("points") or [{}])[0].get("id", "")).startswith(f"{p}_"))
         if inst is None:
@@ -206,7 +209,7 @@ def s58():
             raise rc.Fail(f"58: 实例端口 {inst.get('port')} ≠ 502")
         assert_member_points("58", prefix, inst, NAMES10,
                              list(range(3000, 3019, 2)), uid=i)
-    assert_suffix_shared("58", [f"wt{i}" for i in range(1, 7)], "风速", "windspeed")
+    assert_suffix_shared("58", [f"{i}号风机" for i in range(1, 7)], "风速", "风速")
     assert_reader("58", 60)
     reg = base.registry()
     if reg.get("channelHighWatermark") != 7:
@@ -220,7 +223,7 @@ def s59():
               done=lambda: len(insts_of(rc.read_config() or {}, "c4_modbus_client")) >= 3)
     cfg = rc.wait_config(lambda c: len(insts_of(c, "c4_modbus_client")) == 3,
                          timeout=240, desc="59: 3 个 modbus 实例")
-    bases = {"wt1": 1000, "wt2": 2000, "wt3": 3000}
+    bases = {"1号风机": 1000, "2号风机": 2000, "3号风机": 3000}
     for prefix, b in bases.items():
         inst = inst_by(cfg, "c4_modbus_client",
                        lambda x, p=prefix: str((x.get("points") or [{}])[0].get("id", "")).startswith(f"{p}_"))
@@ -230,11 +233,11 @@ def s59():
             raise rc.Fail(f"59: {prefix} ip {inst.get('ip')} ≠ 192.168.1.200")
         assert_member_points("59", prefix, inst, NAMES10,
                              list(range(b, b + 19, 2)), uid=7)
-    suffix = assert_suffix_shared("59", ["wt1", "wt2", "wt3"], "风速", "windspeed")
+    suffix = assert_suffix_shared("59", ["1号风机", "2号风机", "3号风机"], "风速", "windspeed")
     if suffix == "2000" or suffix == "3000":
         raise rc.Fail(f"59: key 用了全局地址（{suffix}）——违反模板相对裁定")
-    if "wt2_2000" in json.dumps(rc.read_config(), ensure_ascii=False):
-        raise rc.Fail("59: config 出现 wt2_2000 形态 key（全局地址 key）")
+    if "2号风机_2000" in json.dumps(rc.read_config(), ensure_ascii=False):
+        raise rc.Fail("59: config 出现 2号风机_2000 形态 key（全局地址 key）")
     assert_reader("59", 30)
     reg = base.registry()
     if reg.get("channelHighWatermark") != 4:
@@ -278,7 +281,7 @@ def s60():
             inst = inst_by(cfg, "c4_asfp2_server", lambda x, p=port: x.get("port") == p)
             if inst is None:
                 raise rc.Fail(f"60B: 缺监听 {port} 的实例")
-            assert_member_points("60", f"wt{i}", inst, NAMES10, list(range(1000, 1010)))
+            assert_member_points("60", f"{i}号风机", inst, NAMES10, list(range(1000, 1010)))
         assert_reader("60", 30)
         reg = base.registry()
         if reg.get("channelHighWatermark") != 4:
@@ -295,7 +298,7 @@ def s61():
     cfg = rc.wait_config(lambda c: len(insts_of(c, "c4_iec104_client")) == 10,
                          timeout=300, desc="61: 10 个 iec104 实例")
     for i in range(1, 11):
-        prefix = f"nbA{i:02d}"
+        prefix = f"a{i:02d}逆变器"
         port = 2403 + i
         inst = inst_by(cfg, "c4_iec104_client", lambda x, p=port: x.get("port") == p)
         if inst is None:
@@ -304,7 +307,7 @@ def s61():
         if inst.get("ip") != "172.16.228.45":
             raise rc.Fail(f"61: {prefix} ip {inst.get('ip')} ≠ 172.16.228.45")
         assert_member_points("61", prefix, inst, NAMES61, list(range(100, 110)))
-    assert_suffix_shared("61", [f"nbA{i:02d}" for i in range(1, 11)], "风速", "windspeed")
+    assert_suffix_shared("61", [f"a{i:02d}逆变器" for i in range(1, 11)], "风速", "windspeed")
     assert_reader("61", 100)
     assert_template_once("61", 100, "风速")
     reg = base.registry()
@@ -325,21 +328,21 @@ def s62():
     pts = inst.get("points", [])
     if len(pts) != 20:
         raise rc.Fail(f"62: 单实例点数 {len(pts)} ≠ 20（两台并入）")
-    wt1 = sorted(p["addr"] for p in pts if str(p.get("id", "")).startswith("wt1_"))
-    wt2 = sorted(p["addr"] for p in pts if str(p.get("id", "")).startswith("wt2_"))
-    if wt1 != list(range(1000, 1010)):
-        raise rc.Fail(f"62: wt1 地址 {wt1}")
-    if wt2 != list(range(1020, 1030)):
-        raise rc.Fail(f"62: wt2 地址 {wt2}（偏移 +20）")
+    f1_addrs = sorted(p["addr"] for p in pts if str(p.get("id", "")).startswith("1号风机_"))
+    f2_addrs = sorted(p["addr"] for p in pts if str(p.get("id", "")).startswith("2号风机_"))
+    if f1_addrs != list(range(1000, 1010)):
+        raise rc.Fail(f"62: 1号风机 地址 {f1_addrs}")
+    if f2_addrs != list(range(1020, 1030)):
+        raise rc.Fail(f"62: 2号风机 地址 {f2_addrs}（偏移 +20）")
     reg = base.registry()
     entries = {e.get("prefix"): e for e in reg.get("entries", [])}
-    if sorted(entries) != ["wt1", "wt2"]:
-        raise rc.Fail(f"62: 注册表条目 {sorted(entries)} ≠ [wt1, wt2]")
-    hosts = {entries["wt1"].get("host"), entries["wt2"].get("host")}
+    if sorted(entries) != ["1号风机", "2号风机"]:
+        raise rc.Fail(f"62: 注册表条目 {sorted(entries)} ≠ [1号风机, 2号风机]")
+    hosts = {entries["1号风机"].get("host"), entries["2号风机"].get("host")}
     if len(hosts) != 1:
         raise rc.Fail(f"62: 两台 host 不一致: {hosts}（应并入同一实例）")
-    if entries["wt1"].get("host") != inst.get("id"):
-        raise rc.Fail(f"62: 注册表 host {entries['wt1'].get('host')} ≠ 实例 {inst.get('id')}")
+    if entries["1号风机"].get("host") != inst.get("id"):
+        raise rc.Fail(f"62: 注册表 host {entries['1号风机'].get('host')} ≠ 实例 {inst.get('id')}")
     if reg.get("channelHighWatermark") != 2:
         raise rc.Fail(f"62: 水位 {reg.get('channelHighWatermark')} ≠ 2（1 writer + 1 reader）")
     if len(insts_of(rc.read_config(), "c4_asfp2_client")) != 1:

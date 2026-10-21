@@ -22,7 +22,7 @@ P_RECV1, P_FWD1, P_FWD2 = rc.P_RECV1, rc.P_FWD1, rc.P_FWD2
 PASSED = []          # 命中的 func_test_case.md 用例号（用于标注 AI测试通过 C4He1）
 SETUP_ONLY = {"A.3"}  # 链首准备步，不对应独立用例
 
-WT1_ID1000 = None  # A.3 首接 wt1 addr=1000 点 id（s23 并入不变性基准，见 prep 记录处）
+WT1_ID1000 = None  # A.3 首接 1号风机 addr=1000 点 id（s23 并入不变性基准，见 prep 记录处）
 
 MSG23 = ("再接入3号风机，第三方厂家通过asfp2协议转来3#风机数据，10个点，从1200到1209，"
          "分别是1200:风速、1201:功率、1202:风向、1203:桨叶角度、1204:发电机转速、"
@@ -40,7 +40,7 @@ def asfp_count(cfg, st):
 def s_prep_a3():
     """A.3 链首准备：全新环境按用例 1 输入接入（场站询问答华能阿拉善）→ 用例 1 完成态。
 
-    断言：channel1/channel2、wt1_* 十点、转发引用 channel1.wt1_*、水位=2、site 已绑定。"""
+    断言：channel1/channel2、1号风机_* 十点、转发引用 channel1.1号风机_*、水位=2、site 已绑定。"""
     conv = rc.Conv()
     flow_text, _ = base.flow(conv, rc.MSG_CASE1, answers=[(r"场站", "华能阿拉善")])
     cfg = rc.wait_config(lambda c: rc.writer_of(c, 1000) is not None
@@ -51,7 +51,7 @@ def s_prep_a3():
     wid, fid = rc.writer_of(cfg, 1000), rc.forward_of(cfg, 5000)
     if (wid, fid) != ("channel1", "channel2"):
         raise rc.Fail(f"A.3: 句柄 {wid}/{fid} ≠ channel1/channel2（全新环境首接预期）")
-    base.assert_writer_keys(cfg, "wt1", range(1000, 1010))
+    base.assert_writer_keys(cfg, "1号风机", range(1000, 1010))
     base.assert_forward_key(cfg, 5000, wid, 1000)
     # 记录首接点 id（s23 并入不变性断言基准，2026-10-04：LLM 译名 windspeed/
     # wind_speed 均属合法 snake_case，断言钉「并入后原点不变」，不硬编码译名）
@@ -61,7 +61,7 @@ def s_prep_a3():
     if reg.get("channelHighWatermark") != 2:
         raise rc.Fail(f"A.3: 水位={reg.get('channelHighWatermark')} ≠ 2")
     if (reg.get("entries") or [{}])[0].get("host") != wid:
-        raise rc.Fail(f"A.3: wt1 宿主 {((reg.get('entries') or [{}])[0].get('host'))} ≠ {wid}")
+        raise rc.Fail(f"A.3: 1号风机 宿主 {((reg.get('entries') or [{}])[0].get('host'))} ≠ {wid}")
 
 
 def s23():
@@ -75,7 +75,7 @@ def s23():
             conv, MSG23, done=lambda: rc.writer_of(rc.read_config(), 1200) is not None)
         cfg = rc.wait_config(lambda c: rc.writer_of(c, 1200) is not None
                              and rc.forward_of(c, 7000) is not None,
-                             timeout=240, desc="23: wt3 十点并入宿主 + 转发实例→9901")
+                             timeout=240, desc="23: 3号风机 十点并入宿主 + 转发实例→9901")
         dialog = "".join(base._assistant_texts())
         # ① 零交互并入：无端口冲突询问/警告，方案以白话陈述共用事实
         if re.search(r"占用|冲突|无法接入|请更换端口", dialog):
@@ -83,9 +83,9 @@ def s23():
                           f"{[m for m in re.findall(r'.{20}(?:占用|冲突).{20}', dialog)][:1]}")
         if "共用端口" not in dialog:
             raise rc.Fail(f"23: 方案未以白话陈述共用事实（缺「共用端口」）: {dialog[:200]}")
-        # ② 逐点列出最终点 key（wt3_* 形态随方案明示）
-        if "wt3_" not in dialog:
-            raise rc.Fail(f"23: 方案未逐点明示 wt3_* 点 key: {dialog[:200]}")
+        # ② 逐点列出最终点 key（3号风机_* 形态随方案明示）
+        if "3号风机_" not in dialog:
+            raise rc.Fail(f"23: 方案未逐点明示 3号风机_* 点 key: {dialog[:200]}")
         assert base.site_of_agent_json() is not None
         base.assert_channel_ids(cfg)
         # ③ 无新 c4_asfp2_server 实例：宿主唯一，1200 与 1000 同宿主
@@ -96,10 +96,10 @@ def s23():
         host1 = rc.writer_of(cfg, 1000)
         if wid != host1:
             raise rc.Fail(f"23: addr 1200 落在 {wid}，1号风机在 {host1}——未并入宿主实例")
-        w, wid = base.assert_writer_keys(cfg, "wt3", range(1200, 1210))
+        w, wid = base.assert_writer_keys(cfg, "3号风机", range(1200, 1210))
         if w.get(1000, {}).get("id") != WT1_ID1000:
-            raise rc.Fail(f"23: 宿主上 1号 wt1 点被破坏: {w.get(1000)}")
-        # 转发侧：每设备一实例——3号新建独立转发实例（≠1号的），引用键 channel1.wt3_*
+            raise rc.Fail(f"23: 宿主上 1号 1号风机 点被破坏: {w.get(1000)}")
+        # 转发侧：每设备一实例——3号新建独立转发实例（≠1号的），引用键 channel1.3号风机_*
         fid3 = base.assert_forward_key(cfg, 7000, wid, 1200)
         base.assert_forward_key(cfg, 5000, host1, 1000)
         if rc.forward_of(cfg, 7000) == rc.forward_of(cfg, 5000):
@@ -108,8 +108,8 @@ def s23():
         if n_cli != n_cli0 + 1:
             raise rc.Fail(f"23: c4_asfp2_client 实例数 {n_cli0}→{n_cli} ≠ +1")
         # 注册表双条目指向同一宿主 + 水位 +1（仅转发实例）
-        base.entry("wt3", name="3号风机", host=wid)
-        base.entry("wt1", name="1号风机", host=wid)
+        base.entry("3号风机", name="3号风机", host=wid)
+        base.entry("1号风机", name="1号风机", host=wid)
         reg = base.registry()
         if reg.get("channelHighWatermark") != 3:
             raise rc.Fail(f"23: 水位={reg.get('channelHighWatermark')} ≠ 3（新转发实例占 3）")
@@ -134,7 +134,7 @@ def s54():
     host1 = rc.writer_of(cfg, 1000)
     if wid != host1 or wid != rc.writer_of(cfg, 1200):
         raise rc.Fail(f"54: 新点落在 {wid} ≠ 3号/1号宿主 {host1}——未按注册表宿主定位")
-    w, wid = base.assert_writer_keys(cfg, "wt3", list(range(1200, 1211)))
+    w, wid = base.assert_writer_keys(cfg, "3号风机", list(range(1200, 1211)))
     pid = str(w[1210]["id"])
     # ② 转发成对追加到 3号既有转发实例（→9901），不得新建第二转发实例
     fid7010 = base.assert_forward_key(cfg, 7010, wid, 1210)
@@ -143,8 +143,8 @@ def s54():
                       f"{rc.forward_of(cfg, 7000)}——转发归属检查失效")
     if asfp_count(cfg, "c4_asfp2_client") != n_cli0:
         raise rc.Fail(f"54: 转发实例数 {n_cli0}→{asfp_count(cfg, 'c4_asfp2_client')}——加点不得新建实例")
-    # ③ 注册表 pointMap 增项「机舱振动 → wt3_<裸id>」（完整点 key）
-    pm = base.entry("wt3", name="3号风机", host=wid).get("pointMap", {})
+    # ③ 注册表 pointMap 增项「机舱振动 → 3号风机_<裸id>」（完整点 key）
+    pm = base.entry("3号风机", name="3号风机", host=wid).get("pointMap", {})
     if pm.get("机舱振动") != pid:
         raise rc.Fail(f"54: pointMap[机舱振动]={pm.get('机舱振动')!r} ≠ {pid!r}")
     # ④⑤ 1号/3号既有点 shm_id 无损、新点分配新 shm_id
@@ -165,20 +165,20 @@ def s48():
     cfg = rc.wait_config(lambda c: rc.writer_of(c, 1200) is None
                          and rc.writer_of(c, 1000) is not None
                          and rc.forward_of(c, 7000) is None,
-                         timeout=180, desc="48: wt3 摘除 + 专属转发实例移除 + 宿主保留")
+                         timeout=180, desc="48: 3号风机 摘除 + 专属转发实例移除 + 宿主保留")
     dialog = "".join(base._assistant_texts())
     # ① 方案逐点列出待删 key（前缀点组手术形态）
-    if "wt3_" not in dialog:
-        raise rc.Fail(f"48: 方案未逐点列出 wt3_* 待删 key: {dialog[:200]}")
+    if "3号风机_" not in dialog:
+        raise rc.Fail(f"48: 方案未逐点列出 3号风机_* 待删 key: {dialog[:200]}")
     base.assert_channel_ids(cfg)
-    # ② 宿主实例保留——wt1_* 点表与 shm_id 完全无损；wt3_* 全部消失
+    # ② 宿主实例保留——1号风机_* 点表与 shm_id 完全无损；3号风机_* 全部消失
     if asfp_count(cfg, "c4_asfp2_server") != 1:
         raise rc.Fail(f"48: 采集实例数 ≠ 1（宿主应保留）: "
                       f"{[k for k in rc.server_instances(cfg) if k[0] == 'c4_asfp2_server']}")
     host = rc.points_of(cfg, "c4_asfp2_server", rc.writer_of(cfg, 1000))
-    leftover = sorted(a for a, p in host.items() if str(p.get("id", "")).startswith("wt3_"))
+    leftover = sorted(a for a, p in host.items() if str(p.get("id", "")).startswith("3号风机_"))
     if leftover:
-        raise rc.Fail(f"48: wt3_* 点残留: {leftover}")
+        raise rc.Fail(f"48: 3号风机_* 点残留: {leftover}")
     after = rc.snapshot_w1(cfg)
     for addr, sid in before.items():
         if 1200 <= addr <= 1210:
@@ -192,13 +192,13 @@ def s48():
         raise rc.Fail(f"48: 转发实例数 ≠ 1: "
                       f"{[k for k in rc.server_instances(cfg) if k[0] == 'c4_asfp2_client']}")
     base.assert_forward_key(cfg, 5000, rc.writer_of(cfg, 1000), 1000)
-    # ④ 注册表 {3号风机, wt3} 物理删除、wt1 保留；channel 序号不回收
+    # ④ 注册表 {3号风机, 3号风机} 物理删除、1号风机 保留；channel 序号不回收
     reg = base.registry()
     prefixes = [e.get("prefix") for e in reg.get("entries", [])]
-    if "wt3" in prefixes:
-        raise rc.Fail("48: 注册表 wt3 条目未删除")
-    if "wt1" not in prefixes:
-        raise rc.Fail(f"48: 注册表 wt1 条目丢失: {prefixes}")
+    if "3号风机" in prefixes:
+        raise rc.Fail("48: 注册表 3号风机 条目未删除")
+    if "1号风机" not in prefixes:
+        raise rc.Fail(f"48: 注册表 1号风机 条目丢失: {prefixes}")
     if reg.get("channelHighWatermark") != 3:
         raise rc.Fail(f"48: 水位回退 {reg.get('channelHighWatermark')} ≠ 3")
     base.assert_no_handle_leak("48")

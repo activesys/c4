@@ -3,7 +3,8 @@
 # 链序：52 → 删1号(借26) → 2 → 3 → 删1号(借26) → 1 → 20(补答5010=16的操作) → 17 → 18
 #       → 19 → 21 → 27 → 25 → 26 → 复接入(26③) → 28
 # 规则（用户指令）：逐项串行、不并行；任一链步 FAIL 立即停止全链、落盘诊断、不修改。
-# 断言口径：func_test_case.md v2.1.0 —— channel{N} 句柄、wt1_* 点 key、channelX.wt1_* 转发
+# 断言口径：func_test_case.md v2.1.0 —— channel{N} 句柄、{设备名}_* 点 key（2026-10-19
+# 命名切换：前缀 = 设备名原样归一化）、channelX.{设备名}_* 转发
 # 引用键、abbr_registry.json 注册表、site 首绑、对话/方案文本不得出现 channel 与「通道」。
 # 主链句柄为接续水位（52 占 1/2 → 1 得 5/6 → 21 得 7/8 → 复接入得 9/10），链上精确断言。
 import json
@@ -162,8 +163,8 @@ def writer_points(cfg, wid=None):
 
 
 def assert_writer_keys(cfg, prefix, addrs):
-    # 锚点取断言点表的首地址：s21 校验 wt2（首点 1100）时写死 1000 会错拿
-    # 1号风机实例（2026-10-02 链步21 误报实测：channel7 上 wt2_* 全部正确，
+    # 锚点取断言点表的首地址：s21 校验 2号风机（首点 1100）时写死 1000 会错拿
+    # 1号风机实例（2026-10-02 链步21 误报实测：channel7 上 2号风机_* 全部正确，
     # 断言却对 channel5 校验 1100~1109）
     w, wid = writer_points(cfg, rc.writer_of(cfg, addrs[0]))
     for a in addrs:
@@ -296,11 +297,11 @@ def s52():
                              and rc.forward_of(c, 5000) is not None,
                              timeout=240, desc="1号风机 writer+转发实例（52 首接）")
         assert_channel_ids(cfg)
-        w, wid = assert_writer_keys(cfg, "wt1", range(1000, 1010))
+        w, wid = assert_writer_keys(cfg, "1号风机", range(1000, 1010))
         if w.get(1000, {}).get("name") != "风速":
             raise rc.Fail(f"采集点 name 未原样落盘: {w.get(1000)}")
         assert_forward_key(cfg, 5000, wid, 1000)
-        e = entry("wt1", name="1号风机", host=wid)
+        e = entry("1号风机", name="1号风机", host=wid)
         if not isinstance(e.get("pointMap"), dict) or "风速" not in e["pointMap"]:
             raise rc.Fail(f"pointMap 未登记「风速」: {e}")
         reg = registry()
@@ -342,7 +343,7 @@ def s2():
                          and rc.forward_of(c, 5000) is not None,
                          timeout=240, desc="2: 1号风机再次接入")
     assert_channel_ids(cfg)
-    assert_writer_keys(cfg, "wt1", range(1000, 1010))
+    assert_writer_keys(cfg, "1号风机", range(1000, 1010))
     dialog = "".join(_assistant_texts())
     if re.search(r"请提供.{0,12}场站|场站名称|站点名称", dialog):
         raise rc.Fail("场站已绑定仍询问场站（2②）")
@@ -374,9 +375,9 @@ def s1():
     fid = rc.forward_of(cfg, 5000)
     if (wid, fid) != ("channel5", "channel6"):
         raise rc.Fail(f"1: 句柄 {wid}/{fid} ≠ 接续水位预期 channel5/channel6（永不复用）")
-    assert_writer_keys(cfg, "wt1", range(1000, 1010))
+    assert_writer_keys(cfg, "1号风机", range(1000, 1010))
     assert_forward_key(cfg, 5000, wid, 1000)
-    entry("wt1", name="1号风机", host=wid)
+    entry("1号风机", name="1号风机", host=wid)
     reg = registry()
     if reg.get("channelHighWatermark") != 6:
         raise rc.Fail(f"1: 水位={reg.get('channelHighWatermark')} ≠ 6")
@@ -384,7 +385,7 @@ def s1():
 
 
 def s20_16():
-    """用例 20+16：加点询问转发地址 → 补答 5010 → 双侧成对（点 key wt1_*、引用键接续）。"""
+    """用例 20+16：加点询问转发地址 → 补答 5010 → 双侧成对（点 key 1号风机_*、引用键接续）。"""
     conv = rc.Conv()
     text = conv.send(MSG20)
     if not re.search(r"转发|5010", text):
@@ -399,12 +400,12 @@ def s20_16():
         return rc.forward_of(cfg, 5010) is not None
     cfg = rc.wait_config(check, timeout=240, desc="16: 2010/5010 成对新增")
     assert_channel_ids(cfg)
-    w, wid = assert_writer_keys(cfg, "wt1", list(range(1000, 1010)) + [2010])
+    w, wid = assert_writer_keys(cfg, "1号风机", list(range(1000, 1010)) + [2010])
     if str(w[2010]["id"]) == str(w[1000]["id"]):
         raise rc.Fail("16: 新点与 addr=1000 撞 key")
     assert_forward_key(cfg, 5010, wid, 2010)
-    entry("wt1", host=wid)
-    pm = entry("wt1").get("pointMap", {})
+    entry("1号风机", host=wid)
+    pm = entry("1号风机").get("pointMap", {})
     if "振动" not in pm:
         raise rc.Fail(f"16: pointMap 未登记「振动」: {pm}")
     after = rc.snapshot_w1(cfg)
@@ -474,7 +475,7 @@ def s19():
 
 
 def s21():
-    """用例 21：2号风机独占接入（9002→9901）——wt2_* key、4 实例并存、注册表两条目。"""
+    """用例 21：2号风机独占接入（9002→9901）——2号风机_* key、4 实例并存、注册表两条目。"""
     fwd = rc.start_receiver(P_FWD2)
     try:
         conv = rc.Conv()
@@ -486,7 +487,7 @@ def s21():
         assert_channel_ids(cfg)
         wid2 = rc.writer_of(cfg, 1100)
         rc.points_of(cfg, "c4_asfp2_server", wid2)
-        assert_writer_keys(cfg, "wt2", range(1100, 1110))
+        assert_writer_keys(cfg, "2号风机", range(1100, 1110))
         fid2 = rc.forward_of(cfg, 6000)
         fp = rc.points_of(cfg, "c4_asfp2_client", fid2)[6000]
         wpid = str(rc.points_of(cfg, "c4_asfp2_server", wid2)[1100]["id"])
@@ -498,10 +499,10 @@ def s21():
             raise rc.Fail(f"21: 实例数 {n_srv}+{n_cli} ≠ 4 并存")
         if not rc.listening(P_RECV1) or not rc.listening(P_RECV2):
             raise rc.Fail("21: 9001/9002 双监听不成立")
-        e1 = entry("wt1")
-        e2 = entry("wt2", name="2号风机", host=wid2)
+        e1 = entry("1号风机")
+        e2 = entry("2号风机", name="2号风机", host=wid2)
         if e1.get("host") == e2.get("host"):
-            raise rc.Fail("21: wt1/wt2 宿主相同（9002 应为独占新实例）")
+            raise rc.Fail("21: 1号风机/2号风机 宿主相同（9002 应为独占新实例）")
         reg = registry()
         if reg.get("channelHighWatermark") != 8:
             raise rc.Fail(f"21: 水位={reg.get('channelHighWatermark')} ≠ 8")
@@ -538,11 +539,11 @@ def s25():
     rc.wait_config(check, timeout=180, desc="25: 2号成对删除且 1号保留")
     rc.wait_port(P_RECV2, False)
     rc.wait_port(P_RECV1, True)
-    entry("wt1")
+    entry("1号风机")
     reg = registry()
     names = [e.get("prefix") for e in reg.get("entries", [])]
-    if "wt2" in names:
-        raise rc.Fail("25: 注册表 wt2 条目未删除")
+    if "2号风机" in names:
+        raise rc.Fail("25: 注册表 2号风机 条目未删除")
     if reg.get("channelHighWatermark") != 8:
         raise rc.Fail(f"25: 水位回退 → {reg.get('channelHighWatermark')}")
 
@@ -575,9 +576,9 @@ def s_reaccess():
     fid = rc.forward_of(cfg, 5000)
     if (wid, fid) != ("channel9", "channel10"):
         raise rc.Fail(f"26③: 句柄 {wid}/{fid} ≠ channel9/channel10（已删序号被复用？）")
-    assert_writer_keys(cfg, "wt1", range(1000, 1010))
+    assert_writer_keys(cfg, "1号风机", range(1000, 1010))
     assert_forward_key(cfg, 5000, wid, 1000)
-    entry("wt1", name="1号风机", host=wid)
+    entry("1号风机", name="1号风机", host=wid)
     assert_no_handle_leak("26③")
 
 

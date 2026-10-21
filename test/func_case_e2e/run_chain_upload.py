@@ -45,15 +45,15 @@ def s7():
             and rc.forward_of(c, 5000) is not None,
             timeout=240, desc="7: 上传接入完成态（10 点 + 转发实例）")
         base.assert_channel_ids(cfg)
-        # ③ config 断言：10 点 wt1_ 前缀、addr 1000~1009、点名与文件一致、转发成对
-        w, wid = base.assert_writer_keys(cfg, "wt1", range(1000, 1010))
+        # ③ config 断言：10 点 1号风机_ 前缀、addr 1000~1009、点名与文件一致、转发成对
+        w, wid = base.assert_writer_keys(cfg, "1号风机", range(1000, 1010))
         for p in w.values():
             if p.get("name") not in NAMES10:
                 raise rc.Fail(f"7③: 点名 {p.get('name')!r} 与文件点表不符")
         base.assert_forward_key(cfg, 5000, wid, 1000)
-        e = base.entry("wt1")
+        e = base.entry("1号风机")
         if not e or e.get("host") != wid:
-            raise rc.Fail(f"7③: 注册表 wt1 条目缺失或宿主不符: {e}")
+            raise rc.Fail(f"7③: 注册表 1号风机 条目缺失或宿主不符: {e}")
         # ④ 数据面：采集 1000~1009 → 转发 5000~5009（19900 接收端）
         rc.wait_port(rc.P_RECV1, True)
         base.data_smoke(fwd, rc.P_RECV1, 1000, 1010)

@@ -3,11 +3,12 @@
 # 链段（各自独立回零 A.2，场站询问答「华能阿拉善」）：
 #   5    —— 升压站 + 转发起始地址自然语言（「从一万开始」→ 10000~10009）
 #   8    —— 未提供点名：逐点追问 → 用户仍不提供 → 拒绝接入（点名必填不自动生成）
-#   47A  —— 设备必答缺口：裸数字「2」绑定（累积文本含类型词）→ 方案 wt2_，不确认不落盘
-#   47B  —— 完整名称应答「2号风机」→ recap 命名 + 前缀 wt2 随方案明示，不确认不落盘
+#   47A  —— 设备必答缺口：裸数字「2」绑定（累积文本含类型词）→ 方案 2号风机_，不确认不落盘
+#   47B  —— 完整名称应答「2号风机」→ recap 命名 + 前缀 2号风机 随方案明示，不确认不落盘
 #   47C  —— 匿名设备 → dev 序列，方案明示 dev1_，不确认不落盘
-#   47D  —— 名称含下划线 power_forecast_1 → 前缀剔除下划线，不确认不落盘
-#   47E  —— 一条消息两台设备 → 逐台接入（先 1号后 2号），注册表 wt1/wt2 双固化
+#   47D  —— 名称含下划线 power_forecast_1 → 前缀保留 _（白名单符号，2.1.86 名原样
+#          归一化），不确认不落盘（旧期望 powerforecast1 为退役体系残留，2026-10-20 改）
+#   47E  —— 一条消息两台设备 → 逐台接入（先 1号后 2号），注册表 1号风机/2号风机 双固化
 #   42   —— modbus 设备不可达：start 成功、不谎报已采集（数据面无从站 defer）
 #   51   —— 注册表固化时机：占端口注入 PORT_BIND_FAILED 回滚无幽灵条目 → 重接固化
 #           → 步骤 B 删注册表重建 + 水位降级（已删序号可复用）
@@ -115,8 +116,8 @@ def s5(influx=None):
                          and rc.forward_of(c, 10000) is not None,
                          timeout=240, desc="5: 升压站接入 + 转发 10000 起")
     base.assert_channel_ids(cfg)
-    # syz 前缀（升压站类型映射）+ 2390~2399 十点
-    base.assert_writer_keys(cfg, "syz", range(2390, 2400))
+    # 升压站 前缀（升压站类型映射）+ 2390~2399 十点
+    base.assert_writer_keys(cfg, "升压站", range(2390, 2400))
     base.assert_forward_key(cfg, 10000, rc.writer_of(cfg, 2390), 2390)
     reg = base.registry()
     if reg.get("channelHighWatermark") != 2:
@@ -187,11 +188,11 @@ def s47_variant(ans, expect_prefix, tag, expect_dev=None):
 
 
 def s47a(influx=None):
-    s47_variant(ANS47A, "wt2", "47A", expect_dev="2号风机")
+    s47_variant(ANS47A, "2号风机", "47A", expect_dev="2号风机")
 
 
 def s47b(influx=None):
-    s47_variant(ANS47B, "wt2", "47B", expect_dev="2号风机")
+    s47_variant(ANS47B, "2号风机", "47B", expect_dev="2号风机")
 
 
 def s47c(influx=None):
@@ -199,7 +200,7 @@ def s47c(influx=None):
 
 
 def s47d(influx=None):
-    s47_variant(ANS47D, "powerforecast1", "47D", expect_dev="power_forecast_1")
+    s47_variant(ANS47D, "power_forecast_1", "47D", expect_dev="power_forecast_1")
 
 
 def s47e(influx=None):
@@ -213,10 +214,10 @@ def s47e(influx=None):
                          and rc.forward_of(c, 6000) is not None,
                          timeout=300, desc="47E: 两台逐台接入完成")
     base.assert_channel_ids(cfg)
-    base.assert_writer_keys(cfg, "wt1", range(1000, 1010))
-    base.assert_writer_keys(cfg, "wt2", range(1100, 1120))
-    base.entry("wt1", name="1号风机", host=rc.writer_of(cfg, 1000))
-    base.entry("wt2", name="2号风机", host=rc.writer_of(cfg, 1100))
+    base.assert_writer_keys(cfg, "1号风机", range(1000, 1010))
+    base.assert_writer_keys(cfg, "2号风机", range(1100, 1120))
+    base.entry("1号风机", name="1号风机", host=rc.writer_of(cfg, 1000))
+    base.entry("2号风机", name="2号风机", host=rc.writer_of(cfg, 1100))
     reg = base.registry()
     if reg.get("channelHighWatermark") != 4:
         raise rc.Fail(f"47E: 水位={reg.get('channelHighWatermark')} ≠ 4")
@@ -266,8 +267,8 @@ def s51(influx=None):
         assert_empty_config("51A")
         reg = base.registry()
         prefixes = [e.get("prefix") for e in ((reg or {}).get("entries") or [])]
-        if "wt1" in prefixes:
-            raise rc.Fail(f"51①: 回滚后注册表残留幽灵条目 wt1: {reg}")
+        if "1号风机" in prefixes:
+            raise rc.Fail(f"51①: 回滚后注册表残留幽灵条目 1号风机: {reg}")
         dialog = "".join(base._assistant_texts())
         if not re.search(r"失败|回滚|恢复原样|未能|无法", dialog):
             raise rc.Fail(f"51①: 无失败汇报信号: {dialog[:300]}")
@@ -277,7 +278,7 @@ def s51(influx=None):
         cfg = rc.wait_config(lambda c: rc.writer_of(c, 1000) is not None,
                              timeout=240, desc="51A: 重接成功")
         wid1 = rc.writer_of(cfg, 1000)
-        base.entry("wt1", name="1号风机", host=wid1)
+        base.entry("1号风机", name="1号风机", host=wid1)
         # ── 步骤 B：再接 2号 → 删除 → A.5 删注册表 → 重建 + 水位降级 ──
         conv3 = rc.Conv()
         base.flow(conv3, MSG51_B_R2,
@@ -302,15 +303,15 @@ def s51(influx=None):
         agent.up()
         rc.AGENT = agent
         time.sleep(2)
-        # 重建断言：wt1 条目恢复（name 退化）、watermark 降级 = 现存实例最大序号。
-        # MSG_CASE1 含转发 → wt1 = writer channel1 + reader channel2 两实例，
+        # 重建断言：1号风机 条目恢复（name 退化）、watermark 降级 = 现存实例最大序号。
+        # MSG_CASE1 含转发 → 1号风机 = writer channel1 + reader channel2 两实例，
         # 降级水位 = 2（2026-10-03 run11 实测确认，产品行为符合设计）
         reg = base.registry()
         prefixes = [e.get("prefix") for e in (reg.get("entries") or [])]
-        if prefixes != ["wt1"]:
-            raise rc.Fail(f"51B③: 重建条目 {prefixes} ≠ [wt1]")
+        if prefixes != ["1号风机"]:
+            raise rc.Fail(f"51B③: 重建条目 {prefixes} ≠ [1号风机]")
         e1 = reg["entries"][0]
-        if e1.get("host") != wid1 or e1.get("name") not in ("wt1", "1号风机"):
+        if e1.get("host") != wid1 or e1.get("name") not in ("1号风机", "1号风机"):
             raise rc.Fail(f"51B③: 重建条目异常: {e1}")
         # pointMap 重建契约 = 忠实镜像 config.json 点表（name→id），期望值由 config
         # 推导、不硬编码 LLM 译名——「风速」→windspeed（5.3-flash 代）/wind_speed
@@ -322,7 +323,7 @@ def s51(influx=None):
         if e1.get("pointMap", {}) != expected_pm:
             raise rc.Fail(f"51B③: pointMap 未按点表重建: {e1.get('pointMap')} ≠ {expected_pm}")
         if reg.get("channelHighWatermark") != 2:
-            raise rc.Fail(f"51B④: 水位降级={reg.get('channelHighWatermark')} ≠ 2（现存最大序号：wt1 占 1/2）")
+            raise rc.Fail(f"51B④: 水位降级={reg.get('channelHighWatermark')} ≠ 2（现存最大序号：1号风机 占 1/2）")
         # 重接 2号（9002 已释放）→ writer = 现存最大 + 1 = channel3（+reader channel4，
         # 已删序号不填坑，水位语义 = 高水位重建后再顺延）
         conv5 = rc.Conv()

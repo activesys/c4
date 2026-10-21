@@ -12,6 +12,9 @@
 #   10  —— 追加点撞名：与既有点同名 → 澄清拒绝（禁自动改名）→ 换名后成对写入
 #   53  —— site_ambiguous：子集场站名（阿拉善风电场）→ 归属确认（不误拒）→ 确认后接入
 #   56  —— 源点名改名：pointMap 重绑定、key/shm_id 不变、翻译漂移负断言
+#   57  —— 协议拆写句式（2026-10-17 生产逐字语料）：转发标记与协议声明跨子句，
+#          接入侧必须落 c4_modbus_client（asfp2 误绑回归锚，2.1.79 弃权语义）
+#   58  —— 协议纠错通道：显式侧别重声明在未锁定期覆盖既有绑定（纠正不静默无视）
 # 注意：转发接收器一律先于执行拉起（转发客户端首连 refused 后 30s 退避，
 # 数据面烟囱 20s 窗口会错过晚启的接收器，2026-10-04 13A 实测）。
 # 规则：逐项串行、任一链段 FAIL 立即停止并落盘诊断。
@@ -84,6 +87,26 @@ MSG53 = ("现在需要接入阿拉善风电场2号风机的数据，第三方厂
 
 MSG56 = "把1号风机的齿轮箱油温点改个名字，叫主轴承温度，地址1005不变。"
 
+# 57/58（2026-10-17 生产野测裁定）：协议归属弃权语义 + 纠错通道回归锚。
+# 生产原话（华锐Bachmann/景观SCADA 接入）转发标记与协议声明被逗号拆成相邻子句，
+# 原别名快路把 asfp2 误绑接入侧（声明子句无转发标记拦不住），modbus 声明子句反被
+# 句尾「转发」排除——接入协议错绑后点表管道整个走错协议（isMb=false 一票否决）。
+MSG57 = (SITE_PRE +
+         "现在需要接入1号风机SCADA的数据，风机SCADA使用modbus协议转发，"
+         "ip:192.168.110.54, port:502，转发到II区服务器，使用Asfp2协议，127.0.0.1:9900。"
+         # 句读规则同 44：点表句不与转发词同句；设备 IP 不可达，仅 config 断言
+         "点表10个点：3000:风速、3002:变桨速度、3004:环境温度、3006:齿轮箱油温、"
+         "3008:发电机转速、3010:桨叶角度、3012:塔筒温度、3014:风向、3016:大气压强、"
+         "3018:空气湿度，全部保持寄存器（功能码3）、32位浮点、swap=2，从站号1。"
+         "转发点表5000~5009。")
+
+MSG58A = SITE_PRE + "现在需要接入1号风机的数据，用asfp2协议。"
+MSG58B = ("不对，接入侧是modbus，设备ip:192.168.110.54，端口502，从站号1。"
+          "点表10个点：3000:风速、3002:变桨速度、3004:环境温度、3006:齿轮箱油温、"
+          "3008:发电机转速、3010:桨叶角度、3012:塔筒温度、3014:风向、3016:大气压强、"
+          "3018:空气湿度，全部保持寄存器（功能码3）、32位浮点、swap=2。"
+          "转发采用asfp2协议到127.0.0.1:9900，转发点表5000~5009。")
+
 
 def json_unchanged(before):
     return (json.dumps(before, sort_keys=True)
@@ -133,7 +156,7 @@ def s13a():
         cfg = rc.wait_config(lambda c: rc.writer_of(c, 1000) is not None
                              and rc.forward_of(c, 5000) is not None,
                              timeout=240, desc="13A: 补答协议后接入完成")
-        base.assert_writer_keys(cfg, "wt1", range(1000, 1010))
+        base.assert_writer_keys(cfg, "1号风机", range(1000, 1010))
         rc.wait_port(rc.P_RECV1, True)
         base.data_smoke(fwd, rc.P_RECV1, 1000, 1009)
     finally:
@@ -159,7 +182,7 @@ def s13b():
         cfg = rc.wait_config(lambda c: rc.writer_of(c, 1000) is not None
                              and rc.forward_of(c, 5000) is not None,
                              timeout=240, desc="13B: 纠正协议后接入完成")
-        base.assert_writer_keys(cfg, "wt1", range(1000, 1010))
+        base.assert_writer_keys(cfg, "1号风机", range(1000, 1010))
         rc.wait_port(rc.P_RECV1, True)
         base.data_smoke(fwd, rc.P_RECV1, 1000, 1009)
     finally:
@@ -182,7 +205,7 @@ def s14():
         plan_text = next((t for t in base._assistant_texts() if "是否确认" in t), "")
         if plan_text.count("asfp2") < 2:
             raise rc.Fail(f"14: 方案未双侧展示 asfp2: {plan_text[:200]}")
-        base.assert_writer_keys(cfg, "wt1", range(1000, 1010))
+        base.assert_writer_keys(cfg, "1号风机", range(1000, 1010))
         rc.wait_port(rc.P_RECV1, True)
         base.data_smoke(fwd, rc.P_RECV1, 1000, 1009)
     finally:
@@ -203,7 +226,7 @@ def s4():
         cfg = rc.wait_config(lambda c: rc.writer_of(c, 2390) is not None,
                              timeout=240, desc="4: 升压站等价应答接入完成")
         base.assert_channel_ids(cfg)
-        w, wid = base.assert_writer_keys(cfg, "syz", range(2390, 2400))
+        w, wid = base.assert_writer_keys(cfg, "升压站", range(2390, 2400))
         if w.get(2390, {}).get("name") != "电网频率":
             raise rc.Fail(f"4: 混述点表未逐点解析: {w.get(2390)}")
         fid = rc.forward_of(cfg, 2390)
@@ -349,7 +372,7 @@ def s53():
         cfg = rc.wait_config(lambda c: rc.writer_of(c, 1100) is not None
                              and rc.forward_of(c, 5100) is not None,
                              timeout=240, desc="53②: 确认归属后接入完成")
-        base.assert_writer_keys(cfg, "wt2", range(1100, 1110))
+        base.assert_writer_keys(cfg, "2号风机", range(1100, 1110))
         base.data_smoke(fwd, rc.P_RECV2, 1100, 1109)
     finally:
         fwd.stop()
@@ -382,7 +405,7 @@ def s56():
             raise rc.Fail(f"56: key/shm_id 被改动: {old} → {p}")
         if rc.forward_of(cfg, 5005) != old_fid:
             raise rc.Fail("56: 转发侧被变更（引用 key 不变原则）")
-        e = base.entry("wt1")
+        e = base.entry("1号风机")
         pm = (e or {}).get("pointMap", {})
         # 2026-10-07 翻译退役：key 由点名归一化生成——断言锚定「改名不换 key」语义
         #（新名重绑到既有 key），不再硬编码英文译名形态
@@ -391,6 +414,102 @@ def s56():
     finally:
         fwd.stop()
     base.assert_no_handle_leak("56")
+
+
+def s57():
+    """协议拆写句式（生产逐字语料）：接入侧必须落 c4_modbus_client——
+    asfp2 误绑接入侧则点表进 asfp2 管道、modbus 实例永不落地（wait_config 超时）。
+    接入侧协议识别在弃权语义下交 L2 提示词（两个声明子句均弱标记），LLM 未命中
+    时走协议缺口追问，应答链自适应补答。"""
+    conv = rc.Conv()
+    before = rc.read_config()
+    text = conv.send(MSG57)
+    if not json_unchanged(before):
+        raise rc.Fail("57①: 首回合写入了 config")
+    ans = [(r"接入协议|采集协议|通信协议|采用哪种协议|请提供.{0,8}协议", "modbus"),
+           (r"功能码", "全部是保持寄存器（功能码3）"),
+           (r"从站号|uid", "从站号都是1"),
+           (r"端口", "端口502"),
+           (r"转发协议|请提供.{0,12}转发", "转发采用asfp2协议到127.0.0.1:9900"),
+           (r"转发点表", "点表5000~5009")]
+    consumed = [False] * len(ans)
+    for _ in range(14):
+        if modbus_writer_of(rc.read_config(), 3000) is not None:
+            break
+        if ("是否确认" in text or "确认执行" in text or "确认后我将" in text
+                or ("方案" in text and "确认" in text)):
+            text = conv.send("[C4_BUTTON_CONFIRM] 确认")
+            rc.wait_idle()
+            continue
+        idx = next((i for i, (p, a) in enumerate(ans)
+                    if not consumed[i] and re.search(p, text)), None)
+        if idx is not None:
+            consumed[idx] = True
+            text = conv.send(ans[idx][1])
+            continue
+        time.sleep(10)
+        text = conv.send("继续")
+    cfg = rc.wait_config(lambda c: modbus_writer_of(c, 3000) is not None
+                         and rc.forward_of(c, 5000) is not None,
+                         timeout=240, desc="57②: 拆写句式接入完成")
+    wid = modbus_writer_of(cfg, 3000)
+    w = rc.points_of(cfg, "c4_modbus_client", wid)
+    if len(w) != 10:
+        raise rc.Fail(f"57③: 点数 {len(w)} ≠ 10")
+    p = w.get(3000, {})
+    if p.get("fun") != 3 or p.get("type") != 10 or p.get("uid") != 1:
+        raise rc.Fail(f"57③: fun/type/uid 未落盘: {p}")
+    if w.get(3018, {}).get("name") != "空气湿度":
+        raise rc.Fail(f"57③: 点名未逐点解析: {w.get(3018)}")
+    if rc.forward_of(cfg, 5000) is None:
+        raise rc.Fail("57③: 转发侧未落盘")
+
+
+def s58():
+    """协议纠错通道：首回合「用asfp2协议」随强接入前句绑定（确定性，不得追问协议）；
+    第二回合显式侧别重声明「接入侧是modbus」必须在未锁定期覆盖绑定——原实现四条
+    绑定入口挂 !state.recv.protocol 守卫，纠正被静默无视，唯一出路是「取消」重来。"""
+    conv = rc.Conv()
+    text1 = conv.send(MSG58A)
+    # 追问检测钉 ask_protocol 实际文案「请提供接入协议，…」——裸「接入协议」
+    # 备选会撞 recap 标签「· 接入协议：asfp2」（2026-10-20 首跑实测假阳性）
+    if re.search(r"采用哪种协议|请提供.{0,8}协议", text1):
+        raise rc.Fail(f"58①: 接入侧协议未绑定（强前句+弱协议子句）: {text1[:200]}")
+    text = conv.send(MSG58B)
+    if re.search(r"采用哪种协议|请提供.{0,8}协议", text):
+        raise rc.Fail(f"58②: 纠正后仍追问接入协议（重声明未生效）: {text[:250]}")
+    ans = [(r"功能码", "全部是保持寄存器（功能码3）"),
+           (r"从站号|uid", "从站号都是1"),
+           (r"转发点表", "点表5000~5009")]
+    consumed = [False] * len(ans)
+    for _ in range(12):
+        if modbus_writer_of(rc.read_config(), 3000) is not None:
+            break
+        if ("是否确认" in text or "确认执行" in text or "确认后我将" in text
+                or ("方案" in text and "确认" in text)):
+            text = conv.send("[C4_BUTTON_CONFIRM] 确认")
+            rc.wait_idle()
+            continue
+        idx = next((i for i, (p, a) in enumerate(ans)
+                    if not consumed[i] and re.search(p, text)), None)
+        if idx is not None:
+            consumed[idx] = True
+            text = conv.send(ans[idx][1])
+            continue
+        time.sleep(10)
+        text = conv.send("继续")
+    cfg = rc.wait_config(lambda c: modbus_writer_of(c, 3000) is not None
+                         and rc.forward_of(c, 5000) is not None,
+                         timeout=240, desc="58③: 纠正后接入完成")
+    wid = modbus_writer_of(cfg, 3000)
+    w = rc.points_of(cfg, "c4_modbus_client", wid)
+    if len(w) != 10:
+        raise rc.Fail(f"58④: 点数 {len(w)} ≠ 10")
+    p = w.get(3000, {})
+    if p.get("fun") != 3 or p.get("type") != 10 or p.get("uid") != 1:
+        raise rc.Fail(f"58④: fun/type/uid 未落盘: {p}")
+    if rc.forward_of(cfg, 5000) is None:
+        raise rc.Fail("58④: 转发侧未落盘")
 
 
 CHAINS = [
@@ -403,6 +522,8 @@ CHAINS = [
     ("10", ["10"], s10),
     ("53", ["53"], s53),
     ("56", ["56"], s56),
+    ("57", ["57"], s57),
+    ("58", ["58"], s58),
 ]
 
 

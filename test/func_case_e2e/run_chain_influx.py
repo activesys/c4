@@ -66,14 +66,49 @@ class Influxd:
         self.p = None
 
     @staticmethod
+    def _port_pids():
+        """占 18086 的 influxd pid（跨配置目录孤儿一律算——ss 解析 + cmdline 校验）。"""
+        out = subprocess.run(["ss", "-ltnp"], capture_output=True, text=True).stdout
+        pids = []
+        for line in out.splitlines():
+            if ":18086" not in line:
+                continue
+            for m in re.finditer(r"pid=(\d+)", line):
+                pid = m.group(1)
+                try:
+                    with open(f"/proc/{pid}/cmdline", "rb") as f:
+                        if b"influxd" in f.read():
+                            pids.append(pid)
+                except OSError:
+                    pass
+        return pids
+
+    @staticmethod
     def kill_orphans():
-        """清扫孤儿 influxd（上一驱动进程被强杀时遗留、仍占 18086）。"""
-        subprocess.run(["pkill", "-f", "influxd -config /tmp/influxdb_test"],
-                       capture_output=True)
+        """清扫孤儿 influxd（2026-10-19 回归实测：run_cases 驱动器的 18086 实例
+        （/tmp/c4_influxdb 配置）遗留不回收，与本驱动器（/tmp/influxdb_test）
+        互不相认——孤儿清扫漏杀 → up() 的 /ping 误探到别人实例（端口被占时自己
+        Popen 的 influxd 起不来也无感）→ down() 后端口仍可达假失败。扩为：
+        两个已知配置目录 + 18086 端口兜底（cmdline 校验是 influxd 才杀）。"""
+        for pat in ("influxd -config /tmp/influxdb_test",
+                    "influxd -config /tmp/c4_influxdb"):
+            subprocess.run(["pkill", "-f", pat], capture_output=True)
+        time.sleep(1)
+        for pid in Influxd._port_pids():
+            subprocess.run(["kill", "-9", str(pid)], capture_output=True)
         time.sleep(1)
 
     def up(self, wait=True):
         self.kill_orphans()
+        # 孤儿清扫后 18086 仍应答 → 未知实例占端口：本次 Popen 必然绑不上而
+        # /ping 又会误探到它——显式报错，不静默收养（2026-10-19 假失败教训）
+        try:
+            urllib.request.urlopen(INFLUX_URL + "/ping", timeout=1)
+            raise rc.Fail("18086 已被未知 influxd 占用（孤儿清扫失败），拒绝收养")
+        except rc.Fail:
+            raise
+        except Exception:
+            pass
         if self.p is None or self.p.poll() is not None:
             # 自举：目录与最小配置缺失时补建（/tmp 清理后驱动器仍可独立运行；
             # auth 关闭——鉴权形态不在被测范围，见文件头注）

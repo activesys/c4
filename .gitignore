@@ -73,3 +73,9 @@ test/func_case_e2e/results*.log
 test/func_case_e2e/*.records.json
 test/func_case_e2e/全回归记录-*.md
 test/func_case_e2e/RP-MB-进度记录.md
+test/func_case_e2e/reg-20261019/
+test/func_case_e2e/reg-20261019-rerun/
+test/func_case_e2e/reg-20261020-full/
+test/func_case_e2e/reg-20261019-rerun*.sh
+test/func_case_e2e/reg-20261019.sh
+test/func_case_e2e/reg-20261020-rerun*.sh

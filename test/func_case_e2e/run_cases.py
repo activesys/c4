@@ -684,6 +684,10 @@ CASE_ANSWERS = {
     "26": [("是否", "是，确认删除1号风机")],
     "31": [("从站|端口", "从站号都是1。"), ("吗", "是asfp2协议。")],
     "33": [("协议", "就用asfp2吧。"), ("吗", "是asfp2协议。")],
+    # LLM 偶发不推导 104 地址段类型反问 point_type（2026-10-20 实测）——
+    # 驱动按手册 §2 地址分区口径直接应答（1~遥信 / 16385~遥测 / 25601~遥脉）
+    "34": [("point_type", "类型按104地址段定：16385、16386、16387是遥测（float），"
+                          "1和2是遥信，25601是遥脉（电度）。")],
     "35": [],
     "38": [("吗", "对，写入influxdb。")],
     "39": [("bucket", "bucket是hnals。"), ("吗", "对，写入influxdb。")],
@@ -990,8 +994,8 @@ def prereq():
         # 点 key 无条件设备前缀（v2.1.0 架构，与 run_chain_v21 assert_writer_keys
         # 同口径）：落盘 id = {设备 key}_{点名归一化}（2026-10-10 修正——原断言
         # 期望裸 id，与 v2.1.0 起的落地形态矛盾）
-        if str(wpt.get("id", "")) != f"wt1_{normalize_point_name('风速')}":
-            raise Fail(f"采集点 id 应为 wt1_前缀 + 点名「风速」归一化: {wpt.get('id')}")
+        if str(wpt.get("id", "")) != f"1号风机_{normalize_point_name('风速')}":
+            raise Fail(f"采集点 id 应为 1号风机_前缀 + 点名「风速」归一化: {wpt.get('id')}")
         fpt = points_of(cfg, "c4_asfp2_client", forward_of(cfg, 5000))[5000]
         if "name" in fpt:
             raise Fail(f"转发点不应含 name 字段（冗余数据）: {json.dumps(fpt, ensure_ascii=False)[:150]}")
@@ -1080,7 +1084,7 @@ def case18():
     addrs = [p["addr"] for p in w.values()]
     # 原点未被子名覆盖：id 保持 设备前缀+点名归一化（翻译退役后无 windspeed 形态
     # ——2026-10-10 修正陈旧断言）
-    if w.get(1000, {}).get("id") != f"wt1_{normalize_point_name('风速')}":
+    if w.get(1000, {}).get("id") != f"1号风机_{normalize_point_name('风速')}":
         raise Fail(f"addr=1000 的风速原点被改写（回复: {text[:150]}）")
     dup = sorted({a for a in addrs if addrs.count(a) > 1})
     if dup:
@@ -1109,7 +1113,7 @@ def case20():
     log(f"  用例20 PASS ✓（询问片段: {text[:120]}）")
 
 
-def add_wt2(c, target, fwd_table, port):
+def add_dev2(c, target, fwd_table, port):
     msg = MSG_WT2_BODY + f"转发到II区服务器127.0.0.1:{target}，转发采用asfp2协议，点表{fwd_table}。"
     text, confirmed = c.send_and_confirm(msg)
     if not confirmed:
@@ -1120,7 +1124,7 @@ def case21():
     recv = start_receiver(P_FWD2)
     try:
         c = Conv()
-        add_wt2(c, 9901, "6000~6009", 9002)
+        add_dev2(c, 9901, "6000~6009", 9002)
         cfg = wait_config(lambda c2: writer_of(c2, 1100) is not None
                           and sum(1 for k in server_instances(c2) if k[0] == "c4_asfp2_client") >= 2,
                           desc="2#风机 writer + 第二转发实例")
@@ -1143,7 +1147,7 @@ def case22():
     recv = start_receiver(P_FWD1)
     try:
         c = Conv()
-        add_wt2(c, 9900, "6000~6009", 9002)
+        add_dev2(c, 9900, "6000~6009", 9002)
 
         def fwd_instance_6000(cfg):
             for (st, iid), inst in server_instances(cfg).items():
@@ -1171,7 +1175,7 @@ def case23():
     msg += "转发到II区服务器127.0.0.1:9901，转发采用asfp2协议，点表6000~6009。"
     text, confirmed = c.send_and_confirm(msg)
     insts = server_instances(read_config())
-    if ("c4_asfp2_server", "hnals_wt3") in insts:
+    if ("c4_asfp2_server", "hnals_3号风机") in insts:
         raise Fail("冲突实例被写入 config")
     if not listening(P_RECV1):
         raise Fail("1#风机接收端口被破坏")
@@ -1211,7 +1215,7 @@ def case25():
 def case23d():
     """用例 23 收尾清理：删除并入的 3号风机（其点表并入 1号宿主实例）。26 的
     「删至 0 台」断言要求删除 1号 前清空全部设备——23 加入的 3号 不清理则
-    残留 wt3_* 点（2026-10-10 补）。"""
+    残留 3号风机_* 点（2026-10-10 补）。"""
     c = Conv()
     text, confirmed = c.send_and_confirm("删除3号风机。")
     if not confirmed:
@@ -1887,6 +1891,16 @@ def case34():
         if sorted(p["addr"] for p in i["points"]) != [1, 2, 16385, 16386, 16387, 25601]:
             raise Fail(f"IOA 点表异常: {sorted(p['addr'] for p in i['points'])}")
         established_to(2404)
+        # 电度（M_IT_NA 遥脉）不进总召、只走变化事件（模拟器手册 §2）——必须制造
+        # 一次真变化才可达。两段踢：0 →（间隔 ≥2s，iec104d 按 1s 节拍读 redis，
+        # 间隔不足则 0/1024 落入同一节拍、只见 1024 与内存态相同判无变化——
+        # 2026-10-20 实测）→ 1024。（-w 写模式、-t 1 跑一次即退；iec104d
+        # with_timestamp=1 → 默认带时间戳）
+        _rt = ["/usr/local/bin/redis_tool", "-s", "127.0.0.1", "-p", "6379", "-d", "0",
+               "-F", "/tmp/c4_env_104rt/v1024A.txt", "-t", "1", "-w"]
+        subprocess.run(_rt + ["-V", "0"], capture_output=True, timeout=30)
+        time.sleep(2)
+        subprocess.run(_rt + ["-V", "1024"], capture_output=True, timeout=30)
         points_values(cfg, "c4_iec104_client", i, T104_34_VALS, timeout=60, desc="104 对点")
         fwd_deadline = time.time() + 60
         while time.time() < fwd_deadline and not recv.out().strip():

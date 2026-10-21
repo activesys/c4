@@ -38,7 +38,7 @@ ANS65_FIELDS = ("字段按行序（windspeed、power、wind_dir、pitch_angle、
                 "gearbox_oil_temp、tower_temp、air_temp、humidity、pressure、windspeed、power）。")
 ANS65V_FIELDS = ("字段按行序（windspeed、power、wind_dir、pitch_angle、gen_speed、"
                  "gearbox_oil_temp、tower_temp）。")
-ANS_MEAS = "measurement用设备前缀，1号风机wt1、2号风机wt2。"
+ANS_MEAS = "measurement用设备前缀，1号风机1号风机、2号风机2号风机。"
 
 MSG64 = (
     "现在需要接入1号风机的数据，第三方厂家通过asfp2协议给我们转来1#风机数据，10个点，从1000到1009，"
@@ -193,8 +193,8 @@ def s65():
         raise rc.Fail(f"65④: 统计库点数 {len(stats.get('points', []))} ≠ 12")
     meas = sorted({str(p.get("measurement")) for p in stats.get("points", [])})
     # 2026-10-09 裁定：入库标识字段不得中文——「measurement按设备名」落设备前缀
-    if meas != sorted(["wt1", "wt2"]):
-        raise rc.Fail(f"65⑤: measurement 按设备名期望前缀 wt1/wt2，实得 {meas}")
+    if meas != sorted(["1号风机", "2号风机"]):
+        raise rc.Fail(f"65⑤: measurement 按设备名期望前缀 1号风机/2号风机，实得 {meas}")
     reg = base.registry()
     if not any(e.get("name") == "统计库" for e in reg.get("entries", [])):
         raise rc.Fail("65⑥: 注册表缺统计库目标条目")

@@ -294,7 +294,7 @@ def s69():
                              and rc.forward_of(c, 5000) is not None,
                              timeout=240, desc="69: 1号风机 writer+转发")
         base.assert_channel_ids(cfg)
-        assert_writer_prefix("69②", cfg, 19001, "wt1", range(1000, 1010))
+        assert_writer_prefix("69②", cfg, 19001, "1号风机", range(1000, 1010))
         assert_no_site_ask("69①", conv)
         if site_of_agent_json() != {"name": SITE1, "abbr": ABBR0}:
             raise rc.Fail(f"69③: 对话改写了 site: {site_of_agent_json()}")
@@ -341,7 +341,7 @@ def s71():
               done=lambda: writer_by_port(rc.read_config(), 19002)[0] is not None)
     cfg = rc.wait_config(lambda c: writer_by_port(c, 19002)[0] is not None,
                          timeout=240, desc="71①: 2号接入")
-    assert_writer_prefix("71①", cfg, 19002, "wt2", range(1000, 1010))
+    assert_writer_prefix("71①", cfg, 19002, "2号风机", range(1000, 1010))
     assert_no_site_ask("71⑤", conv1)
     # ② 超集泛化（新名+风电场后缀，包含完整配置名）——一致直接接入
     conv2 = rc.Conv()
@@ -349,7 +349,7 @@ def s71():
               done=lambda: writer_by_port(rc.read_config(), 19003)[0] is not None)
     cfg = rc.wait_config(lambda c: writer_by_port(c, 19003)[0] is not None,
                          timeout=240, desc="71②: 3号接入")
-    assert_writer_prefix("71②", cfg, 19003, "wt3", range(1000, 1010))
+    assert_writer_prefix("71②", cfg, 19003, "3号风机", range(1000, 1010))
     assert_no_site_ask("71⑤", conv2)
     # ③ 去品牌子集泛化——site_ambiguous 确定性提醒，确认后接入
     conv3 = rc.Conv()
@@ -360,7 +360,7 @@ def s71():
         raise rc.Fail("71③: 去品牌形态未触发 site_ambiguous 确认")
     cfg = rc.wait_config(lambda c: writer_by_port(c, 19004)[0] is not None,
                          timeout=240, desc="71③: 确认后 4号接入")
-    assert_writer_prefix("71③", cfg, 19004, "wt4", range(1000, 1010))
+    assert_writer_prefix("71③", cfg, 19004, "4号风机", range(1000, 1010))
     # ④ 品牌保留、缺区号——site_mismatch 严格拒绝（多区常态裁定：点表不可混用）
     cfg0 = config_dump()
     text = rc.Conv().send(access_msg("5号", "国电河北风电场", "9005", "9905"))
@@ -408,7 +408,7 @@ def s73():
               done=lambda: writer_by_port(rc.read_config(), 19007)[0] is not None)
     cfg = rc.wait_config(lambda c: writer_by_port(c, 19007)[0] is not None,
                          timeout=240, desc="73①: 7号接入")
-    assert_writer_prefix("73①", cfg, 19007, "wt7", range(1000, 1010))
+    assert_writer_prefix("73①", cfg, 19007, "7号风机", range(1000, 1010))
     assert_no_site_ask("73①", conv)
     assert_watermark("73①", 10)
     # ② 对改名前接入的 1号加点（缺转发地址 → 补答 5010，用例 20 语义）
@@ -418,11 +418,11 @@ def s73():
     cfg = rc.wait_config(lambda c: 1010 in (set(rc.points_of(
         c, "c4_asfp2_server", writer_by_port(c, 19001)[0]))
         if writer_by_port(c, 19001)[0] else set()),
-        timeout=240, desc="73②: wt1 加点 1010")
+        timeout=240, desc="73②: 1号风机 加点 1010")
     pts = {p.get("addr"): p for p in (writer_by_port(cfg, 19001)[1].get("points") or [])}
     pid1010 = str(pts.get(1010, {}).get("id", ""))
-    if not pid1010.startswith("wt1_"):
-        raise rc.Fail(f"73②: 新点 key={pid1010!r} 不以前缀 wt1_ 开头")
+    if not pid1010.startswith("1号风机_"):
+        raise rc.Fail(f"73②: 新点 key={pid1010!r} 不以前缀 1号风机_ 开头")
     if rc.forward_of(cfg, 5010) is None:
         raise rc.Fail("73②: 转发点 5010 缺失（新增点未成对）")
     # ③ 删点复原（用例 17 语义）
@@ -458,21 +458,21 @@ def s74():
               done=lambda: writer_by_port(rc.read_config(), 19008)[0] is not None)
     cfg = rc.wait_config(lambda c: writer_by_port(c, 19008)[0] is not None,
                          timeout=240, desc="74: 8号接入")
-    assert_writer_prefix("74②", cfg, 19008, "wt8", range(1000, 1010))
+    assert_writer_prefix("74②", cfg, 19008, "8号风机", range(1000, 1010))
     # 轮 1 抽查：缺区号品牌形态（华能通辽风电场）→ 确定性 other 拒绝
     cfg0, aj0 = config_dump(), agent_json_dump()
     text = rc.Conv().send(access_msg("5号", "华能通辽风电场", "9006", "9906"))
     assert_rejected("74⑥-轮1缺区号", text, cfg0, aj0)
     assert_watermark("74⑤", 12)
-    # 轮 2：→ 大唐辽宁三区（中文数字），升压站全名直接接入（单台无编号前缀 syz）
+    # 轮 2：→ 大唐辽宁三区（中文数字），升压站全名直接接入（单台无编号前缀 升压站）
     rename_round("74①-轮2", SITE4)
     conv2 = rc.Conv()
     base.flow(conv2, MSG74_SYZ,
               done=lambda: writer_by_port(rc.read_config(), 19009)[0] is not None)
     cfg = rc.wait_config(lambda c: writer_by_port(c, 19009)[0] is not None,
                          timeout=240, desc="74: 升压站接入")
-    assert_writer_prefix("74②", cfg, 19009, "syz", range(1100, 1110))
-    base.entry("syz")  # 注册表 syz 条目（§3.2.1.3c）
+    assert_writer_prefix("74②", cfg, 19009, "升压站", range(1100, 1110))
+    base.entry("升压站")  # 注册表 升压站 条目（§3.2.1.3c）
     # 轮 2 抽查：旧名「国电河北II区」拒绝（语义为主，74③）
     text2 = rc.Conv().send(access_msg("9号", SITE2, "9006", "9906"))
     assert_rejected("74③-轮2旧名", text2, config_dump(), agent_json_dump())
@@ -485,12 +485,12 @@ def s74():
         raise rc.Fail("74⑥: 去品牌形态未触发 site_ambiguous 确认")
     cfg = rc.wait_config(lambda c: writer_by_port(c, 19005)[0] is not None,
                          timeout=240, desc="74: 确认后 9号接入")
-    assert_writer_prefix("74⑥", cfg, 19005, "wt9", range(1000, 1010))
+    assert_writer_prefix("74⑥", cfg, 19005, "9号风机", range(1000, 1010))
     assert_watermark("74⑤", 16)
     # ④⑤ 缩写与历史设备恒定：agent.json abbr 全程 ABBR0（四次改名原缩写回传）
     if site_of_agent_json() != {"name": SITE4, "abbr": ABBR0}:
         raise rc.Fail(f"74④: site.abbr 漂移: {site_of_agent_json()}")
-    for prefix in ("wt1", "wt2", "wt3", "wt4", "wt7", "wt8", "wt9", "syz"):
+    for prefix in ("1号风机", "2号风机", "3号风机", "4号风机", "7号风机", "8号风机", "9号风机", "升压站"):
         base.entry(prefix)  # 历史设备注册表条目原样（改名不搬家累积验证）
     base.assert_no_handle_leak("74")
 
@@ -627,6 +627,10 @@ def s77():
         if agent_json_dump() != aj1:
             raise rc.Fail(f"77③: 422 路径落盘了（name={name!r}）")
     rc.log("  77: API 边界通过（400×3 / 200+幂等 / LLM 可用 200 / 坏 key 422×2，均不落盘）")
+    # 坏 key 实例必须回收（2026-10-20 实测：77 结束遗留坏 key agent 占 :19720，
+    # 后续套件 AGENT.up() 走复用路径 → 全部 LLM 401、提取全盲—— case34 被
+    # 毒化假败。恢复好 key 实例再交棒）
+    agent_restart(bad_key=False)
 
 
 # ── 链调度（串行单链，失败即停）────────────────────────────────

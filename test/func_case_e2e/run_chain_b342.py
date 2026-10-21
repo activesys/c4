@@ -3,8 +3,8 @@
 # 三链各自独立回零（链首 A.3 = 全新环境按用例 1 输入接入，场站询问答「华能阿拉善」）：
 #   B3: 用例 22 —— 2号风机独占 9002（接收不同端口）+ 转发同目标 9900（连接型每设备
 #       一实例，双转发实例并存），点表 6000~6009 与既有 5000~5009 无重叠
-#   B4: 用例 49 —— 同名设备消歧与前缀顺延（同名描述不匹配 → 追问；坚持同名 →
-#       wt2 顺延 + 并入宿主 + 注册表以 description 区分）
+#   B4: 用例 49 —— 同名设备消歧（同名描述不匹配 → 追问；坚持同名 → 可读拒收，
+#       2026-10-19 裁定同名设备 = 点表问题，前缀顺延退役）
 #   B2: 用例 24 —— 并入 + 转发地址冲突混合（① 9900 上 5000~5009 完全重叠 → 方案期
 #       拒绝；② 改 7100~7109 后并入成功）
 # 规则（用户指令）：逐项串行、不并行；任一链步 FAIL 立即停止全链、落盘诊断、不修改。
@@ -22,7 +22,7 @@ P_RECV1, P_RECV2, P_FWD1 = rc.P_RECV1, rc.P_RECV2, rc.P_FWD1
 PASSED = []           # 命中的 func_test_case.md 用例号
 SETUP_ONLY = {"A.3"}
 
-WT1_ID1000 = None  # A.3 首接 wt1 addr=1000 点 id（s49 并入不变性基准，见 prep 记录处）
+WT1_ID1000 = None  # A.3 首接 1号风机 addr=1000 点 id（s49 并入不变性基准，见 prep 记录处）
 
 MSG22 = ("再接入2号风机，第三方厂家通过asfp2协议转来2#风机数据，10个点，从1100到1109，"
          "分别是1100:风速、1101:功率、1102:风向、1103:桨叶角度、1104:发电机转速、"
@@ -77,11 +77,11 @@ def s22():
                              and rc.forward_of(c, 6000) is not None,
                              timeout=240, desc="22: 2号采集+转发实例落地")
         base.assert_channel_ids(cfg)
-        # ① 独立采集实例（不并入——9002 无既有监听），wt2_* 十点
+        # ① 独立采集实例（不并入——9002 无既有监听），2号风机_* 十点
         wid2 = rc.writer_of(cfg, 1100)
         if wid2 != "channel3":
             raise rc.Fail(f"22: 2号采集实例 {wid2} ≠ channel3（水位接续）")
-        base.assert_writer_keys(cfg, "wt2", range(1100, 1110))
+        base.assert_writer_keys(cfg, "2号风机", range(1100, 1110))
         # ② 连接型转发每设备一实例：9900 上两个转发实例并存（channel2/ch4）
         fid2 = base.assert_forward_key(cfg, 6000, wid2, 1100)
         fid1 = rc.forward_of(cfg, 5000)
@@ -95,7 +95,7 @@ def s22():
         for a in range(5000, 5010):
             if a not in f1:
                 raise rc.Fail(f"22: 1号转发表 addr={a} 丢失")
-        base.entry("wt2", name="2号风机", host=wid2)
+        base.entry("2号风机", name="2号风机", host=wid2)
         if base.registry().get("channelHighWatermark") != 4:
             raise rc.Fail(f"22: 水位={base.registry().get('channelHighWatermark')} ≠ 4")
         # 数据面：两路分别注入、9900 同一接收端均出数
@@ -108,38 +108,31 @@ def s22():
 
 # ── B4：用例 49 ────────────────────────────────────────────
 def s49():
-    """同名消歧：同名描述不匹配 → 追问；坚持同名 → wt2 顺延并入宿主、注册表双条目。"""
+    """同名消歧：同名描述不匹配 → 追问；坚持同名 → 可读拒收（2026-10-19 裁定：
+    同名设备 = 点表/声明问题，前缀顺延退役），config 全程不变。"""
     conv = rc.Conv()
+    before = rc.read_config()
+    # 49①/49② 均为预期「不落地」路径——必须配 stop_on 让 flow 在追问/拒收文案处
+    # 返回交还断言，否则烧满轮次必抛「未收敛」（2026-10-19 回归实测）
     text, clicked = base.flow(conv, MSG49A,
                               done=lambda: rc.writer_of(rc.read_config(), 1400) is not None,
+                              stop_on=(r"已有一台|同名|区分|另一台|重新说明",),
                               max_turns=6)
-    # ① 同名命中 → 描述仲裁 → 必有区分追问（不得静默复用 wt1、不得静默新建）
+    # ① 同名命中 → 描述仲裁 → 必有区分追问（不得静默复用、不得静默新建）
     dialog = "".join(base._assistant_texts())
     if not re.search(r"同名|已有一台|区分|另一台|重新说明", dialog):
         raise rc.Fail(f"49①: 无同名消歧追问: {text}")
-    text, _ = base.flow(conv, MSG49B,
-                        done=lambda: rc.writer_of(rc.read_config(), 1400) is not None,
-                        max_turns=8)
-    cfg = rc.wait_config(lambda c: rc.writer_of(c, 1400) is not None,
-                         timeout=240, desc="49②: 坚持同名后 wt2 接入")
-    base.assert_channel_ids(cfg)
-    # ② 坚持同名 → 前缀顺延 wt2、并入宿主 channel1（同端口同协议）
-    wid = rc.writer_of(cfg, 1400)
-    if wid != "channel1":
-        raise rc.Fail(f"49②: 新设备落在 {wid} ≠ 宿主 channel1（同端口应并入）")
-    base.assert_writer_keys(cfg, "wt2", range(1400, 1410))
-    if rc.points_of(cfg, "c4_asfp2_server", wid).get(1000, {}).get("id") != WT1_ID1000:
-        raise rc.Fail("49②: 宿主上 1号 wt1 点被破坏")
-    # 注册表以 description 区分两台同名
-    e2 = base.entry("wt2", name="1号风机", host=wid)
-    if "备用机" not in str(e2.get("description", "")):
-        raise rc.Fail(f"49②: wt2 description 未含「备用机」: {e2.get('description', '')[:80]}")
-    base.entry("wt1", name="1号风机")
-    # 全程并入+沿用既有转发链路，无新实例 → 水位不推进
-    if asfp_count(cfg, "c4_asfp2_server") != 1:
-        raise rc.Fail(f"49②: 采集实例数 ≠ 1（应并入宿主）")
-    if base.registry().get("channelHighWatermark") != 2:
-        raise rc.Fail(f"49②: 水位={base.registry().get('channelHighWatermark')} ≠ 2（无新实例）")
+    # ② 坚持同名 → 拒收出口：回复含 重名/拒收/点表问题 字样，1400 不落点、config 不变
+    text, _ = base.flow(conv, MSG49B, done=lambda: False, max_turns=4,
+                        stop_on=(r"重名|拒收|点表问题|可区分",))
+    dialog2 = "".join(base._assistant_texts())
+    if not re.search(r"重名|拒收|点表问题|可区分", dialog2):
+        raise rc.Fail(f"49②: 坚持同名未拒收: {text[:200]}")
+    if rc.writer_of(rc.read_config(), 1400) is not None:
+        raise rc.Fail("49②: 拒收后 1400 点落盘")
+    after = rc.read_config()
+    if json.dumps(before, sort_keys=True) != json.dumps(after, sort_keys=True):
+        raise rc.Fail("49②: 拒收路径改写了 config")
     base.assert_no_handle_leak("49")
 
 
@@ -166,12 +159,12 @@ def s24():
                   done=lambda: rc.writer_of(rc.read_config(), 1300) is not None)
         cfg = rc.wait_config(lambda c: rc.writer_of(c, 1300) is not None
                              and rc.forward_of(c, 7100) is not None,
-                             timeout=240, desc="24②: 改点表后 wt4 并入")
+                             timeout=240, desc="24②: 改点表后 4号风机 并入")
         base.assert_channel_ids(cfg)
         wid4 = rc.writer_of(cfg, 1300)
         if wid4 != "channel1":
             raise rc.Fail(f"24②: 4号落在 {wid4} ≠ 宿主 channel1（同端口应并入）")
-        base.assert_writer_keys(cfg, "wt4", range(1300, 1310))
+        base.assert_writer_keys(cfg, "4号风机", range(1300, 1310))
         fid4 = base.assert_forward_key(cfg, 7100, wid4, 1300)
         if fid4 == rc.forward_of(cfg, 5000):
             raise rc.Fail(f"24②: 4号转发与1号共用实例 {fid4}——应每设备一实例")
@@ -180,7 +173,7 @@ def s24():
         for a in range(5000, 5010):
             if a not in f1:
                 raise rc.Fail(f"24②: 1号转发表 addr={a} 丢失")
-        base.entry("wt4", name="4号风机", host=wid4)
+        base.entry("4号风机", name="4号风机", host=wid4)
         if base.registry().get("channelHighWatermark") != 3:
             raise rc.Fail(f"24②: 水位={base.registry().get('channelHighWatermark')} ≠ 3")
         base.data_smoke(fwd, P_RECV1, 1300, 1310)
