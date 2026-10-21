@@ -16,7 +16,7 @@ import {
     point_duplicate_error,
 } from "../../executor/executor.js";
 import { derive_point_id } from "../../executor/point_rules.js";
-import { point_key_error } from "../../executor/point_key.js";
+import { normalize_point_name, point_key_error } from "../../executor/point_key.js";
 import type {
     PointField,
     RegistryEntry,
@@ -167,16 +167,13 @@ function resolve_plan_identity(
 ): { prefix: string; instanceId: string | null; action: "add" | "modify" } {
     const name = String(item["name"] ?? "");
     let prefix = typeof item["prefix"] === "string" ? item["prefix"].trim() : "";
-    // 前缀不含下划线（§3.2.1.3c）：注册表重建/设备归属按点 key 首个 `_` 切分，
-    // 前缀带 `_` 会破坏该假设——非法字符直接剔除而非转成 `_`
-    if (prefix !== "" && !/^[a-zA-Z][a-zA-Z0-9]*$/.test(prefix)) {
-        prefix = prefix.replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+    // 2026-10-19 命名切换：前缀 = 设备名原样归一化（白名单符号 #/()/– 等保留，
+    // `.`/空白/引号/等号转 `_`）——机器安全由 normalize_point_name 统一保证
+    if (prefix !== "") {
+        prefix = normalize_point_name(prefix);
     }
     if (prefix === "") {
         prefix = device_prefix_candidate(name);
-        if (!/^[a-zA-Z][a-zA-Z0-9]*$/.test(prefix)) {
-            prefix = prefix.replace(/[^a-zA-Z0-9]/g, "").toLowerCase() || "dev";
-        }
     }
     const instanceId =
         typeof item["instanceId"] === "string" && item["instanceId"] !== ""
@@ -894,32 +891,37 @@ function inheritExistingFields(
     if (!config) return;
     const byId = new Map<string, Record<string, unknown>>();
     const byName = new Map<string, Record<string, unknown>>();
-    // 点前缀 → 实例（writer 点 key 首个 `_` 之前的分组，§3.2.1.3a 前缀归属）
-    const byPrefix = new Map<string, Record<string, unknown>>();
+    // 实例 → 点 id 集（2026-10-19 命名切换：前缀 = 设备名归一化，可含 `_`/中文——
+    // 首个 `_` 切分不再可靠，继承改为「任一点 id 以 {前缀}_ 开头」的边界匹配）
+    const instPointIds: Array<{ inst: Record<string, unknown>; ids: string[] }> = [];
     for (const [st, list] of Object.entries(config)) {
         if (st === "c4_shm_manager" || !Array.isArray(list)) continue;
         for (const inst of list as Record<string, unknown>[]) {
             if (typeof inst["id"] === "string") byId.set(String(inst["id"]), inst);
             if (typeof inst["name"] === "string") byName.set(String(inst["name"]), inst);
+            const ids: string[] = [];
             for (const p of (inst["points"] as Record<string, unknown>[] | undefined) ?? []) {
                 const pid = String(p["id"] ?? p["key"] ?? "");
-                const us = pid.indexOf("_");
-                if (us > 0 && !byPrefix.has(pid.slice(0, us))) {
-                    byPrefix.set(pid.slice(0, us), inst);
-                }
+                if (pid !== "") ids.push(pid);
             }
+            if (ids.length > 0) instPointIds.push({ inst, ids });
         }
     }
     const inherit = (item: Record<string, unknown>) => {
-        // 匹配优先级：显式 instanceId → 点前缀归属 → 实例 name 精确匹配
+        // 匹配优先级：显式 instanceId → 点前缀边界归属 → 实例 name 精确匹配
         const name = String(item["name"] ?? "");
         let prefix = typeof item["prefix"] === "string" ? item["prefix"] : "";
         if (prefix === "") prefix = device_prefix_candidate(name);
+        const byPrefixHit =
+            prefix !== ""
+                ? instPointIds.find(({ ids }) => ids.some((id) => id.startsWith(`${prefix}_`)))
+                    ?.inst
+                : undefined;
         const hit =
             (typeof item["instanceId"] === "string" && item["instanceId"] !== ""
                 ? byId.get(String(item["instanceId"]))
                 : undefined) ??
-            byPrefix.get(prefix) ??
+            byPrefixHit ??
             (name !== "" ? byName.get(name) : undefined);
         if (!hit) return;
         // 协议以实例所属服务为准强制覆盖——实例的服务类型即协议事实源，

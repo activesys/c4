@@ -175,22 +175,7 @@ export function retrieve_device(
 // ── 前缀 / 序号分配（确定性，§3.2.1.3/§3.2.1.3c）──────────
 
 /** 候选前缀撞名 → 保留前缀 + 最小未用编号顺延（wt1 已占用 → wt2；dev1 → dev2）。 */
-export function resolve_prefix_conflict(
-    registry: AbbrRegistry,
-    base: string,
-): string {
-    const taken = new Set(registry.entries.map((e) => e.prefix));
-    if (!taken.has(base)) {
-        return base;
-    }
-    const m = base.match(/^(.*?)(\d+)$/);
-    const stem = m ? m[1] : base;
-    let n = m ? Number(m[2]) + 1 : 2;
-    while (taken.has(`${stem}${n}`)) {
-        n += 1;
-    }
-    return `${stem}${n}`;
-}
+
 
 /** 完全匿名设备的自动序列（dev1、dev2…）：取最小未用编号（§3.2.1.3c）。 */
 export function next_dev_prefix(registry: AbbrRegistry): string {
@@ -239,6 +224,9 @@ export function finalize_entry(
     };
 }
 
+// resolve_prefix_conflict（撞名顺延）已于 2026-10-19 退役：同名设备 = 点表/声明
+// 问题，调用方（orchestrator）以可读理由拒收，不再 wt1→wt2 式改写。
+
 export function delete_entry(
     registry: AbbrRegistry,
     prefix: string,
@@ -273,13 +261,21 @@ export function rebuild_entries(config_json: SystemConfig): AbbrEntry[] {
             const groups = new Map<string, AbbrEntry>();
             for (const pt of (inst.points ?? []) as Array<Record<string, unknown>>) {
                 const pid = typeof pt["id"] === "string" ? (pt["id"] as string) : "";
-                const us = pid.indexOf("_");
-                if (us <= 0) {
-                    continue; // 裸 id（旧配置形态）不重建——旧配置废弃，重新接入即得新形态
+                // 前缀边界恢复（2026-10-19 命名切换）：新格式前缀 = 设备名原样归一化，
+                // 可含 `_`/`#`/中文——首个 `_` 切分不再可靠。采集点带 name（用户原点名，
+                // id = {前缀}_{点名归一化} 为本系统拼装）→ 以「id 去掉 `_name` 后缀」
+                // 精确恢复；无 name（转发点/旧配置）→ 回落首个 `_` 切分近似。
+                const pname = typeof pt["name"] === "string" ? (pt["name"] as string) : "";
+                let prefix = "";
+                if (pname !== "" && pid.endsWith(`_${pname}`)) {
+                    prefix = pid.slice(0, pid.length - pname.length - 1);
                 }
-                const prefix = pid.slice(0, us);
-                if (!/^[a-zA-Z][a-zA-Z0-9]*$/.test(prefix)) {
-                    continue;
+                if (prefix === "") {
+                    const us = pid.indexOf("_");
+                    prefix = us > 0 ? pid.slice(0, us) : "";
+                }
+                if (prefix === "") {
+                    continue; // 裸 id 无可恢复前缀
                 }
                 let entry = groups.get(prefix);
                 if (!entry) {

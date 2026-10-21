@@ -2,7 +2,8 @@
 // agent.md §3.2.1.3/§3.2.1.3a（2026-10-01 设计修订）：
 //   - 条目 = 设备名 → {宿主实例, 点前缀} + pointMap；channelHighWatermark 永不回退
 //   - 同名命中 → 描述匹配仲裁；多条无法区分 → name_conflict
-//   - 前缀撞名顺延 / 匿名 dev{N} 序列 / channel 未用最小序号
+//   - 2026-10-19 命名切换：前缀 = 设备名原样归一化；撞名不顺延（调用方拒收）；
+//     匿名 dev{N} 序列 / channel 未用最小序号
 //   - 旧格式（id/abbr 条目）不兼容，直接废弃重建
 // 运行：cd c4/agent && npm test
 
@@ -15,7 +16,6 @@ import {
     next_channel_id,
     next_dev_prefix,
     rebuild_entries,
-    resolve_prefix_conflict,
     retrieve_device,
     type AbbrRegistry,
 } from "../../src/registry/abbr_registry.js";
@@ -90,30 +90,6 @@ describe("retrieve_device（§3.2.1.3a 描述匹配仲裁）", () => {
 });
 
 describe("前缀与序号分配（§3.2.1.3/§3.2.1.3c）", () => {
-    it("撞名顺延：wt1 已占用 → wt2（保留前缀 + 最小未用编号）", () => {
-        const reg: AbbrRegistry = {
-            channelHighWatermark: 1,
-            entries: [
-                {
-                    name: "1号风机",
-                    prefix: "wt1",
-                    host: "channel1",
-                    service_type: "x",
-                    description: "",
-                    pointMap: {},
-                },
-            ],
-        };
-        expect(resolve_prefix_conflict(reg, "wt1")).toBe("wt2");
-        expect(resolve_prefix_conflict(reg, "wt9")).toBe("wt9"); // 未占用不改动
-        expect(resolve_prefix_conflict(reg, "syz")).toBe("syz");
-        reg.entries.push({
-            name: "9号风机", prefix: "wt9", host: "channel9",
-            service_type: "x", description: "", pointMap: {},
-        });
-        expect(resolve_prefix_conflict(reg, "wt9")).toBe("wt10"); // 占用顺延
-    });
-
     it("匿名序列 dev{N}：取最小未用编号", () => {
         const reg = empty_registry();
         expect(next_dev_prefix(reg)).toBe("dev1");
@@ -167,13 +143,32 @@ describe("finalize / delete / rebuild", () => {
         expect(next.channelHighWatermark).toBe(4);
     });
 
-    it("rebuild_entries 从 config 按点 key 前缀分组重建 + pointMap 同源重建", () => {
-        const entries = rebuild_entries(config_with_points());
-        const wt1 = entries.find((e) => e.prefix === "wt1");
-        const wt2 = entries.find((e) => e.prefix === "wt2");
-        expect(wt1?.host).toBe("channel1");
-        expect(wt1?.pointMap["风速"]).toBe("wt1_windspeed");
-        expect(wt1?.pointMap["温度"]).toBe("wt1_temperature");
-        expect(wt2?.pointMap["风速"]).toBe("wt2_windspeed");
+    it("rebuild_entries（2026-10-19 新格式）：前缀边界用点 name 精确恢复（含 #/中文/英文 `_` 名）", () => {
+        const cfg = {
+            c4_shm_manager: { writer: ["c4_asfp2_server"], reader: [] },
+            c4_asfp2_server: [
+                {
+                    id: "channel1",
+                    name: "数据接收服务",
+                    port: 9001,
+                    points: [
+                        // 采集点带 name → id 去掉 `_name` 后缀精确恢复前缀
+                        { id: "1#风机_风速", name: "风速", addr: 1000, shm_id: 1 },
+                        { id: "1#风机_备用_2", name: "备用_2", addr: 1001, shm_id: 2 },
+                        { id: "power_forecast_1_温度", name: "温度", addr: 1002, shm_id: 3 },
+                        // 转发点无 name → 回落首个 `_` 切分近似
+                        { id: "1#风机_5000", addr: 5000, shm_id: 4 },
+                    ],
+                },
+            ],
+        } as unknown as SystemConfig;
+        const entries = rebuild_entries(cfg);
+        const fan = entries.find((e) => e.prefix === "1#风机");
+        expect(fan?.host).toBe("channel1");
+        expect(fan?.pointMap["风速"]).toBe("1#风机_风速");
+        expect(fan?.pointMap["备用_2"]).toBe("1#风机_备用_2");
+        expect(entries.find((e) => e.prefix === "power_forecast_1")?.pointMap["温度"])
+            .toBe("power_forecast_1_温度");
+        expect(entries.find((e) => e.prefix === "1#风机") !== undefined).toBe(true);
     });
 });

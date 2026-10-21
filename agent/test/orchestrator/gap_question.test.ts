@@ -6,6 +6,7 @@
 
 import { describe, expect, it } from "vitest";
 import {
+    anonymous_device_answer,
     ask_conn,
     ask_points,
     ask_protocol,
@@ -15,6 +16,7 @@ import {
     is_forward_mirror_answer,
     parse_bare_value,
     parse_receive_port,
+    receive_ip_of,
 } from "../../src/orchestrator/gap_question.js";
 
 describe("ask_protocol", () => {
@@ -359,6 +361,14 @@ describe("bind_device_answer（§3.2.1.3c 三层识别 L0+追问应答）", () =
         expect(bind_device_answer("3#主变", [])).toBe("3#主变");
     });
 
+    it("命名引导词前缀剥离（2026-10-03 用例 47D 词形，2026-10-19 复测缺口应答侧漏网）", () => {
+        expect(bind_device_answer("设备名叫 power_forecast_1", [])).toBe("power_forecast_1");
+        expect(bind_device_answer("名字叫 power_forecast_1", [])).toBe("power_forecast_1");
+        expect(bind_device_answer("名叫power_forecast_1", [])).toBe("power_forecast_1");
+        expect(bind_device_answer("设备名称叫温度采集器", [])).toBe("温度采集器");
+        expect(bind_device_answer("名称为2号风机", [])).toBe("2号风机");
+    });
+
     it("裸数字仅在累积文本存在设备类型词时绑定", () => {
         expect(bind_device_answer("2", ["接入1号风机"])).toBe("2号风机");
         expect(bind_device_answer("2", ["升压站数据接入"])).toBe("2号升压站");
@@ -382,5 +392,73 @@ describe("bind_device_answer（§3.2.1.3c 三层识别 L0+追问应答）", () =
     it("端口/地址量级数字（100 以上）不作设备编号解释", () => {
         expect(bind_device_answer("9001", ["风机的数据"])).toBeNull();
         expect(bind_device_answer("100", ["风机的数据"])).toBeNull();
+    });
+});
+
+
+describe("receive_ip_of 子句化去向语境（2026-10-18 生产野测）", () => {
+    const INCIDENT =
+        "我要接入风机数据，风机scada使用modbus协议转发，ip:127.0.0.1, port:502，" +
+        "转发到2区，使用Asfp2协议，127.0.0.1:9907。";
+
+    it("事故句式：设备 IP 所在子句干净 → 绑定（前子句尾「转发」不再跨子句误伤）", () => {
+        expect(receive_ip_of(INCIDENT)).toBe("127.0.0.1");
+    });
+
+    it("去向子句照旧排除（用例4 口径不退化）", () => {
+        expect(receive_ip_of("II服务器地址是127.0.0.1:19900，点表与I区一致")).toBeNull();
+        expect(receive_ip_of("转发目标地址是10.0.0.5")).toBeNull();
+        expect(receive_ip_of("数据转发到192.168.1.9")).toBeNull();
+    });
+
+    it("采集语境带标签 IP 照旧绑定", () => {
+        expect(receive_ip_of("设备IP是192.168.1.100，端口502")).toBe("192.168.1.100");
+        expect(receive_ip_of("接入装置，地址10.0.0.8，协议104")).toBe("10.0.0.8");
+    });
+
+    it("无带标签 IP 返回 null（裸 IP 仍走既有兜底，不在本函数职责内）", () => {
+        expect(receive_ip_of("转发到127.0.0.1:9907")).toBeNull();
+        expect(receive_ip_of("接入风机数据")).toBeNull();
+    });
+});
+
+describe("parse_receive_port 英文标签（2026-10-18 生产野测）", () => {
+    it("「port:502」中英混排形态", () => {
+        expect(parse_receive_port("ip:127.0.0.1, port:502")).toBe(502);
+        expect(parse_receive_port("PORT:7891")).toBe(7891);
+        expect(parse_receive_port("port 502")).toBe(502);
+    });
+
+    it("中文标签口径不退化", () => {
+        expect(parse_receive_port("端口9001")).toBe(9001);
+        expect(parse_receive_port("监听 7867")).toBe(7867);
+    });
+
+    it("转发语境端口照旧排除", () => {
+        expect(parse_receive_port("转发到2区监听9907端口")).toBeNull();
+        expect(parse_receive_port("转发目标端口9900")).toBeNull();
+    });
+});
+
+describe("anonymous_device_answer（匿名设备声明，2026-10-19 用例 47C 生产野测）", () => {
+    it("生产原话：整句匿名声明命中", () => {
+        expect(anonymous_device_answer("没有名字，就是台匿名设备，随便。")).toBe(true);
+    });
+
+    it("常见匿名词形", () => {
+        expect(anonymous_device_answer("没有名字")).toBe(true);
+        expect(anonymous_device_answer("没名字")).toBe(true);
+        expect(anonymous_device_answer("匿名设备")).toBe(true);
+        expect(anonymous_device_answer("不需要名字")).toBe(true);
+        expect(anonymous_device_answer("无需名字")).toBe(true);
+        expect(anonymous_device_answer("名字随便")).toBe(true);
+        expect(anonymous_device_answer("随便")).toBe(true);
+    });
+
+    it("命名意图不误伤", () => {
+        expect(anonymous_device_answer("就叫随便吧")).toBe(false);
+        expect(anonymous_device_answer("2号风机")).toBe(false);
+        expect(anonymous_device_answer("升压站")).toBe(false);
+        expect(anonymous_device_answer("1号风机变桨控制器")).toBe(false);
     });
 });

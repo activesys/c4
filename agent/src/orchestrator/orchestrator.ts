@@ -19,7 +19,6 @@ import {
     load_abbr_registry,
     save_abbr_registry,
     retrieve_device,
-    resolve_prefix_conflict,
     next_dev_prefix,
     finalize_entry,
     delete_entry,
@@ -40,6 +39,21 @@ import {
     type DeviceDecl,
     type TargetDecl,
 } from "./multi_target.js";
+import {
+    evidence_clause,
+    evidence_tag,
+    recv_protocol_scan,
+    side_redeclaration_scan,
+    split_clauses,
+    type ProtocolMatcher,
+} from "./protocol_attribution.js";
+import { fwd_file_gate, uid_answer_of } from "./gap_answer.js";
+import {
+    clean_device_candidate,
+    numbered_device_of,
+    strip_site_prefix,
+    TYPE_ONLY_DEVICE_RE,
+} from "./device_attribution.js";
 import {
     generate_steps,
     find_service_type,
@@ -68,12 +82,14 @@ import {
     ask_conn,
     ask_points,
     ask_protocol,
+    anonymous_device_answer,
     bind_bare,
     bind_change_answer,
     bind_device_answer,
     is_forward_mirror_answer,
     parse_bare_value,
     parse_receive_port,
+    receive_ip_of,
     type Gap,
 } from "./gap_question.js";
 import {
@@ -126,8 +142,12 @@ interface SiteInfo {
 interface SideDraft {
     protocol: string | null;
     protocolRaw: string | null;
+    /** 协议绑定依据（2026-10-17 证据出示：绑定子句/应答/更正原文）——摘要与方案层随协议名出示 */
+    protocolEvidence: string | null;
     locked: boolean;
     deviceName: string | null;
+    /** 用户明确声明匿名（「没有名字」，47C）→ 不追问名称不绑名，dev{N} 序列分配 */
+    anonymous: boolean;
     points: Array<Record<string, unknown>> | null;
     declared: number | null;
     conn: Record<string, unknown>;
@@ -156,8 +176,10 @@ function fresh_side(): SideDraft {
     return {
         protocol: null,
         protocolRaw: null,
+        protocolEvidence: null,
         locked: false,
         deviceName: null,
+        anonymous: false,
         points: null,
         declared: null,
         conn: {},
@@ -208,8 +230,9 @@ interface SessionState {
     userConfirmed: boolean;
     lastGapSignature: string | null;
     gapRepeat: number;
-    /** 本回合场站归属判定结果（null=未触发；ambiguous=归属不明；other=他站资料） */
-    turnSiteCheck: "ambiguous" | "other" | null;
+    /** 本回合场站归属判定结果（null=未触发；ambiguous=归属不明；other=他站资料；
+     *  match=区序号确定性同区，免问放行——2026-10-18 集团+风场+区? 口径） */
+    turnSiteCheck: "ambiguous" | "other" | "match" | null;
     /** 本回合已受理目标级撤回（①.5）：抑制转发意图快路把撤回语汇（含「转发」字样）重新当意图 */
     turnFwdWithdraw: boolean;
     /** 上一回合提问的缺口键（§2.6 单缺口顺序提问；裸值兜底绑定的目标） */
@@ -286,7 +309,8 @@ function fresh_state(): SessionState {
 // §2.4.2 取消词表——去空白后全等匹配（禁止包含匹配）
 const CANCEL_WORDS = new Set(["取消", "算了", "不接了", "放弃", "停止接入"]);
 
-// 同名坚持新增的应答语义（用例 49②）：含新增语义即确认新增同名设备（前缀顺延），
+// 同名坚持新增的应答语义（用例 49②，2026-10-19 改拒收）：含新增语义即进入
+// forceNewDevice 路径——同名前缀已被占用 → 可读拒收（不再前缀顺延），
 // 由语境（pendingNewDevice）限定生效范围，不影响正常消息流
 const NEW_DEVICE_CONFIRM_RE = /新增一台|另一台|就是新增|确认新增|坚持新增|坚持用/;
 
@@ -821,6 +845,16 @@ function parse_field_list_tokens(text: string): string[] | null {
     if (tokens.length === 0 || !tokens.every((t) => INFLUX_FIELD_RE.test(t))) return null;
     return tokens;
 }
+
+/** 「字段名跟点名对应」自动映射许可词形且无显式清单（2026-10-19 influx 套件
+ *  步39 实测）：点名中文化后该词形曾被 LLM 当翻译授权，逐轮译名漂移
+ *（gearbox_oil_temp / gear_oil_temp 两种裁决都出现过，断言钉不住）——
+ *  2026-10-09 裁定本就不推导不翻译：此词形下 field 视为未显式给出，
+ *  LLM 提取值剥除，交「缺 field」缺口追问（显式清单绑定闭合）。 */
+export function field_automap_license_without_list(text: string): boolean {
+    if (!/字段名?跟(?:点名|点表|名称).{0,2}对应/.test(text)) return false;
+    return parse_field_list_tokens(text) === null;
+}
 /** influxdb field 显式清单的确定性绑定（2026-10-09）：「（a、b、c…）」形态按点表
  *  行序逐点落 field——LLM 提取对纯清单文本无法映射（无地址行），「缺 field」追问
  *  由此闭合。约束：括号内 token 数与点数全等，否则不绑。显式重述总是采纳。 */
@@ -1210,16 +1244,11 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
     }
 
     // 显式协议声明的 token 提取（"使用 DNP3 协议"/"协议：modbus"）——
-    // 仅在带侧别关键词的子句内扫描，避免把历史回显（上一步解析结果）误当本侧声明
-    // 转发语境子句——接入侧协议捕获必须排除（「转发采用asfp2协议」含裸「采用/协议」
-    // 关键词会通过接入侧过滤，被误记为接入协议。2026-09-28 用例7 实测）
-    const FORWARD_CLAUSE_RE = /转发|入库|写入|推送|发送|目标|服务器/;
-    // 双侧同时声明（2026-09-29 用例11 循环实测：「接收和转发都是用asfp2协议」单子句
-    // 同时含接收与转发表述——被 FORWARD_CLAUSE_RE 整句排除，接收侧的显式声明丢失）。
-    // 命中本模式的子句不被转发排除；纯转发子句（「接入成功后转发采用asfp2协议」无
-    // 并列/概括词）仍照旧排除，防止转发声明误入接收侧
-    const BOTH_SIDES_RE =
-        /(?:(?:接收|采集|接入|数据源)[^\d]{0,6}(?:和|与|及|都|均|同时)[^\d]{0,6}(?:转发|发送|上传|入库|推送))|(?:(?:转发|发送|上传|入库|推送)[^\d]{0,6}(?:和|与|及|都|均|同时)[^\d]{0,6}(?:接收|采集|接入|数据源))|都是用|均用/;
+    // 仅在带侧别关键词的子句内扫描，避免把历史回显（上一步解析结果）误当本侧声明。
+    // 2026-10-17 起接入侧归属收口到 protocol_attribution.ts（弃权语义，跨子句
+    // 转发语境）；本函数仅存于转发侧 raw 声明捕获（:1932）与组模式 try_bind。
+    // clauseExclude/clauseKeep 口径（FORWARD_CLAUSE_RE/BOTH_SIDES_RE）同协议
+    // 归属模块导出常量。
 
     function declared_protocol_token(
         text: string,
@@ -1396,6 +1425,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                     );
                     if (hit) {
                         state.recv.protocol = hit;
+                        state.recv.protocolEvidence = "点表文件协议列";
                     }
                     // 未命中 → 交协议阶段提示词/缺口处理（declared 保留在 raw）
                     else {
@@ -1495,6 +1525,108 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
               ).catch(() => null)
             : null;
 
+        // 协议 canonical 匹配闭包（protocol_attribution 纯函数层的注册表注入点）：
+        // token 等值命中（协议名/别名，supported_protocol_token 同口径）与子句别名
+        // 包含命中（alias_match_protocol 同口径），按侧别区分支持列表
+        const canonical_token_of = (
+            token: string,
+            role: "writer" | "reader",
+        ): string | null => {
+            const t = token.toLowerCase();
+            for (const e of registry.getServiceCatalogEntries()) {
+                if (e.role !== role) continue;
+                for (const p of e.protocols) {
+                    const ph = (p as unknown as Record<string, unknown>)[
+                        "prompt_hints"
+                    ] as Record<string, unknown> | undefined;
+                    const pm = (ph?.["protocol_match"] ?? null) as Record<string, unknown> | null;
+                    const aliases = [
+                        normalize_protocol(p.protocol),
+                        ...((pm?.["aliases"] ?? []) as string[]),
+                    ];
+                    for (const alias of aliases) {
+                        const a = alias.trim().toLowerCase();
+                        if (a.length >= 3 && (a === t || a.includes(t) || t.includes(a))) {
+                            return normalize_protocol(p.protocol);
+                        }
+                    }
+                }
+            }
+            return null;
+        };
+        const matcher_of = (role: "writer" | "reader"): ProtocolMatcher => ({
+            tokenCanonical: (tok) => canonical_token_of(tok, role),
+            clauseCanonical: (clause) => {
+                const lc = clause.toLowerCase();
+                for (const e of registry.getServiceCatalogEntries()) {
+                    if (e.role !== role) continue;
+                    for (const p of e.protocols) {
+                        const ph = (p as unknown as Record<string, unknown>)[
+                            "prompt_hints"
+                        ] as Record<string, unknown> | undefined;
+                        const pm = (ph?.["protocol_match"] ?? null) as Record<string, unknown> | null;
+                        const aliases = [
+                            normalize_protocol(p.protocol),
+                            ...((pm?.["aliases"] ?? []) as string[]),
+                        ];
+                        for (const alias of aliases) {
+                            const a = alias.trim().toLowerCase();
+                            if (a.length >= 3 && lc.includes(a)) {
+                                return normalize_protocol(p.protocol);
+                            }
+                        }
+                    }
+                }
+                return null;
+            },
+        });
+
+        // 协议纠错通道（2026-10-17 生产野测裁定）：未锁定期的显式侧别重声明覆盖
+        // 既有绑定——快路误归属后用户口头纠正（「接入侧是modbus」）必须生效，而非
+        // 静默无视（原实现四条绑定入口全挂 !state.recv.protocol 守卫，错绑后唯一
+        // 出路是「取消」重来）。锁定语义不变：点表落槽（locks.*）后重声明仍按
+        // §2.4.1 锁后变更丢弃；组模式（mtDevs/mtTargets）不走此通道
+        if (!state.mtDevs) {
+            const reRecv = side_redeclaration_scan(semantic, matcher_of("writer"));
+            if (
+                reRecv.recv !== null &&
+                state.recv.protocol !== null &&
+                !state.locks.receive &&
+                reRecv.recv.canonical !== state.recv.protocol
+            ) {
+                const fromRecv = state.recv.protocol;
+                state.recv.protocol = reRecv.recv.canonical;
+                state.recv.protocolRaw = null;
+                state.recv.protocolEvidence = `用户更正：${reRecv.recv.clause}`;
+                progress = true;
+                cfg.agentLogger.memory(conversation, "protocol_rebind", {
+                    side: "recv",
+                    from: fromRecv,
+                    to: reRecv.recv.canonical,
+                });
+            }
+        }
+        if (!state.mtTargets) {
+            const reFwd = side_redeclaration_scan(semantic, matcher_of("reader"));
+            if (
+                reFwd.fwd !== null &&
+                state.fwd.protocol !== null &&
+                !state.locks.forward &&
+                reFwd.fwd.canonical !== state.fwd.protocol
+            ) {
+                const fromFwd = state.fwd.protocol;
+                state.fwd.protocol = reFwd.fwd.canonical;
+                state.fwd.protocolRaw = null;
+                state.fwd.protocolEvidence = `用户更正：${reFwd.fwd.clause}`;
+                progress = true;
+                cfg.agentLogger.memory(conversation, "protocol_rebind", {
+                    side: "fwd",
+                    from: fromFwd,
+                    to: reFwd.fwd.canonical,
+                });
+            }
+        }
+
         // 裸协议名快捷命中（2026-09-29 用例11 循环实测）：整条消息恰为支持列表中的
         // 协议名（应答协议缺口的「asfp2」形态）——L0/L1 要求子句触发词、L2 可能被
         // protocolRaw 关死，裸名曾落在三级漏斗之外使缺口永不闭合。精确等值判定，
@@ -1521,6 +1653,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             if (bareRecv !== undefined) {
                 state.recv.protocol = bareRecv;
                 state.recv.protocolRaw = null;
+                state.recv.protocolEvidence = evidence_clause(semantic);
                 progress = true;
             }
         }
@@ -1534,41 +1667,32 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             if (bareFwd !== undefined) {
                 state.fwd.protocol = bareFwd;
                 state.fwd.protocolRaw = null;
+                state.fwd.protocolEvidence = evidence_clause(semantic);
                 progress = true;
             }
         }
 
-        // 阶段2 接入协议（L0 确定性：显式声明 token 对齐支持列表 → 别名预匹配 → 提示词）
+        // 阶段2 接入协议（2026-10-17 弃权语义，protocol_attribution.recv_protocol_scan）：
+        // 强证据才绑定——强侧别子句/双侧声明/前邻接入或来向语境/协议缺口应答；
+        // 弱标记子句（仅「协议/规约」触发词）弃权交下方 L2 提示词裁决。子句级转发
+        // 排除识别不了跨子句语境：「转发到2区，使用Asfp2协议」曾被别名快路误绑接入
+        // 侧（asfp2 声明子句无转发标记拦不住），modbus 声明子句反被句尾「转发」排除
+        // ——生产实例接入协议被错绑 asfp2，点表管道整个走错协议
         if (!state.mtDevs && !state.recv.protocol && semantic.length > 0) {
-            const declared = declared_protocol_token(
+            const scan = recv_protocol_scan(
                 semantic,
-                /采集|接入|接收|采用|数据源|上传|设备|协议|规约/,
-                FORWARD_CLAUSE_RE,
-                BOTH_SIDES_RE,
+                matcher_of("writer"),
+                state.pendingGap === "recv.protocol",
             );
-            if (declared !== null && !supported_protocol_token(declared, registry, "writer")) {
-                state.recv.protocolRaw = declared;
+            if (scan.raw !== null) {
+                state.recv.protocolRaw = scan.raw;
                 progress = true;
             }
-        }
-        if (!state.mtDevs && !state.recv.protocol && semantic.length > 0) {
-            // 词表须与上方 declared_protocol_token 的子句筛选一致（含「规约」）：漏词时
-            // 「装置是IEC104规约」子句被筛掉、别名快路落空，降级到 LLM 后小模型可能把
-            // 同消息里转发侧的协议抄给采集侧（2026-10-04 用例 34 实测：4.5-air 返回
-            // asfp2，设备被建成 asfp2_server，采集实例永不落地）
-            const aliasHit = alias_match_protocol(
-                semantic,
-                "writer",
-                /采集|接入|接收|采用|数据源|上传|设备|协议|规约/,
-                FORWARD_CLAUSE_RE,
-                BOTH_SIDES_RE,
-            );
-            if (aliasHit) {
-                if (!state.locks.receive || state.recv.protocol === null) {
-                    state.recv.protocol = aliasHit;
-                    state.recv.protocolRaw = null;
-                    progress = true;
-                }
+            if (scan.bind !== null) {
+                state.recv.protocol = scan.bind.canonical;
+                state.recv.protocolRaw = null;
+                state.recv.protocolEvidence = scan.bind.clause;
+                progress = true;
             }
         }
         // L2 门不含 protocolRaw（2026-09-29 用例11 循环实测）：raw 有值（曾报不支持
@@ -1596,6 +1720,9 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                     } else {
                         state.recv.protocol = canonical;
                         state.recv.protocolRaw = null;
+                        state.recv.protocolEvidence = evidence_clause(
+                            String(r["reason"] ?? "LLM 语义识别"),
+                        );
                         progress = true;
                     }
                 } else if (match === "not_in_list") {
@@ -1651,18 +1778,15 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
         // 连接信息中的 ip/port 兜底捕获（确定性；提示词未覆盖的简写形式）
         if (state.recv.conn["ip"] === undefined && state.mtDevs === null) {
             // 带标签 IP 若处于去向语境（「II服务器地址是…」「转发目标地址…」）则属转发
-            // 目标，不得误入采集侧连接（func_test_case 用例 4，2026-09-26 recap 实测暴露）；
-            // 跳过去向语境命中，取第一个采集语境的带标签 IP
-            const ipMatches = [
-                ...semantic.matchAll(/(?:IP|ip|地址)[^\d]{0,4}(\d{1,3}(?:\.\d{1,3}){3})/g),
-            ];
-            for (const m of ipMatches) {
-                const idx = m.index ?? 0;
-                const ctx = semantic.slice(Math.max(0, idx - 12), idx);
-                if (/服务器|转发|目标|去向|II区/.test(ctx)) continue;
-                state.recv.conn["ip"] = m[1];
+            // 目标，不得误入采集侧连接（func_test_case 用例 4，2026-09-26 recap 实测暴露）。
+            // 2026-10-18 语境判定收口到子句内（gap_question.receive_ip_of）：原 12 字符
+            // 原始窗口跨逗号——「…modbus协议转发，ip:127.0.0.1」窗口看到上一子句尾部
+            // 「转发」，设备自身 IP 被误判去向语境漏绑，连接缺口误开后用户把转发目标
+            // 答进接收连接（方案以 9907 落盘）。取第一个子句前缀干净的带标签 IP
+            const labeledIp = receive_ip_of(semantic);
+            if (labeledIp !== null) {
+                state.recv.conn["ip"] = labeledIp;
                 progress = true;
-                break;
             }
             const bareIp = semantic.match(/(\d{1,3}(?:\.\d{1,3}){3})/);
             if (state.recv.conn["ip"] === undefined && bareIp && !/转发|目标/.test(semantic) && !state.forwardIntent) {
@@ -1753,8 +1877,8 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 }
             }
         }
-        if (state.recv.deviceName === null && !state.mtDevs) {
-            const stop = new Set(["使用", "的", "是", "叫", "不", "已", "在", "为", "与", "和"]);
+        if (state.recv.deviceName === null && !state.mtDevs && !state.recv.anonymous) {
+            // 匿名已声明（47C）→ 不再从后续文本重提设备名（用户已明确无名）
             // (?!信息)：上传信封的固定话术「请解析此文件中的设备信息」会把「信息」
             // 误提为设备名（2026-09-28 上传实测，recap 曾显示「设备：信息」）；
             // (?!IP|ip|地址|端口)：「设备IP是x.x.x.x」的宾语是连接参数不是设备名
@@ -1764,7 +1888,15 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 // 「设备名叫 power_forecast_1」曾把「名叫」捕获为设备名）
                 /(?:设备名称|设备)(?:名字叫|名称为|名为|叫)?[:：]?\s*(?!信息|IP|ip|地址|端口|叫|名)([^\s，。,]{2,24})/,
             );
-            const dm2 = dm && !stop.has(dm[1].slice(0, 2)) ? dm[1] : null;
+            // 开头垃圾剥离 + 词表锚定（2.1.85②，device_attribution.ts 头注）——
+            // 原 stop 集用 slice(0,2) 比对，单字停用词「的/是/叫」实际拦不住，
+            // 「的应该是2区」漏网即此因；已绑场站名前缀剥离（71①：场站语境短语
+            // 不是设备身份，2.1.86 名原样体系下曾进点 key）
+            const siteName = state.site !== null ? state.site.name : null;
+            const dm2 =
+                dm && clean_device_candidate(strip_site_prefix(dm[1], siteName)) !== null
+                    ? strip_site_prefix(dm[1], siteName)
+                    : null;
             const hm = semantic.match(/接入(?:另一个设备|华能)?[：:]?\s*([^\s，。,]*\d+#\S+)/);
             // 「接入X的数据 / 接入X，」句式（modbus/104 链路常见形态）：取「接入」与
             //「的数据」/逗号之间的完整设备名——含类型词链（「1号风机变桨控制器」
@@ -1775,23 +1907,39 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             // 纯类型词不是设备名（func_test_case 用例 47①：不得以类型词蒙混、不得编造
             // 默认名）——「接入风机的数据」的「风机」无编号/名称信息，交 recv.device
             // 缺口向用户追问（宁可放过不可错绑）。**升压站除外**：单台无编号设备按
-            // 设计以类型词指称即合法设备名（§3.2.1.3c 前缀派生 syz，47 追问示例同）
-            const TYPE_ONLY_RE =
-                /^(?:风机|风电机组|主变|变压器|逆变器|测风塔|机组|光伏|储能|数据源|设备)$/;
-            const accName =
-                acc &&
-                !/^(?:另一个设备|华能)/.test(acc[1]) &&
-                !/^\d+#/.test(acc[1]) &&
-                !TYPE_ONLY_RE.test(acc[1])
-                    ? acc[1]
+            // 设计以类型词指称即合法设备名（§3.2.1.3c 前缀派生 syz，47 追问示例同）。
+            // 词表扩至 2026-10-19 用户给定 13 类封闭集合（TYPE_ONLY_DEVICE_RE）。
+            // 场站剥离先于华能守卫（74② 实测：「接入华能通辽1区8号风机的数据」acc
+            // 全跨度被华能前缀守卫整体拒掉，回落 nm 扫描拿到未剥离的「1区8号风机」
+            // ——先剥已绑场站全名再守卫，acc 优先于 nm 且不破「场站本身不作设备名」
+            // 的旧保护）
+            const accStripped = acc !== null ? strip_site_prefix(acc[1], siteName) : null;
+            const accRaw =
+                accStripped !== null &&
+                !/^(?:另一个设备|华能)/.test(accStripped) &&
+                !/^\d+#/.test(accStripped)
+                    ? accStripped
                     : null;
-            // 常见编号表述（func_test_case 用例 1 形态）：「1号风机」「1#风机」
-            // 「2号升压站」——编号 + 设备类型词，无「设备名称:」前缀；中文数字
-            // （「三号风机」→ 三号）同样命中（§3.2.1.3c L0，编号转换复用 zh_numeral）
-            const nm = semantic.match(
-                /((?:\d{1,3}|[零一二两三四五六七八九十]{1,3})\s*[#号]\s*(?:风机|主变|升压站|逆变器|测风塔|机组|变压器|数据源))/,
+            const accClean = accRaw !== null ? clean_device_candidate(accRaw) : null;
+            const accName =
+                accClean !== null && !TYPE_ONLY_DEVICE_RE.test(accClean)
+                    ? accClean
+                    : null;
+            // 常见编号表述（2026-10-19 用户口径：编号也是设备名的一部分）：
+            // 「1号风机」「1#风机」「2号变压器」「箱变123」「二十三区光伏」
+            // 「14区1#逆变器」——前缀限定（数字/中文数字+#/号/区，可叠段）或
+            // 后缀数字整体成指称；中文数字（「三号风机」→ 三号）同样命中
+            // （§3.2.1.3c L0，编号转换复用 zh_numeral 口径）
+            const nm = numbered_device_of(semantic);
+            // 匿名声明守卫（47C）：「设备没有名字」等候选不是名字 → 匿名落位，
+            // 不绑 deviceName（dev{N} 序列在方案层分配）
+            const anonCand = [dm2, hm !== null ? hm[1] : null, accName, nm].find(
+                (v) => v !== null && v !== undefined && anonymous_device_answer(v),
             );
-            if (dm2) {
+            if (anonCand !== null && anonCand !== undefined) {
+                state.recv.anonymous = true;
+                progress = true;
+            } else if (dm2) {
                 state.recv.deviceName = dm2;
                 progress = true;
             } else if (hm) {
@@ -1801,7 +1949,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 state.recv.deviceName = accName;
                 progress = true;
             } else if (nm) {
-                state.recv.deviceName = nm[1].replace(/\s+/g, "");
+                state.recv.deviceName = nm;
                 progress = true;
             }
         }
@@ -1834,6 +1982,16 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             if (fwdAlias) {
                 state.fwd.protocol = fwdAlias;
                 state.fwd.protocolRaw = null;
+                // 依据子句：首个带转发标记且含该协议名的子句（证据出示）
+                for (const fc of split_clauses(semantic)) {
+                    if (
+                        /转发|入库|写入|上传|推送|发送/.test(fc) &&
+                        fc.toLowerCase().includes(fwdAlias)
+                    ) {
+                        state.fwd.protocolEvidence = evidence_clause(fc);
+                        break;
+                    }
+                }
                 progress = true;
             }
         }
@@ -1854,6 +2012,9 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 if (match === "matched" && typeof canonical === "string") {
                     state.fwd.protocol = canonical;
                     state.fwd.protocolRaw = null;
+                    state.fwd.protocolEvidence = evidence_clause(
+                        String(r["reason"] ?? "LLM 语义识别"),
+                    );
                     progress = true;
                 } else if (match === "not_in_list") {
                     state.fwd.protocolRaw = String(r["user_protocol"] ?? "未知协议");
@@ -2235,6 +2396,9 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                             // 序列回落（多设备分段/吞址脏数据）：不静默接入，追问；
                             // 已在草稿中的既有点保留不动（回落缺口阻断方案）
                             state.recv.resetInfo = { ...merged.reset, sig: blockSig };
+                            // 2026-10-17 生产野测：回落是独立缺口，旧提取错误不得
+                            // 粘滞掩盖（side_gaps 先查 extractError 会短路回落追问）
+                            state.recv.extractError = null;
                             if (state.recv.excluded === null) {
                                 state.recv.excluded = merged.excluded;
                             }
@@ -2372,6 +2536,11 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                             } else if (!incomplete(merged.points)) {
                                 // 异名分次上传：新块归一化结果拼接到既有草稿（§2.13.4）
                                 state.recv.points = [...(state.recv.points ?? []), ...merged.points];
+                                // 2026-10-17 生产野测：成功落槽必须清旧提取错误——
+                                // 否则 side_gaps 短路在陈旧「解析失败」上，成功回合
+                                // 仍复述上一份文件的失败且不 recap 新点（景观SCADA
+                                // 173 点被上一份华锐的错误掩盖）
+                                state.recv.extractError = null;
                                 const exMap = new Map<string, number>();
                                 for (const g of state.recv.excluded ?? []) {
                                     exMap.set(g.name, (exMap.get(g.name) ?? 0) + g.count);
@@ -2461,6 +2630,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                         if (merged.reset) {
                             state.recv.resetInfo = { ...merged.reset, sig: blockSig };
                             state.recv.excluded = merged.excluded;
+                            state.recv.extractError = null;
                             progress = true;
                         } else {
                             // id 赋配（2026-10-07 翻译退役）：文字路径与文件管道同规——
@@ -2537,6 +2707,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                             } else {
                                 state.recv.points = merged.points;
                                 state.recv.excluded = merged.excluded;
+                                state.recv.extractError = null;
                                 state.recv.declared =
                                     typeof r?.["declared_count"] === "number"
                                         ? (r?.["declared_count"] as number)
@@ -2614,9 +2785,19 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                             const k = String(p["addr"] ?? "");
                             if (k !== "") acc.set(k, p);
                         }
-                    } else if (!same_points_deep(state.fwd.points, pts)) {
-                        state.fwd.points = sanitize_influx_fields(pts, state.fwd.points, state.fwd.protocol);
-                        progress = true;
+                    } else {
+                        // 「字段名跟点名对应」无显式清单（文本通道）→ field 未显式
+                        // 给出：LLM 翻译值剥除，交缺 field 缺口（2026-10-19 步39 实测）
+                        const cand =
+                            fwdProtocol === "influxdb" &&
+                            !input.includes("<file_data>") &&
+                            field_automap_license_without_list(input)
+                                ? pts.map(({ field: _f, ...rest }) => rest)
+                                : pts;
+                        if (!same_points_deep(state.fwd.points, cand)) {
+                            state.fwd.points = sanitize_influx_fields(cand, state.fwd.points, state.fwd.protocol);
+                            progress = true;
+                        }
                     }
                 }
             };
@@ -2794,11 +2975,19 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                     // <file_data>——被问「转发点表」时上传点表文件是常见应答。仅限本回合
                     // 新上传（2026-09-29 用户裁定：会话内历史文件不得自动充作转发点表，
                     // 否则转发点表缺口被静默跳过、不再询问；接入侧 catch-up 仍可用
-                    // state.fileTable，两侧语义不同）
-                    if (file_data !== null) {
-                        await extract_fwd_points(
-                            `<file_data>\n${file_data.slice(0, 4000)}\n</file_data>\n${fwdScopedNow}`,
-                        );
+                    // state.fileTable，两侧语义不同）。
+                    // 2026-10-18 确定性门控（生产野测：应「接入点表」之问上传的采集
+                    // 侧文件被转发提取按提示词例外条款当转发地址消费，69 点 0 起步 +
+                    // 99 点无下游引用被排除；同提示词隔天模型裁决相反，软约束不可
+                    // 靠）——「文件=转发点表显式提供」的前提由 fwd_file_gate 代码
+                    // 裁决（正在问转发点表 / 用户本轮明确说了转发点表），其余语境
+                    // 不注入，转发点表保持缺口继续追问
+                    if (fwd_file_gate(state.pendingGap, semantic)) {
+                        if (file_data !== null) {
+                            await extract_fwd_points(
+                                `<file_data>\n${file_data.slice(0, 4000)}\n</file_data>\n${fwdScopedNow}`,
+                            );
+                        }
                     }
                 }
             } else if (!influxFieldsBound) {
@@ -3013,7 +3202,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             }
             return { gaps, recap };
         }
-        recap.push(`${label}协议：${side.protocol}`);
+        recap.push(`${label}协议：${side.protocol}${evidence_tag(side.protocolEvidence)}`);
         // 提取层异常（agent.md §2.13：识别失败等）——可读缺口，优先呈现
         if (side.extractError !== null) {
             gaps.push(
@@ -3166,7 +3355,24 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 required: missingFields.map((f) => f.name),
                 label: svc,
             });
-            problems.push(...issues.map((it) => `${label}点表问题：${it}`));
+            // 明细折叠（2026-10-17 生产野测：168 点缺 uid 逐点打印 168 行，一堵
+            // 问题墙淹没可执行的应答指引）——按去点序消息聚合，同类仅示首例与
+            // 计数；Map 保序，首例即首个出现的问题形态
+            const seen = new Map<string, number>();
+            for (const it of issues) {
+                const key = it
+                    .replace(/第\s*\d+\s*(?:个转发点|个点|个)/g, "")
+                    .replace(/\s+/g, " ")
+                    .trim();
+                seen.set(key, (seen.get(key) ?? 0) + 1);
+            }
+            for (const [key, n] of seen) {
+                problems.push(
+                    n > 1
+                        ? `${label}点表问题：${key}（同类共 ${n} 处——可给统一取值批量补齐）`
+                        : `${label}点表问题：${key}`,
+                );
+            }
         }
         // modbus 功能码缺口（域规则 7 必填不猜）：列/声明/应答均未提供时单列
         // 缺口追问（答「遥测是功能码 4、遥信是 2」等，按点类型语境绑定）
@@ -3264,6 +3470,8 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
         // 多下游确定性声明（mtDevs）已含设备结构 → 跳过单设备 recv 缺口（§2.12）
         if (state.mtDevs === null && state.recv.deviceName) {
             recap.push(`设备：${state.recv.deviceName}`);
+        } else if (state.mtDevs === null && state.recv.anonymous) {
+            recap.push("设备：匿名设备（点 key 前缀 dev{N} 自动分配）");
         } else if (state.mtDevs === null) {
             gaps.push({
                 key: "recv.device",
@@ -3708,10 +3916,24 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             return `channel${highWater}`;
         };
 
-        // ── 设备：前缀派生（撞名顺延）+ 点 key 生成（中文名微翻译，一次并行）──
+        // ── 设备：前缀 = 设备名原样归一化（2026-10-19 命名切换，缩写退役）──
+        // 同名不顺延：前缀被注册表占用或批内重复 = 点表/声明问题，整案拒收
+        const takenPrefixes = new Set(abbr.entries.map((e) => e.prefix));
+        const batchPrefixes = new Set<string>();
+        for (const d of state.mtDevs ?? []) {
+            const p = device_prefix_candidate(d.name);
+            if (takenPrefixes.has(p) || batchPrefixes.has(p)) {
+                return {
+                    plan: {},
+                    display: "",
+                    issue: `设备「${d.name}」重名（点 key 前缀「${p}_」已被占用）——同名设备按点表问题拒收，请用可区分的名称重新说明，或先删除/改名既有设备。`,
+                };
+            }
+            batchPrefixes.add(p);
+        }
         const devBuilds = (state.mtDevs ?? []).map((d) => ({
             decl: d,
-            prefix: resolve_prefix_conflict(abbr, device_prefix_candidate(d.name)),
+            prefix: device_prefix_candidate(d.name),
             writerId: "",
             points: [] as Array<{ addr: number; name: string; id: string }>,
             pointMap: {} as Record<string, string>,
@@ -4068,8 +4290,9 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
         note_step(conversation, "装配接入方案");
         const abbr = await load_abbr(state);
         const devName = state.recv.deviceName ?? "";
-        if (devName === "") {
+        if (devName === "" && !state.recv.anonymous) {
             // 方案层最终防线（§3.2.1.3c）：设备名未就绪 → 拒绝装配、不出确认按钮
+            //（匿名声明除外：47C，dev{N} 序列分配）
             return {
                 plan: {},
                 display: "",
@@ -4096,12 +4319,21 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
         // 匿名 dev{N} 序列）；同名多条无法区分 → 追问用户
         let prefix: string;
         let reused: AbbrEntry | null = null;
-        if (forceNewDevice) {
+        if (state.recv.anonymous) {
+            // 匿名设备（47C）：无名称不可检索不可撞名，dev{N} 序列直接分配
+            //（device_prefix.ts：完全匿名 → "dev" 基名）
+            prefix = next_dev_prefix(abbr);
+        } else if (forceNewDevice) {
             const cand = device_prefix_candidate(devName);
-            prefix =
-                cand === "dev"
-                    ? next_dev_prefix(abbr)
-                    : resolve_prefix_conflict(abbr, cand);
+            // 2026-10-19 裁定：同名坚持新增 = 点表/声明问题，拒收（原「前缀顺延」退役）
+            if (cand !== "dev" && abbr.entries.some((e) => e.prefix === cand)) {
+                return {
+                    plan: {},
+                    display: "",
+                    issue: `设备「${devName}」重名（点 key 前缀「${cand}_」已被占用）——同名设备按点表问题拒收，请用可区分的名称（如「1号风机B」）重新说明，或直接对既有设备做变更。`,
+                };
+            }
+            prefix = cand === "dev" ? next_dev_prefix(abbr) : cand;
         } else {
         const retrieval = retrieve_device(abbr, devName, state.userTexts.join("\n"), {
             addr_evidence: (entry) => {
@@ -4140,17 +4372,20 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 plan: {},
                 display: "",
                 issue:
-                    `已有一台「${devName}」注册在案（${cands}）——现场可能存在同名设备。` +
-                    `若要接入的是另一台设备，请用可区分的名称重新说明（如「2号风机」「1号风机B」），` +
-                    `或回复「就是新增一台，也叫${devName}」确认新增同名设备（点 key 前缀将顺延）；` +
+                    `已有一台「${devName}」注册在案（${cands}）——同名设备按点表问题拒收，不能新增同名设备。` +
+                    `若要接入的是另一台设备，请用可区分的名称重新说明（如「2号风机」「1号风机B」）；` +
                     `若要操作的是已有设备，请直接说明要做的变更（如「给${devName}加点」「删除${devName}」）。`,
             };
         } else {
             const cand = device_prefix_candidate(devName);
-            prefix =
-                cand === "dev"
-                    ? next_dev_prefix(abbr)
-                    : resolve_prefix_conflict(abbr, cand);
+            if (cand !== "dev" && abbr.entries.some((e) => e.prefix === cand)) {
+                return {
+                    plan: {},
+                    display: "",
+                    issue: `设备「${devName}」重名（点 key 前缀「${cand}_」已被占用）——同名设备按点表问题拒收，请用可区分的名称重新说明，或直接对既有设备做变更。`,
+                };
+            }
+            prefix = cand === "dev" ? next_dev_prefix(abbr) : cand;
         }
         }
 
@@ -4705,7 +4940,11 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 ? `| 设备 | 新建 ${md_cell(devName)}，点 key 前缀 \`${prefix}_\` |`
                 : `| 设备 | 既有 ${md_cell(devName)}（\`${prefix}_\` 前缀），追加/更新数据点 |`,
         );
-        lines.push(`| 接入协议 | ${md_cell(state.recv.protocol ?? "?")} |`);
+        lines.push(
+            `| 接入协议 | ${md_cell(state.recv.protocol ?? "?")}${md_cell(
+                evidence_tag(state.recv.protocolEvidence),
+            )} |`,
+        );
         const c = state.recv.conn;
         const ipPart = String(c["ip"] ?? "");
         const portPart = c["port"] !== undefined ? `端口 ${String(c["port"])}` : "";
@@ -5477,21 +5716,25 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             for (let i = 0; i < gr.memberNames.length; i++) {
                 const name = gr.memberNames[i];
                 const conn = gr.conns?.[i] ?? {};
-                const cand = group_member_prefix(gr.typeWord, gr.rawNums[i]);
+                const cand = group_member_prefix(gr.typeWord, name);
                 if (cand === null) {
                     return {
                         plan: {},
                         display: "",
                         registryWrites: { upserts: [], deletes: [], pointMapDrops: [], channelHighWatermark: 0 },
-                        issue: `设备类型「${gr.typeWord}」暂无前缀映射，请用可识别的类型词（风机/逆变器/主变/测风塔/光伏/储能/升压站）重新描述。`,
+                        issue: `设备类型「${gr.typeWord}」暂不可识别，请用可识别的类型词（风机/逆变器/主变/测风塔/光伏/储能/升压站/箱变/汇流箱等）重新描述。`,
                     };
                 }
-                let prefix = resolve_prefix_conflict(abbr, cand);
-                if (usedPrefixes.has(prefix)) {
-                    let k = 2;
-                    while (usedPrefixes.has(`${cand}${k}`)) k++;
-                    prefix = `${cand}${k}`;
+                // 2026-10-19 裁定：同名不顺延——成员重名或与注册表占用即拒收
+                if (usedPrefixes.has(cand) || abbr.entries.some((e) => e.prefix === cand)) {
+                    return {
+                        plan: {},
+                        display: "",
+                        registryWrites: { upserts: [], deletes: [], pointMapDrops: [], channelHighWatermark: 0 },
+                        issue: `设备「${name}」重名（点 key 前缀「${cand}_」已被占用）——同名设备按点表问题拒收，请修正设备编号后重试。`,
+                    };
                 }
+                const prefix = cand;
                 usedPrefixes.add(prefix);
                 const offset = gr.addrOffsets?.[i] ?? 0;
                 const pts: Array<Record<string, unknown>> = [];
@@ -8579,6 +8822,27 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
 
             // ⑥.5 场站归属判定（§3.2.0 阶段1 出口判据）
             if (state.turnSiteCheck === "other") {
+                // 他站拒绝即作废本次接入草稿（2026-10-18 生产野测：第一句「接入一区
+                // 风机数据」被拒后草稿残留——deviceName/协议/连接全部留存，第二句
+                // 「接入2区风机数据」在 first-write-wins 守卫下设备名仍是「一区风机
+                // 数据」。「已停止」必须落实为状态清空，与「取消」语义对齐；
+                // userTexts 一并清空，否则下回合 catch-up 补提取会把被拒原话再捞
+                // 回来。fileBlocks/fileTable 是会话级文件语境（设计如此），不清）
+                state.recv = fresh_side();
+                state.fwd = fresh_side();
+                state.forwardIntent = false;
+                state.accessPlan = null;
+                state.userConfirmed = false;
+                state.pendingGap = null;
+                state.pendingChangeAsk = false;
+                state.pendingDisambig = false;
+                state.disambigHostId = null;
+                state.pendingNewDevice = false;
+                state.changeAddPoints = null;
+                state.userTexts = [];
+                state.lastGapSignature = null;
+                state.gapRepeat = 0;
+                stateWriter.setAccessPlan(false);
                 yield {
                     type: "text",
                     content: `该资料不属于当前场站（${state.site?.name ?? ""}），本次接入已停止。如确需接入其他场站的设备，请先更换部署配置中的场站绑定。`,
@@ -8704,15 +8968,27 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 } else if (state.pendingGap === "recv.device") {
                     // 设备缺口裸值绑定（§3.2.1.3c）：全名原样接受；裸数字/中文数字仅当
                     // 累积文本存在设备类型词时绑定（"2" → 2号X），类型词缺失 → 不猜，
-                    // 重复追问全名（宁可放过不可错绑）
-                    const dev = bind_device_answer(userText, state.userTexts);
-                    if (dev !== null) {
-                        state.recv.deviceName = dev;
+                    // 重复追问全名（宁可放过不可错绑）。
+                    // 匿名声明先判（2026-10-19 用例 47C 生产野测）：「没有名字，就是台
+                    // 匿名设备，随便。」曾被按全名原样接受，点 key 前缀成了整句话——
+                    // 用户明确无名 → 匿名落位，dev{N} 序列在方案层分配
+                    if (anonymous_device_answer(userText)) {
+                        state.recv.anonymous = true;
                         extraction_progress = true;
                         cfg.agentLogger.memory(conversation, "pending_bind", {
                             gap: "recv.device",
-                            device: dev,
+                            device: "匿名（dev{N} 序列分配）",
                         });
+                    } else {
+                        const dev = bind_device_answer(userText, state.userTexts);
+                        if (dev !== null) {
+                            state.recv.deviceName = dev;
+                            extraction_progress = true;
+                            cfg.agentLogger.memory(conversation, "pending_bind", {
+                                gap: "recv.device",
+                                device: dev,
+                            });
+                        }
                     }
                 } else if (
                     state.pendingGap === "recv.points.fields" &&
@@ -8720,10 +8996,14 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 ) {
                     // 从站号缺口应答绑定（modbus 点级必填，2026-10-02 链步31 实测）：
                     // 「从站号都是1」批量绑定到点表全部缺 uid 的点——点表落槽后阶段3
-                    // 不再重提取，无绑定通路则 uid 缺口永不闭合（死循环收摊）
-                    const um = userText.match(/从站号?(?:都|全)?(?:是|为|[:：])?\s*(\d{1,3})/);
-                    if (um) {
-                        const uid = Number(um[1]);
+                    // 不再重提取，无绑定通路则 uid 缺口永不闭合（死循环收摊）。
+                    // 2026-10-17 词形对齐（生产收摊实测）：追问文案教用户的词是「uid」
+                    // （「缺少必要字段 "uid"」），绑定器此前只认「从站」前缀——
+                    // 「uid是1」「uid:1」裸「1」三连落空 gapRepeat 计满收摊；词形
+                    // 收口 gap_answer.uid_answer_of（uid 词形 + 裸值兜底，提问即
+                    // 语境锁定，缺口应答语境下裸数字即所指字段值）
+                    const uid = uid_answer_of(userText);
+                    if (uid !== null) {
                         let bound = 0;
                         for (const p of state.recv.points) {
                             const rec = p as Record<string, unknown>;

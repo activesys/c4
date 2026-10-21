@@ -14,7 +14,8 @@
 //   c 共用 ip:port + 从站号相同 + 地址偏移（「2# 从 2000 开始」）
 // 协议无关：本模块不解读协议语义（ip 是否必填由编排器按服务角色判定）。
 
-import { device_type_prefix_of } from "../registry/device_prefix.js";
+import { device_type_known } from "../registry/device_prefix.js";
+import { normalize_point_name } from "../executor/point_key.js";
 
 /** 组成员连接参数（展开后逐台一份；字段缺失 = 待组级缺口追问） */
 export interface GroupMemberConn {
@@ -369,12 +370,11 @@ export function parse_group_access(text: string): GroupSpec[] | null {
     return groups.length > 0 ? groups : null;
 }
 
-/** 组成员前缀（§2.11 协议无关条）：类型缩写 + 编号**原样**拼入（1 → wt1、A01 → nbA01），
- *  前缀不含下划线。类型词未命中映射表 → null（交调用方按组级缺口处理，不猜）。 */
-export function group_member_prefix(typeWord: string, rawNum: string): string | null {
-    const pre = device_type_prefix_of(typeWord);
-    if (pre === null) return null;
-    return `${pre}${rawNum}`;
+/** 组成员前缀（§2.11，2026-10-19 命名切换）：成员设备名（「1号风机」「A01逆变器」）
+ *  原样归一化为前缀；类型词不可识别 → null（交调用方按组级缺口处理，不猜）。 */
+export function group_member_prefix(typeWord: string, memberName: string): string | null {
+    if (!device_type_known(typeWord)) return null;
+    return normalize_point_name(memberName) || "dev";
 }
 
 /** 组会话合并键（同键 = 同一组，重解析时单调覆盖） */

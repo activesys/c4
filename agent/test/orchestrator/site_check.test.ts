@@ -8,6 +8,8 @@ import {
     arbitrate_site_tags,
     deterministic_site_tag,
     llm_site_tag,
+    site_zone_of,
+    zone_value,
 } from "../../src/orchestrator/site_check.js";
 
 describe("deterministic_site_tag", () => {
@@ -149,5 +151,85 @@ describe("arbitrate_site_tags（确定性标签优先，LLM 兜底）", () => {
 
     it("双方均无标签 → null（放行）", () => {
         expect(arbitrate_site_tags(null, null)).toBeNull();
+    });
+});
+
+// ── 区序号确定性裁决（2026-10-18 用户口径：场站名=集团+风场+区?）────────
+
+describe("zone_value 区序号归一化", () => {
+    it("中文/阿拉伯/罗马同义归一", () => {
+        expect(zone_value("一")).toBe(1);
+        expect(zone_value("两")).toBe(2);
+        expect(zone_value("十")).toBe(10);
+        expect(zone_value("2")).toBe(2);
+        expect(zone_value("II")).toBe(2);
+        expect(zone_value("Ⅲ")).toBe(3);
+        expect(zone_value("IV")).toBe(4);
+    });
+});
+
+describe("site_zone_of 场站尾区提取", () => {
+    it("用户实例口径", () => {
+        expect(site_zone_of("三峡风电宜昌2区")).toBe(2);
+        expect(site_zone_of("大唐辽宁小塔子光伏III区")).toBe(3);
+        expect(site_zone_of("国电河北照阳河风电场一区")).toBe(1);
+        expect(site_zone_of("华能蒙东高立板")).toBeNull();
+        expect(site_zone_of("国电内蒙阿左旗风电场")).toBeNull();
+    });
+});
+
+describe("deterministic_site_tag 区序号裁决", () => {
+    const INCIDENT =
+        "我要接入一区风机数据，风机scada使用modbus协议转发，ip:127.0.0.1, port:502，" +
+        "转发到2区，使用Asfp2协议，127.0.0.1:9907。";
+
+    it("生产事故句式：源区一 vs 场站2区 → other（转发目标2区不参与比对）", () => {
+        expect(deterministic_site_tag(INCIDENT, "三峡风电宜昌2区")).toBe("other");
+    });
+
+    it("源区与站区同义等值（2/二/II）→ match 免问放行", () => {
+        expect(
+            deterministic_site_tag(
+                "我要接入2区风机数据，风机scada使用modbus协议转发，转发到2区",
+                "三峡风电宜昌2区",
+            ),
+        ).toBe("match");
+        expect(deterministic_site_tag("我要接入II区风机数据", "三峡风电宜昌2区")).toBe("match");
+    });
+
+    it("用户实例：III区场站 vs 一区消息 → other；3区消息 → match", () => {
+        expect(
+            deterministic_site_tag("我要接入一区风机数据，转发到2区", "大唐辽宁小塔子光伏III区"),
+        ).toBe("other");
+        expect(
+            deterministic_site_tag("我刚才说错了，应该是III区。", "大唐辽宁小塔子光伏III区"),
+        ).toBe("match");
+    });
+
+    it("无区场站（华能蒙东高立板）→ 区规则跳过，落既有流程", () => {
+        expect(
+            deterministic_site_tag("我要接入一区风机数据，转发到2区", "华能蒙东高立板"),
+        ).toBeNull();
+    });
+
+    it("点表参照子句的区词不构成源区（用例4「点表与I区一致」形态）", () => {
+        expect(
+            deterministic_site_tag("转发到II区服务器，点表与I区一致", "三峡风电宜昌2区"),
+        ).toBeNull();
+    });
+
+    it("异站品牌前缀优先于区相同（大唐2区 vs 三峡2区仍 other）", () => {
+        expect(
+            deterministic_site_tag("接入大唐辽宁小塔子光伏2区3号风机的数据", "三峡风电宜昌2区"),
+        ).toBe("other");
+    });
+});
+
+describe("arbitrate 区 match 压过 LLM 保守追问", () => {
+    it("det=match / llm=ambiguous → match", () => {
+        expect(arbitrate_site_tags("match", "ambiguous")).toBe("match");
+    });
+    it("det=null / llm=ambiguous → ambiguous（既有保守序不退化）", () => {
+        expect(arbitrate_site_tags(null, "ambiguous")).toBe("ambiguous");
     });
 });

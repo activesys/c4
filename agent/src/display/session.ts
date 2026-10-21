@@ -173,12 +173,17 @@ export class DisplayService {
             // 注册表不可读 → 回退实例 id
         }
         const device_of = (instanceId: string, pointKey: string): string => {
-            const us = pointKey.indexOf("_");
-            if (us > 0) {
-                const owner = prefixOwner.get(pointKey.slice(0, us));
-                if (owner !== undefined) return owner;
+            // 2026-10-19 命名切换：前缀 = 设备名归一化，可含 `_`（英文设备名）——
+            // 首个 `_` 切分不再可靠，改按注册表已登记前缀做边界匹配（最长者胜）
+            let owner: string | null = null;
+            let best = -1;
+            for (const [pre, name] of prefixOwner) {
+                if (pointKey.startsWith(`${pre}_`) && pre.length > best) {
+                    owner = name;
+                    best = pre.length;
+                }
             }
-            return instanceId;
+            return owner ?? instanceId;
         };
 
         const entries: Array<{

@@ -242,8 +242,14 @@ export function bind_device_answer(
     message: string,
     accumulated: string[],
 ): string | null {
-    const t = message.trim().replace(/[。.！!？?，,]\s*$/, "");
-    if (t.length === 0 || t.length > 24) {
+    const t0 = message.trim().replace(/[。.！!？?，,]\s*$/, "");
+    // 命名引导词前缀剥离（词形对齐：dm 正则侧 2026-10-03 用例 47D 已修「名叫」
+    // 消费，缺口应答侧同词形漏网——2026-10-19 复测「设备名叫 power_forecast_1」
+    // 曾整句成设备名，前缀成了「设备名叫_power_forecast_1_」）
+    const t = t0
+        .replace(/^(?:设备名称|设备名字|设备)?(?:名字叫|名称为|名字是|名为|名叫|叫)/, "")
+        .trim();
+    if (t.length === 0 || t0.length > 24) {
         return null;
     }
     // 裸编号形态（「2」「3号」「三号」「3#」）→ 受类型词守卫约束（§3.2.1.3c：类型词
@@ -284,6 +290,21 @@ export function bind_device_answer(
     return `${num}号${typeM[1]}`;
 }
 
+// ── 匿名设备声明判定（recv.device 应答，2026-10-19 用例 47C 生产野测）──────
+// 「没有名字，就是台匿名设备，随便。」——用户明确声明设备无名时，整句曾被
+// bind_device_answer 按全名原样接受（≤24 字非纯数字即收），点 key 前缀成了
+// 「没有名字_就是台匿名设备_随便_」。匿名声明 → 不命名，交 dev{N} 序列分配
+//（device_prefix.ts 头注口径：完全匿名 → "dev" 基名）。命名意图（「就叫随便吧」）
+// 不得误伤——「随便」仅裸词命中。
+const ANONYMOUS_DEVICE_RE =
+    /没有名字|没名字|匿名|不需要名字|无需名字|名字随便|^随便$/;
+
+/** 用户是否在设备名称应答中明确声明匿名（无名称）→ true 时不绑名字。 */
+export function anonymous_device_answer(message: string): boolean {
+    const t = message.trim().replace(/[。.！!？?，,]\s*$/, "");
+    return t.length > 0 && t.length <= 24 && ANONYMOUS_DEVICE_RE.test(t);
+}
+
 // ── 接收端口确定性捕获（2026-09-28 用例7：监听9001端口）──────
 
 /** 转发语境子句——接收端口捕获须排除（「转发到9999端口」不是接收端口） */
@@ -306,9 +327,39 @@ export function parse_receive_port(message: string): number | null {
         // 后缀：「9001端口」「监听9001端口」
         m = clause.match(/(?:监听|接收)?\s*(\d{2,5})\s*端口/);
         if (m) return Number(m[1]);
+        // 英文标签：「port:502」「port 502」「PORT=502」（2026-10-18 生产野测：
+        // 「ip:127.0.0.1, port:502」中英混排形态，中文标签表漏收致连接缺口误开）
+        m = clause.match(/\bport\b[^0-9]{0,4}(\d{2,5})/i);
+        if (m) return Number(m[1]);
         // 「监听 9001」「接收 9001」
         m = clause.match(/(?:监听|接收)\s*(\d{2,5})/);
         if (m) return Number(m[1]);
+    }
+    return null;
+}
+
+// IP 捕获的去向语境排除词（子句内前缀判定；与原 12 字符窗口词表一致）
+const RECV_IP_EXCLUDE_RE = /服务器|转发|目标|去向|II区/;
+
+/**
+ * 采集侧带标签 IP 确定性捕获（去向语境判定收口到子句内，2026-10-18 生产野测）：
+ * 「我要接入风机数据，风机scada使用modbus协议转发，ip:127.0.0.1, port:502，…」
+ * ——原实现取 IP 前 12 字符原始窗口，跨逗号看到上一子句尾部「转发」二字，设备
+ * 自身 IP 被误判为转发目标语境而漏绑，连接缺口误开后用户把转发目标答进接收
+ * 连接（方案以 9907 落盘）。子句化后只看 IP 所在子句的前缀：干净即绑；
+ * 去向子句（用例4「II服务器地址是…」「转发目标地址…」）照旧排除。
+ * 返回第一个采集语境的带标签 IP，无则 null。
+ */
+export function receive_ip_of(message: string): string | null {
+    const clauses = message
+        .split(/[，,。；;;\n]+/)
+        .map((c) => c.trim())
+        .filter((c) => c.length > 0);
+    for (const clause of clauses) {
+        const m = clause.match(/(?:IP|ip|地址)[^\d]{0,4}(\d{1,3}(?:\.\d{1,3}){3})/);
+        if (m === null) continue;
+        if (RECV_IP_EXCLUDE_RE.test(clause.slice(0, m.index ?? 0))) continue;
+        return m[1];
     }
     return null;
 }
