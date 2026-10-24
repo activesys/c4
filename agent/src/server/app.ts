@@ -14,6 +14,7 @@ import { createChatRouter } from "./routes/chat.js";
 import { createUploadRouter } from "./routes/upload.js";
 import { createServicesRouter } from "./routes/services.js";
 import { createStateRouter } from "./routes/state.js";
+import { createCancelRouter } from "./routes/cancel.js";
 import { createSiteRouter } from "./routes/site.js";
 import type { AgentStateWriter } from "./types.js";
 import type { SiteInfo } from "../site_config.js";
@@ -56,6 +57,12 @@ export interface AppOptions {
      * 提供时 GET /api/services 的每个条目附带 alive/degraded 字段（Web 展示与告警）
      */
     aliveProvider?: () => Array<{ service_type: string; alive: boolean; degraded: boolean }>;
+    /**
+     * 双 ESC 结构化取消（web.md §3.7.6）：显示会话终止 + 在途回合中止（无阻塞态
+     * 时空操作）；提供 cancelTurn 时挂载 POST /api/cancel
+     */
+    displayService?: { hasActiveSession(): boolean; stop(): void };
+    cancelTurn?: () => boolean;
     /** Absolute path to the web frontend static dir; served when set and existing (design §4.3 / §5.1) */
     frontendDir?: string;
     /** 注册图标文件目录（注册目录 icons/ 子目录）；提供时托管 <servicesPath>/icons 静态路由 */
@@ -119,6 +126,8 @@ export function createApp(options: AppOptions): express.Application {
         stateWriter,
         generateSiteAbbr,
         rebindSite,
+        displayService,
+        cancelTurn,
     } = options;
 
     // 1. CORS — Express v5: no `cors` npm package needed
@@ -136,7 +145,17 @@ export function createApp(options: AppOptions): express.Application {
     app.use(chatPath, createChatRouter(agent));
     app.use(uploadPath, createUploadRouter(agent));
     app.use(servicesPath, createServicesRouter({ aliveProvider, iconsDir, servicesPath }));
-    app.use(statePath, createStateRouter(stateProvider, stateWriter));
+    app.use(statePath, createStateRouter(stateProvider, stateWriter, displayService));
+    if (cancelTurn !== undefined && displayService !== undefined) {
+        app.use(
+            "/api/cancel",
+            createCancelRouter({
+                hasDisplaySession: () => displayService.hasActiveSession(),
+                stopDisplay: () => displayService.stop(),
+                abortActiveTurn: cancelTurn,
+            }),
+        );
+    }
     if (agentConfigPath && stateWriter) {
         app.use(
             sitePath,

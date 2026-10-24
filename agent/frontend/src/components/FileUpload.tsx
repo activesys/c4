@@ -19,14 +19,23 @@ const ACCEPT = ".xlsx,.csv,.xls,.txt";
 
 export interface FileUploadProps {
   onUpload: (file: File, message?: string) => void;
+  /** 门控禁用（web.md §3.7.5/§3.5.6）：目标为数据展示或显示会话活跃时置灰——
+   *  双门控取交集由 ChatView 判定，组件只接收结果 */
+  disabled?: boolean;
+  disabledReason?: string;
 }
 
-export function FileUpload({ onUpload }: FileUploadProps): JSX.Element {
+export function FileUpload({
+  onUpload,
+  disabled = false,
+  disabledReason,
+}: FileUploadProps): JSX.Element {
   const inputRef = useRef<HTMLInputElement | null>(null);
   const [warning, setWarning] = useState<string | null>(null);
   const inputId = useId();
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (disabled) return;
     setWarning(null);
     const file = e.target.files?.[0];
     if (!file) return;
@@ -42,7 +51,13 @@ export function FileUpload({ onUpload }: FileUploadProps): JSX.Element {
 
   return (
     <div className="file-upload">
-      <label htmlFor={inputId} className="file-upload__button" aria-label="上传文件">
+      <label
+        htmlFor={inputId}
+        className={`file-upload__button${disabled ? " file-upload__button--disabled" : ""}`}
+        aria-label="上传文件"
+        aria-disabled={disabled}
+        title={disabled ? (disabledReason ?? "当前不可上传") : undefined}
+      >
         <svg
           className="file-upload__icon"
           viewBox="0 0 24 24"

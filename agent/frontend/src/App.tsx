@@ -16,6 +16,7 @@ import { ServiceDashboard } from "./components/ServiceDashboard";
 import { PhaseBadge } from "./components/PhaseBadge";
 import { SiteEditDialog, SiteSetupGate } from "./components/SiteSetupGate";
 import { useAgentState } from "./hooks/useAgentState";
+import { useDoubleEscCancel } from "./hooks/useDoubleEscCancel";
 import { resetSessionState } from "@frontend/api/state";
 import c4IconUrl from "./assets/c4-icon.svg";
 
@@ -47,6 +48,10 @@ function App(): JSX.Element {
   }, []);
 
   const { phase, lastError, siteName, refresh } = useAgentState(1000);
+
+  // 双 ESC 全局取消手势（web.md §3.7.6）：模态框优先、1500ms 窗口、
+  // POST /api/cancel（阻塞态中断）；首次按键 toast 提示
+  const escHint = useDoubleEscCancel().hint;
 
   // MCP/对话切换返回对话视图时，滚动容器（app__main）钉到底部——会话常驻
   // 挂载后滚动位置会被 MCP 视图的滚动改写，返回时恢复到最新消息处
@@ -103,6 +108,13 @@ function App(): JSX.Element {
   }, [refresh, rollBg]);
 
   // 落地形态仅限「对话视图且未开始对话」；MCP 目录始终走侧栏布局。
+  const escToast =
+    escHint !== "" ? (
+      <div className="app__esc-toast" role="status" data-testid="esc-toast">
+        {escHint}
+      </div>
+    ) : null;
+
   const landing = view === "chat" && !started;
   const errorBanner = bannerVisible ? (
     <div role="alert" data-testid="last-error" className="app__error">
@@ -207,6 +219,7 @@ function App(): JSX.Element {
         </div>
         <div className="app__topbar-right">
           {errorBanner}
+      {escToast}
           <PhaseBadge phase={phase} />
           {landing || !navHidden ? (
             <button

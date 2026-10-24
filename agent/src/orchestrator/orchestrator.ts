@@ -1,11 +1,13 @@
-// c4/agent/src/orchestrator/orchestrator.ts — Workflow 编排器
+// c4/agent/src/orchestrator/orchestrator.ts — Workflow 编排器（数据接入 Agent）
 // agent.md §1.4-§3.2：缺口驱动九阶段流水线。
-//   回合循环: ①取消检测 ②阶段提取(1-7，提示词驱动) ③缺口计算(单缺口顺序提问停等)
-//   ④方案层装配(阶段8，纯代码：abbr 记忆 / 确定性推导 / L1+L2 校验) → button_arm 停等
-//   ⑤执行层(阶段9，确认按钮后：generate_steps 拆解 + 事务五步 + 回滚协议)。
-// 确认通道: 按钮唯一(§2.8)——[C4_BUTTON_CONFIRM]/[C4_BUTTON_CANCEL] 前缀；
+//   回合循环: 阶段提取(1-7，提示词驱动) → 缺口计算(单缺口顺序提问停等)
+//   → 方案层装配(阶段8，纯代码：abbr 记忆 / 确定性推导 / L1+L2 校验) → button_arm 停等
+//   → 执行层(阶段9，确认按钮后：generate_steps 拆解 + 事务五步 + 回滚协议)。
+// 确认通道: 按钮唯一(§2.8)——[C4_BUTTON_CONFIRM] 前缀；取消不经文本（2026-10-24
+//   用户裁定：双 ESC → POST /api/cancel 结构化取消，web.md §3.7.6 / agent.md §2.4.2），
+//   [C4_BUTTON_CANCEL] 哨兵与顶层取消词检测已废除；展示意图分叉已随双 Agent 拆分
+//   删除（§2.0.3 职责不涉入——展示类消息走零认领路径，agent.md §2.3）。
 //   确认消息内嵌 changes/devices JSON 时走确定性直通路径（测试与高级用户通道）。
-// 本文件实现 server/types.ts 的 C4Agent 接口——server 层零改动。
 
 import { existsSync, readFileSync } from "node:fs";
 import * as path from "node:path";
@@ -95,7 +97,6 @@ import {
 import {
     with_config_lock,
     ConfigBusyError,
-    CONFIG_BUSY_MESSAGE,
 } from "../executor/single_flight.js";
 import { parse_any_file, parse_point_file, type ParsedPointFile } from "../subagents/tools/doc_parsers.js";
 import {
@@ -228,6 +229,9 @@ interface SessionState {
     locks: { receive: boolean; forward: boolean };
     accessPlan: AccessPlan | null;
     userConfirmed: boolean;
+    /** 方案已执行消耗标记（§2.3 零认领守卫）：成功执行后置位，下一回合零进展的
+     *  零认领消息走「当前接入已完成」简短说明，不重走缺口提问 */
+    planConsumed: boolean;
     lastGapSignature: string | null;
     gapRepeat: number;
     /** 本回合场站归属判定结果（null=未触发；ambiguous=归属不明；other=他站资料；
@@ -284,6 +288,7 @@ function fresh_state(): SessionState {
         locks: { receive: false, forward: false },
         accessPlan: null,
         userConfirmed: false,
+        planConsumed: false,
         lastGapSignature: null,
         gapRepeat: 0,
         turnSiteCheck: null,
@@ -306,7 +311,9 @@ function fresh_state(): SessionState {
     };
 }
 
-// §2.4.2 取消词表——去空白后全等匹配（禁止包含匹配）
+// 同名坚持仲裁的应答取消词（字段级回落，§3.2.1.3a——用户对「是否坚持新增同名设备」
+// 追问答「取消」时清 pendingNewDevice 语境；非会话取消：顶层取消词检测已随
+// 2026-10-24 双 ESC 裁定废除，取消唯一通道 = POST /api/cancel，agent.md §2.4.2）
 const CANCEL_WORDS = new Set(["取消", "算了", "不接了", "放弃", "停止接入"]);
 
 // 同名坚持新增的应答语义（用例 49②，2026-10-19 改拒收）：含新增语义即进入
@@ -819,7 +826,6 @@ export interface OrchestratorConfig {
         setSiteName(n: string | null): void;
     };
     agentLogger: import("../logging/agent_logger.js").AgentLogger;
-    displayTools?: unknown;
 }
 
 /** 入库 field 派生存量修正（2026-10-08）：field 必填、不推导——统一拒装话术 */
@@ -2506,7 +2512,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                                 state.recv.extractError =
                                     `${parse_face_summary(merged.points, merged.excluded, normSpec?.type_field ?? "point_type", enumMap ?? {})}。` +
                                     `业务点名必须唯一：${pid.conflicts.length} 组同名点（${list}${pid.conflicts.length > 5 ? " 等" : ""}）` +
-                                    `——同名点是否为不同物理点需设备厂家确认。请按装置拆分文件分别接入，或修正点名后重传；回复「取消」结束本次接入。` +
+                                    `——同名点是否为不同物理点需设备厂家确认。请按装置拆分文件分别接入，或修正点名后重传；或开启新对话丢弃本次接入。` +
                                     mbRej;
                                 progress = true;
                             } else if (isMb && pid.conflicts.length === 0 && mbDups.length > 0) {
@@ -2519,7 +2525,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                                         .slice(0, 5)
                                         .map((d) => `addr ${[...new Set(d.addrs)].join("/")}（「${d.names[0] ?? "?"}」×${d.addrs.length}）`)
                                         .join("；")}${mbDups.length > 5 ? " 等" : ""}` +
-                                    `——重复地址无法唯一标识物理点，请修正点表后重传；回复「取消」结束本次接入。`;
+                                    `——重复地址无法唯一标识物理点，请修正点表后重传；或开启新对话丢弃本次接入。`;
                                 progress = true;
                             } else if (isMb && mbNeedTurbines && mbExpand !== null) {
                                 // 台数缺口（域规则 5）：横向列组/偏移量展开台数表内不可
@@ -2531,7 +2537,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                                     src: mbExpand.src,
                                 };
                                 state.recv.extractError =
-                                    `${state.recv.mbFace ?? ""}。点表为多台机组模板（每台 ${merged.points.length} 点，地址偏移 ${mbExpand.stride}），但台数表内未显式声明——请提供机组台数（如「33 台风机」），或回复「取消」结束本次接入。`;
+                                    `${state.recv.mbFace ?? ""}。点表为多台机组模板（每台 ${merged.points.length} 点，地址偏移 ${mbExpand.stride}），但台数表内未显式声明——请提供机组台数（如「33 台风机」），或开启新对话丢弃本次接入。`;
                                 progress = true;
                             } else if (!incomplete(merged.points)) {
                                 // 异名分次上传：新块归一化结果拼接到既有草稿（§2.13.4）
@@ -2569,7 +2575,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                                 state.recv.extractError = `${bad.length} 个点缺点名或名字无效（纯符号无法构成标识），如：${bad
                                     .slice(0, 3)
                                     .map((p) => `addr ${p["addr"] ?? "?"}`)
-                                    .join("、")}。请提供这些点的点名（可汇总给出，按行序对应），或回复「取消」结束本次接入。`;
+                                    .join("、")}。请提供这些点的点名（可汇总给出，按行序对应），或开启新对话丢弃本次接入。`;
                                 progress = true;
                             }
                         }
@@ -2691,7 +2697,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                                 state.recv.extractError =
                                     `${parse_face_summary(merged.points, merged.excluded, normSpec?.type_field ?? "point_type", enumMap ?? {})}。` +
                                     `业务点名必须唯一：${pid.conflicts.length} 组同名点（${list}${pid.conflicts.length > 5 ? " 等" : ""}）` +
-                                    `——同名点是否为不同物理点需设备厂家确认。请按装置拆分文件分别接入，或修正点名后重传；回复「取消」结束本次接入。`;
+                                    `——同名点是否为不同物理点需设备厂家确认。请按装置拆分文件分别接入，或修正点名后重传；或开启新对话丢弃本次接入。`;
                                 progress = true;
                             } else if (pid.failed > 0 || incomplete(merged.points)) {
                                 const bad = merged.points.filter(
@@ -2702,7 +2708,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                                 state.recv.extractError = `${bad.length} 个点缺点名或名字无效（纯符号无法构成标识），如：${bad
                                     .slice(0, 3)
                                     .map((p) => `addr ${p["addr"] ?? "?"}`)
-                                    .join("、")}。请提供这些点的点名（可汇总给出，按行序对应），或回复「取消」结束本次接入。`;
+                                    .join("、")}。请提供这些点的点名（可汇总给出，按行序对应），或开启新对话丢弃本次接入。`;
                                 progress = true;
                             } else {
                                 state.recv.points = merged.points;
@@ -4270,7 +4276,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             lines.push(`> 注：${n}`);
         }
         lines.push("");
-        lines.push(`是否确认执行？请点击下方「确认」按钮；如需取消请点击「取消」。`);
+        lines.push(`是否确认执行？请点击下方「确认」按钮；如需放弃本次接入请开启新对话。`);
         note_result(
             conversation, "装配多目标接入方案",
             `${devBuilds.length} 台设备 · ${fts.length} 路下游`,
@@ -4536,7 +4542,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                         issue:
                             `点「${String(p["name"] || String(p["id"]))}」（${String(p["id"])}）的地址与既有接入不一致` +
                             `（现有 ${String(sameKey["addr"])}，本次提供 ${String(p["addr"])}）。请明确意图：` +
-                            `修改该点地址请回复「取消」后直接说「修改点 ${String(p["id"])} 的地址为 ${String(p["addr"])}」；` +
+                            `要把该点地址改掉请直接回复「修改点 ${String(p["id"])} 的地址为 ${String(p["addr"])}」；` +
                             `这是新点请更换英文标识（不得与 ${String(p["id"])} 重名）后重试。`,
                     };
                 }
@@ -5044,7 +5050,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             }
         }
         lines.push("");
-        lines.push("是否确认执行？请点击下方「确认」按钮；如需取消请点击「取消」。");
+        lines.push("是否确认执行？请点击下方「确认」按钮；如需放弃本次接入请开启新对话。");
         note_result(
             conversation, "装配接入方案",
             `${devName} · ${state.recv.protocol ?? "?"} · ${
@@ -5184,7 +5190,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
         const cap_line = (gaps: string[]): string =>
             `这些信息我连续几轮没能确认到，先为您收个尾：\n${gaps
                 .map((t) => `· ${t}`)
-                .join("\n")}\n您可以回复「取消」重新开始，或补充上述信息后再继续。`;
+                .join("\n")}\n您可以开启新对话重新开始，或补充上述信息后再继续。`;
 
         // ① 场站（依赖序首位）
         if (!state.site) {
@@ -5301,7 +5307,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
         if (svcType === null) {
             yield {
                 type: "text",
-                content: `协议 ${g.protocol} 暂无对应的采集服务，请更换协议或回复「取消」。`,
+                content: `协议 ${g.protocol} 暂无对应的采集服务，请更换协议，或开启新对话丢弃本次接入。`,
             };
             yield { type: "done" };
             return;
@@ -5559,7 +5565,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                     yield {
                         type: "text",
                         content:
-                            "未能识别转发协议与目标。请按「转发采用asfp2协议到127.0.0.1:9900」的格式提供；或回复「取消」结束本次接入。",
+                            "未能识别转发协议与目标。请按「转发采用asfp2协议到127.0.0.1:9900」的格式提供；或开启新对话丢弃本次接入。",
                     };
                     yield { type: "done" };
                     return;
@@ -5673,7 +5679,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 display: "",
                 registryWrites: { upserts: [], deletes: [], pointMapDrops: [], channelHighWatermark: 0 },
                 issue:
-                    "设备组批量接入暂不支持 influxdb 转发（每点 field 必填、无法从模板确定性推导）。请改用其他转发协议，或回复「取消」后逐台接入。",
+                    "设备组批量接入暂不支持 influxdb 转发（每点 field 必填、无法从模板确定性推导）。请改用其他转发协议，或开启新对话后逐台接入。",
             };
         }
         const svcType = find_service_type(registry, normalize_protocol(g.protocol), "writer");
@@ -5993,7 +5999,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             }
         }
         lines.push("");
-        lines.push("是否确认执行？请点击下方「确认」按钮；如需取消请点击「取消」。");
+        lines.push("是否确认执行？请点击下方「确认」按钮；如需放弃本次接入请开启新对话。");
         note_result(
             conversation, "装配分组接入方案",
             `${g.groups.length} 台设备 · ${g.fwd.protocol} 转发 · ${fwdPts.length} 个转发点`,
@@ -6169,7 +6175,11 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                     busy: true,
                 });
                 note_result(conversation, `下发执行配置（${steps.length} 步）`, "配置通道忙，请稍后重试");
-                return CONFIG_BUSY_MESSAGE;
+                // 忙时不消耗方案：向上抛给 ② 的保留方案路径（§2.8 回滚不销毁
+                // 方案的同一语义——通道忙连事务都未开启，更无理由消耗），
+                // 用户可再次点击「确认」重试。此前把忙话术当成功返回串，
+                // ② 会误置 planConsumed，下一轮零认领谎报「当前接入已完成」
+                throw err;
             }
             cfg.agentLogger.tool_result(conversation, "apply_config_steps", {
                 success: false,
@@ -6448,7 +6458,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                             intent: "point_not_found",
                             steps: [],
                             display:
-                                `地址 ${aid} 对应的点「${realName}」与您提到的点名「${saidName}」不一致，未执行删除。\n${opts.join("\n")}\n或回复「取消」结束本次变更。当前点表：${table2}。`,
+                                `地址 ${aid} 对应的点「${realName}」与您提到的点名「${saidName}」不一致，未执行删除。\n${opts.join("\n")}\n或开启新对话丢弃本次变更。当前点表：${table2}。`,
                         };
                     }
                     return {
@@ -6645,7 +6655,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                     display:
                         "检测到系统中已有运行中的服务实例，但设备身份注册表中没有对应的设备条目" +
                         "（旧版命名格式的配置）。旧格式不再支持变更操作——请重新接入设备" +
-                        "（重新接入会以新格式登记设备身份），或回复「取消」。",
+                        "（重新接入会以新格式登记设备身份），或开启新对话丢弃本次变更。",
                     ask: false,
                 };
             }
@@ -7205,7 +7215,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 if (changes.length > 0) {
                     return {
                         steps: changes,
-                        display: `变更方案如下：\n· ${details.join("\n· ")}\n是否确认执行？请点击下方「确认」按钮；如需取消请点击「取消」。`,
+                        display: `变更方案如下：\n· ${details.join("\n· ")}\n是否确认执行？请点击下方「确认」按钮；如需放弃本次接入请开启新对话。`,
                         registryWrites: {
                             upserts,
                             deletes: mtDeletes,
@@ -7548,7 +7558,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 display:
                     `变更方案如下（批量删除，逐台核对）：\n${batchLines.join(
                         "\n",
-                    )}\n是否确认执行？请点击下方「确认」按钮；如需取消请点击「取消」。`,
+                    )}\n是否确认执行？请点击下方「确认」按钮；如需放弃本次接入请开启新对话。`,
                 registryWrites: {
                     upserts: [],
                     deletes: batchRegDeletes,
@@ -7769,7 +7779,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
         state.pendingDisambig = false;
         state.disambigHostId = null;
         const display =
-            `变更方案如下：\n· ${detail}\n是否确认执行？请点击下方「确认」按钮；如需取消请点击「取消」。`;
+            `变更方案如下：\n· ${detail}\n是否确认执行？请点击下方「确认」按钮；如需放弃本次接入请开启新对话。`;
         // 改名换绑 upsert：有重绑项且注册表条目存在时，整体换绑后的 pointMap 随
         // 成功路径固化（与加点路径 pointMapAdds 同机制）
         const renameRegEntry =
@@ -7922,7 +7932,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                     steps: [],
                     display: `地址 ${String(occupiedAddr)} 已被点「${String(
                         occupied["name"] ?? occupied["id"] ?? "?",
-                    )}」占用，无法新增——点名与英文标识已保留，请更换数据点地址（如 1011），或回复「取消」结束本次变更。`,
+                    )}」占用，无法新增——点名与英文标识已保留，请更换数据点地址（如 1011），或开启新对话丢弃本次变更。`,
                     ask: true,
                 };
             }
@@ -7997,7 +8007,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                         steps: [],
                         display: `转发地址 ${String(fwd)} 已被既有转发点「${String(
                             occ["key"] ?? "?",
-                        )}」占用——点名与英文标识已保留，请更换转发地址，或回复「取消」结束本次变更。`,
+                        )}」占用——点名与英文标识已保留，请更换转发地址，或开启新对话丢弃本次变更。`,
                         ask: true,
                     };
                 }
@@ -8053,7 +8063,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             : undefined;
         return {
             steps,
-            display: `变更方案如下：\n· ${detail}\n是否确认执行？请点击下方「确认」按钮；如需取消请点击「取消」。`,
+            display: `变更方案如下：\n· ${detail}\n是否确认执行？请点击下方「确认」按钮；如需放弃本次接入请开启新对话。`,
             registryWrites,
         };
     }
@@ -8107,7 +8117,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
         if (steps.length === 0) return null;
         return {
             steps,
-            display: `变更方案如下：\n· ${details.join("；")}\n是否确认执行？请点击下方「确认」按钮；如需取消请点击「取消」。`,
+            display: `变更方案如下：\n· ${details.join("；")}\n是否确认执行？请点击下方「确认」按钮；如需放弃本次接入请开启新对话。`,
         };
     }
 
@@ -8300,6 +8310,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 // 成功：方案被消耗 + 在途态清空（等价新会话，§2.4.2）
                 state.accessPlan = null;
                 state.userConfirmed = false;
+                state.planConsumed = true;
                 state.recv = fresh_side();
                 state.fwd = fresh_side();
                 state.forwardIntent = false;
@@ -8326,7 +8337,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 yield {
                     type: "text",
                     content: state.accessPlan
-                        ? `${msg}\n方案已保留，您可以点击「确认」重试，或点击「取消」结束本次接入。`
+                        ? `${msg}\n方案已保留，您可以点击「确认」重试，或开启新对话丢弃本次接入。`
                         : msg,
                 };
                 if (state.accessPlan) yield { type: "button_arm" };
@@ -8369,37 +8380,10 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
         return null;
     }
 
-    // ── 显示意图（对点核验控制面，§3.6.4 确定性等价路径）───
-    async function handle_display_intent(user_text: string): Promise<string | null> {
-        if (!/显示|展示|查看|看看|瞬时值|实时值/.test(user_text)) return null;
-        if (!/点|数据/.test(user_text)) return null;
-        const tools = (cfg.displayTools ?? []) as Array<{
-            name: string;
-            invoke(args: Record<string, unknown>): Promise<string>;
-        }>;
-        const listTool = tools.find((t) => t.name === "list_points");
-        const displayTool = tools.find((t) => t.name === "display_points");
-        if (!listTool || !displayTool) return null;
-        try {
-            const filterMatch = user_text.match(/(?:显示|查看|看看)\s*([^\s，。,的]+)/);
-            const filter =
-                filterMatch && !/显示|查看|看看|所有|全部|数据|点/.test(filterMatch[1])
-                    ? filterMatch[1]
-                    : undefined;
-            const listed = await listTool.invoke({ filter });
-            const parsed = parse_json<{
-                count: number;
-                points: Array<{ pointKey: string; addr: number; device: string }>;
-            }>(listed);
-            if (!parsed || parsed.count === 0) {
-                return "当前还没有已接入的数据点，无法显示。请先完成设备接入。";
-            }
-            await displayTool.invoke({ pointKeys: parsed.points.map((p) => p.pointKey) });
-            return `已建立显示：共 ${parsed.count} 个数据点，正在按秒刷新。您可以在页面的点位显示卡片中查看实时数值；说「停止显示」即可终止。`;
-        } catch {
-            return null;
-        }
-    }
+    // ── 显示意图分叉已删除（2026-10-24 双 Agent 拆分，agent.md §2.0.3）：
+    //    展示类消息不再由接入编排器分析——职责不涉入，零认领消息走接入管线
+    //    自然路径（§2.3：缺口重申或方案重展示）；展示行为只存在于数据展示
+    //    编排器（display_orchestrator.ts）的工具面，本管线不可达（RP-UC-04）。
 
     // ── 主回合（§2.3 缺口驱动回合模型）─────────────────────
     // ── 第二层运行日志接线（§5.2）──────────────────────────
@@ -8484,46 +8468,9 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             const trimmed = userText.trim();
             note_step(conversation, "分析输入与接入进度", trimmed.slice(0, 60));
 
-            // ① 取消检测（§2.4.2 全等匹配，顶层确定性拦截）
-            if (CANCEL_WORDS.has(trimmed)) {
-                if (state.userConfirmed) {
-                    yield {
-                        type: "text",
-                        content: "当前正在执行接入变更，无法取消。请等待执行完成或回滚。",
-                    };
-                    yield { type: "done" };
-                    return;
-                }
-                state.recv = fresh_side();
-                state.fwd = fresh_side();
-                state.forwardIntent = false;
-                state.accessPlan = null;
-                state.userConfirmed = false;
-                state.locks = { receive: false, forward: false };
-                state.gapRepeat = 0;
-                state.pendingGap = null;
-                state.lastGapSignature = null;
-                state.pendingChangeAsk = false;
-                state.pendingDisambig = false;
-                state.disambigHostId = null;
-                state.pendingNewDevice = false;
-                state.changeAddPoints = null;
-                state.userTexts = [];
-                state.fileTable = null;
-                state.fileBlocks = null;
-                state.group = null;
-                stateWriter.setPhase("idle");
-                cfg.agentLogger.phase(conversation, "idle");
-                stateWriter.setAccessPlan(false);
-                yield { type: "button_disarm", reason: "用户取消本次接入" };
-                yield {
-                    type: "text",
-                    content:
-                        "好的，已取消本次接入。已确认的信息（场站绑定、设备注册表）已保留，您可以随时重新发起接入。",
-                };
-                yield { type: "done" };
-                return;
-            }
+            // ① 取消检测已废除（2026-10-24 用户裁定，agent.md §2.4.2）：自由文本不再
+            //    识别取消意图——取消唯一通道是 Web 双 ESC → POST /api/cancel 结构化
+            //    请求（阻塞态中断，web.md §3.7.6）；任何用户消息一律进入提取遍历。
 
             // ①.5 目标级撤回（§2.4.2/§2.12.5，用例 63 变体C、64 变体）：收集期或方案
             // 待确认期「取消(转发|写入)目标」「不转发到X了」→ 仅删除目标草稿（设备与
@@ -8581,25 +8528,9 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 }
             }
 
-            // ② 按钮通道（§2.8）
-            if (trimmed.startsWith("[C4_BUTTON_CANCEL]")) {
-                state.accessPlan = null;
-                state.userConfirmed = false;
-                state.pendingGap = null;
-                state.pendingChangeAsk = false;
-                state.pendingDisambig = false;
-                state.disambigHostId = null;
-                state.pendingNewDevice = false;
-                state.changeAddPoints = null;
-                state.group = null;
-                stateWriter.setAccessPlan(false);
-                stateWriter.setPhase("idle");
-                cfg.agentLogger.phase(conversation, "idle");
-                yield { type: "button_disarm", reason: "用户取消执行" };
-                yield { type: "text", content: "好的，已取消本次接入方案，未做任何变更。" };
-                yield { type: "done" };
-                return;
-            }
+            // ② 按钮通道（§2.8）——仅确认；[C4_BUTTON_CANCEL] 哨兵已废除（2026-10-24
+            //    用户裁定：取消不经文本、不设取消按钮——双 ESC → POST /api/cancel，
+            //    web.md §3.1.3/§3.7.6）
             if (trimmed.startsWith("[C4_BUTTON_CONFIRM]")) {
                 yield* handle_confirm(userText, state, conversation);
                 return;
@@ -8645,14 +8576,6 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 stateWriter.setPhase("idle");
                 cfg.agentLogger.phase(conversation, "idle");
                 yield { type: "text", content: chit };
-                yield { type: "done" };
-                return;
-            }
-
-            // ④ 显示意图分叉（对点核验，§3.6）
-            const displayReply = await handle_display_intent(userText);
-            if (displayReply !== null) {
-                yield { type: "text", content: displayReply };
                 yield { type: "done" };
                 return;
             }
@@ -8712,7 +8635,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 if (state.pendingChangeAsk) {
                     yield {
                         type: "text",
-                        content: "变更请求处理失败，请重试，或回复「取消」结束本次变更。",
+                        content: "变更请求处理失败，请重试，或开启新对话丢弃本次变更。",
                     };
                     yield { type: "done" };
                     return;
@@ -9074,7 +8997,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                                     cfg.pointId?.placeholder_base ?? DEFAULT_PLACEHOLDER_BASE,
                             });
                             if (pidT.conflicts.length > 0) {
-                                state.recv.extractError = `展开后业务点名撞名 ${pidT.conflicts.length} 组（如「${pidT.conflicts[0]!.name}」）——请核对台数或点名后重试；回复「取消」结束本次接入。`;
+                                state.recv.extractError = `展开后业务点名撞名 ${pidT.conflicts.length} 组（如「${pidT.conflicts[0]!.name}」）——请核对台数或点名后重试；或开启新对话丢弃本次接入。`;
                             } else {
                                 state.recv.points = expanded as Array<Record<string, unknown>>;
                                 state.recv.extractError = null;
@@ -9164,7 +9087,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                     yield {
                         type: "text",
                         content:
-                            "当前版本接入必须伴随至少一路下游转发/写入；您已多次表示无需下游，本次接入先为您收尾终止。如需继续，请回复「取消」后重新发起接入，并在声明设备时一并说明转发或写入去向。",
+                            "当前版本接入必须伴随至少一路下游转发/写入；您已多次表示无需下游，本次接入先为您收尾终止。如需继续，请开启新对话后重新发起接入，并在声明设备时一并说明转发或写入去向。",
                     };
                     yield { type: "done" };
                     return;
@@ -9172,11 +9095,32 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 yield {
                     type: "text",
                     content:
-                        "当前版本接入必须伴随至少一路下游转发/写入（无下游引用的点不会接入）。请说明这些数据要转往哪里/写入哪里（例如：转发采用asfp2协议到127.0.0.1:9900）；如确无下游需求，请回复「取消」终止本次接入。",
+                        "当前版本接入必须伴随至少一路下游转发/写入（无下游引用的点不会接入）。请说明这些数据要转往哪里/写入哪里（例如：转发采用asfp2协议到127.0.0.1:9900）；如确无下游需求，请开启新对话丢弃本次接入。",
                 };
                 yield { type: "done" };
                 return;
             }
+
+            // ⑥.9 方案已消耗守卫（§2.3 零认领路径，2026-10-24）：执行成功后的会话内，
+            // 若本回合提取零进展且草稿仍为空（零认领消息——如展示类词形发给接入 Agent），
+            // 不再重走缺口提问（避免「请提供设备名称」式死循环复燃已完成的接入），改走
+            // 简短说明；有实质提取进展（用户开始描述新接入）则守卫单次失效、正常续走
+            if (
+                state.planConsumed &&
+                !extraction_progress &&
+                state.recv.deviceName === null &&
+                state.fileBlocks === null
+            ) {
+                state.planConsumed = false;
+                yield {
+                    type: "text",
+                    content:
+                        "当前接入已完成。如需接入新设备或调整配置，请直接描述；如需放弃当前会话重新开始，请开启新对话。",
+                };
+                yield { type: "done" };
+                return;
+            }
+            state.planConsumed = false;
 
             // ⑦ 缺口计算 + 单缺口顺序提问（提问即终局，§2.6）
             const { gaps, recap } = compute_gaps(state);
@@ -9209,7 +9153,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                             .map((g) => `· ${g.text}`)
                             .join(
                                 "\n",
-                            )}\n您可以回复「取消」重新开始，或补充上述信息后再继续。`,
+                            )}\n您可以开启新对话重新开始，或补充上述信息后再继续。`,
                     };
                     yield { type: "done" };
                     return;
@@ -9257,7 +9201,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                             `这个问题我连续几轮没能确认到，先为您收个尾：
 · ${assembled.issue}
 ` +
-                            `您可以回复「取消」重新开始，或换一种说法后再继续。`,
+                            `您可以开启新对话重新开始，或换一种说法后再继续。`,
                     };
                     yield { type: "done" };
                     return;

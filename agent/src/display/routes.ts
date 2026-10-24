@@ -37,6 +37,7 @@ export function createDisplayRouter(options: DisplayRouterOptions): Router {
             intervalMs?: unknown;
             durationMinutes?: unknown;
             refreshCount?: unknown;
+            manual?: unknown;
         };
         const displayNames: Record<string, string> | undefined =
             body.displayNames !== undefined && typeof body.displayNames === "object"

@@ -35,6 +35,8 @@ import {
 } from "./executor/executor.js";
 import { translateError } from "./mcp/tools.js";
 import { createOrchestrator } from "./orchestrator/orchestrator.js";
+import { createDisplayOrchestrator } from "./orchestrator/display_orchestrator.js";
+import { createAgentGroup } from "./orchestrator/agent_group.js";
 import {
     load_valid_config,
     read_pending_marker,
@@ -566,10 +568,16 @@ async function main(): Promise<void> {
     // ── Step 6: Create Agent State Tracker ──
     const stateTracker = new AgentStateTracker(config.site?.name ?? null);
 
-    // ── Step 7: Create C4 Agent ──
+    // ── Step 7: Create Agent Group（agent.md §2.0 双 Agent 组，2026-10-24）──
+    // 单进程双编排器：接入编排器（缺口驱动九阶段流水线）+ 展示编排器（轻量
+    // 意图→工具→回复），共享 LLM 客户端 / registry / DisplayService 等进程内单例；
+    // 会话按 {agent}:{conversationId} 分桶，请求 agent 字段路由（缺省 access）。
+    // 展示编排器不接收任何接入工具；接入编排器不再接收 displayTools（§2.0.3
+    // 工具集互斥——handle_display_intent 已删除，劫持通道结构性不存在）。
     let agent: C4Agent;
+    let agentGroup: ReturnType<typeof createAgentGroup>;
     try {
-        agent = createOrchestrator({
+        const accessOrchestrator = createOrchestrator({
             model,
             registry,
             mcpManager,
@@ -580,12 +588,23 @@ async function main(): Promise<void> {
             site: config.site ?? null,
             state: stateTracker,
             agentLogger,
-            displayTools,
         });
-        logger.info("SuperWorker Agent 已创建");
+        const displayOrchestrator = createDisplayOrchestrator({
+            model,
+            tools: displayTools,
+            agentLogger,
+            // §2.4.2 订阅窗口并存：取消竞态补偿——回合中止时停掉本回合建立的显示
+            stopActiveDisplay: () => displayService.stop(),
+        });
+        agentGroup = createAgentGroup({
+            access: accessOrchestrator,
+            display: displayOrchestrator,
+        });
+        agent = agentGroup;
+        logger.info("Agent Group 已创建（数据接入 + 数据展示，单进程双编排器）");
     } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
-        logger.error(`FATAL: 无法创建 SuperWorker: ${msg}`);
+        logger.error(`FATAL: 无法创建 Agent Group: ${msg}`);
         process.exit(1);
     }
 
@@ -629,8 +648,11 @@ async function main(): Promise<void> {
         stateWriter: stateTracker,
         generateSiteAbbr,
         // 场站重绑定：POST /api/site 成功后回灌运行中编排器（2026-10-06 用户指令：
-        // 场站修改后后续工作立即生效，无需重启）
+        // 场站修改后后续工作立即生效，无需重启；双 Agent 下场站归接入域，§2.0.3）
         rebindSite: (site) => agent.rebindSite(site),
+        // 双 ESC 结构化取消（web.md §3.7.6）：显示会话终止 + 在途回合中止
+        displayService,
+        cancelTurn: () => agentGroup.cancelActiveTurn(),
         // MCP 存活状态＝连接状态推导（c4_architecture.md §3.1.1，C4_RS_00060/00068）
         aliveProvider: () => mcpManager.aliveStates(),
     });

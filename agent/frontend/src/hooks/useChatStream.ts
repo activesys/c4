@@ -49,6 +49,8 @@ export interface ChatBubble {
   role: "user" | "agent" | "error";
   content: string;
   display?: string;
+  /** 该轮的对话目标 Agent（web.md §3.7.4——history 分桶回传与气泡徽标依据） */
+  origin?: "access" | "display";
 }
 
 export interface UseChatStreamReturn {
@@ -65,6 +67,7 @@ export interface UseChatStreamReturn {
     message: string,
     history?: ChatMessage[],
     conversationId?: string,
+    agent?: "access" | "display",
   ) => Promise<void>;
   streamEcho: (content: string) => void;
   endEcho: () => void;
@@ -155,7 +158,11 @@ export function useChatStream(): UseChatStreamReturn {
     }
     const id = nextId("agent");
     echoBubbleIdRef.current = id;
-    setMessages((prev) => [...prev, { id, role: "agent", content }]);
+    // 上传固定路由数据接入 Agent（agent.md §2.0.2）——回显气泡归属 access 桶
+    setMessages((prev) => [
+      ...prev,
+      { id, role: "agent", content, origin: "access" as const },
+    ]);
   }, []);
 
   const endEcho = useCallback(() => {
@@ -187,6 +194,7 @@ export function useChatStream(): UseChatStreamReturn {
       message: string,
       history: ChatMessage[] = [],
       conversationId?: string,
+      agent: "access" | "display" = "access",
     ): Promise<void> => {
       // Cancel any in-flight stream before starting a new one.
       abortRef.current?.abort();
@@ -221,8 +229,9 @@ export function useChatStream(): UseChatStreamReturn {
           role: "user",
           content: message,
           ...(label ? { display: label } : {}),
+          origin: agent,
         },
-        { id: agentId, role: "agent", content: "" },
+        { id: agentId, role: "agent", content: "", origin: agent },
       ]);
       setAssistantText("");
       setToolCards([]);
@@ -236,6 +245,7 @@ export function useChatStream(): UseChatStreamReturn {
           {
             message,
             conversationId: effectiveCid,
+            agent,
             history: truncateHistory(history),
           },
           (ev: SseEvent) => {

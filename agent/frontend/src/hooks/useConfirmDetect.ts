@@ -56,7 +56,7 @@ export function matchConfirmPhrase(accumulatedText: string): boolean {
  * Rendered in the chat bubble; the raw envelope still travels on the wire.
  */
 export function buttonDisplayLabel(text: string): string | null {
+  // 取消哨兵已废除（2026-10-24：取消不经文本——双 ESC，web.md §3.7.6）
   if (text.startsWith(CONFIRM_KEYWORD)) return "确认";
-  if (text.startsWith(CANCEL_KEYWORD)) return "取消，不执行";
   return null;
 }

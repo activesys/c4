@@ -28,7 +28,9 @@ export interface CumulativeRecord {
 
 export interface PointSnapshot {
     key: string;
-    /** 用户输入的中文点名（display_points displayNames 传入）；缺省时前端回退显示 key */
+    /** 设备归属名（注册表前缀判定，与 list_points 同源；Web 表格设备列数据源） */
+    device: string;
+    /** 用户输入的中文点名（display_points displayNames 传入）；缺省时前端回退显示裸 id */
     name?: string;
     value: number | string | null;
     timestampMs: number | null;
@@ -64,6 +66,8 @@ export interface DisplayPayload {
 
 interface SessionPoint {
     key: string;
+    /** 设备归属名（注册表前缀判定，与 list_points 同源） */
+    device: string;
     /** 用户输入的中文点名（可选，随会话驻留内存） */
     name?: string;
     shmId: number;
@@ -83,6 +87,8 @@ interface SessionPoint {
 }
 
 const FREQ_WINDOW_MS = 60_000;
+/** 缺省展示时长（agent.md §3.6.7④：用户未明示 → duration 30s，2026-10-24 设计决定） */
+const DEFAULT_TERMINATE_MS = 30_000;
 const MAX_CUMULATIVE = 600;
 const MAX_CONSECUTIVE_FAILURES = 3;
 
@@ -239,6 +245,8 @@ export class DisplayService {
         intervalMs?: number;
         durationMinutes?: number;
         refreshCount?: number;
+        /** 「一直显示」——仅显式词形触发（agent.md §3.6.3 缺省终止语义） */
+        manual?: boolean;
     }): SessionSnapshot {
         const intervalMs = options.intervalMs ?? 1000;
         if (intervalMs < 250) {
@@ -249,6 +257,10 @@ export class DisplayService {
         }
         if (options.pointKeys.length > 1000) {
             throw new Error("TOO_MANY_POINTS: pointKeys exceeds read_points single-call limit (1000)");
+        }
+        // 累积模式批量上限（agent.md §3.6.7：每点 600 条缓冲 × >100 点不可控）
+        if ((options.mode ?? "realtime") === "cumulative" && options.pointKeys.length > 100) {
+            throw new Error("TOO_MANY_CUMULATIVE: cumulative mode allows at most 100 points");
         }
 
         // key → shm_id 解析（config.json 的 writer 已接入点位）
@@ -266,6 +278,7 @@ export class DisplayService {
                         : undefined;
                 points.push({
                     key,
+                    device: hit.device,
                     name,
                     shmId: hit.shm_id,
                     value: null,
@@ -288,7 +301,9 @@ export class DisplayService {
         // 切换即取消：隐式结束旧会话
         this.endSession("replaced");
 
-        let terminate: ActiveSession["terminate"] = { kind: "manual" };
+        // 终止缺省语义（agent.md §3.6.3，2026-10-24）：用户未明示时长/次数且未说
+        // 「一直显示」→ duration 30s；manual 仅显式词形触发、永不作缺省
+        let terminate: ActiveSession["terminate"];
         if (options.durationMinutes !== undefined) {
             terminate = {
                 kind: "duration",
@@ -296,6 +311,10 @@ export class DisplayService {
             };
         } else if (options.refreshCount !== undefined) {
             terminate = { kind: "count", budget: options.refreshCount };
+        } else if (options.manual === true) {
+            terminate = { kind: "manual" };
+        } else {
+            terminate = { kind: "duration", deadlineMs: nowMs() + DEFAULT_TERMINATE_MS };
         }
 
         const session: ActiveSession = {
@@ -532,6 +551,7 @@ export class DisplayService {
         const points: PointSnapshot[] = s.points.map((p) => {
             const snap: PointSnapshot = {
                 key: p.key,
+                device: p.device,
                 value: p.value,
                 timestampMs: p.timestampMs,
                 state: p.state,

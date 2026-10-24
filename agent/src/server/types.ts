@@ -11,6 +11,11 @@ export interface AgentInvokeInput {
   /** 会话 ID（用于运行日志关联；由 chat 路由生成并传入） */
   conversationId?: string;
   /**
+   * 对话目标 Agent（agent.md §2.0.2 双 Agent 路由）：缺省 "access"——存量脚本与
+   * 旧前端零改动；"display" 进数据展示编排器。/api/upload 固定接入（不传该字段）。
+   */
+  agent?: "access" | "display";
+  /**
    * 取消信号（客户端断开/SSE 中止时触发）：编排器透传给在途 LLM 调用——
    * 立即中断而非跑完，dying 回合不再产生后续事件与 phase 写入
    * （2026-10-05：开新对话后徽标被旧回合改回「收集信息中」的根因）

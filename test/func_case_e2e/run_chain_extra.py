@@ -307,7 +307,10 @@ def s45():
         raise rc.Fail(f"45①: 冲突未决进入可确认方案: {text1[:200]}")
     if not json_unchanged(before):
         raise rc.Fail("45①: 冲突请求写入了 config")
-    conv.send("取消")
+    # 2.1.88 废除文本取消（agent.md §2.4.2：仅双 ESC / 开启新对话）——旧用法
+    # send("取消") 已无法丢弃草稿，MSG45B 会并入旧 3009 重叠点；改用新会话等价
+    # 丢弃冲突草稿（旧会话草稿按 cid 隔离留存，新会话以全新草稿开始）
+    conv = rc.Conv()
     base.flow(conv, MSG45B,
               done=lambda: modbus_writer_of(rc.read_config(), 3000) is not None)
     cfg = rc.wait_config(lambda c: modbus_writer_of(c, 3000) is not None

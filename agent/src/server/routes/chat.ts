@@ -20,6 +20,8 @@ interface ChatRequestBody {
     interruptId?: string;
     /** Conversation ID for multi-turn state */
     conversationId?: string;
+    /** 对话目标 Agent（agent.md §2.0.2）：缺省 "access"；仅接受 access|display */
+    agent?: string;
     /** Previous message history (optional, server can reconstruct from state) */
     history?: Array<{ role: string; content: string }>;
 }
@@ -74,6 +76,19 @@ export function createChatRouter(agent: C4Agent): Router {
             return;
         }
 
+        // 双 Agent 路由（agent.md §2.0.2）：缺省 access；非法值 400（实现期定稿：
+        // 拒绝而非静默缺省——显式写错目标属客户端 bug，静默吞掉会错路由整轮对话）
+        let agentTarget: "access" | "display" = "access";
+        if (body.agent !== undefined) {
+            if (body.agent !== "access" && body.agent !== "display") {
+                res.status(400).json({
+                    error: 'Invalid request: \'agent\' must be "access" or "display"',
+                });
+                return;
+            }
+            agentTarget = body.agent;
+        }
+
         // Determine conversation ID (new or resumed)
         // （2026-09-28 修复）前端首消息传空串 conversationId——`??` 不挡空串，
         // 会话键退化为 "" 且回传空串不被前端存储；上传轮再生成新 ID 时同会话
@@ -124,6 +139,7 @@ export function createChatRouter(agent: C4Agent): Router {
         const stream = agent.invoke({
             messages,
             conversationId,
+            agent: agentTarget,
             signal: controller.signal,
         });
         res.on("close", () => {
@@ -148,12 +164,13 @@ export function createChatRouter(agent: C4Agent): Router {
                         type: "text",
                         content: event.content,
                         conversationId,
+                        agent: agentTarget,
                     });
                     break;
 
                 case "button_arm":
                     // §2.4.4 回合终结按钮判定（web.md §3.1.3 v0.2.0）
-                    sendSSE(res, null, { type: "button_arm", conversationId });
+                    sendSSE(res, null, { type: "button_arm", conversationId, agent: agentTarget });
                     break;
 
                 case "button_disarm":
@@ -161,6 +178,7 @@ export function createChatRouter(agent: C4Agent): Router {
                         type: "button_disarm",
                         reason: event.reason,
                         conversationId,
+                        agent: agentTarget,
                     });
                     break;
 
@@ -170,6 +188,7 @@ export function createChatRouter(agent: C4Agent): Router {
                         name: event.name,
                         args: event.args,
                         conversationId,
+                        agent: agentTarget,
                     });
                     break;
 
@@ -179,6 +198,7 @@ export function createChatRouter(agent: C4Agent): Router {
                         name: event.name,
                         result: event.result,
                         conversationId,
+                        agent: agentTarget,
                     });
                     break;
 
@@ -190,18 +210,20 @@ export function createChatRouter(agent: C4Agent): Router {
                         message: event.message,
                         interruptId: event.interruptId,
                         conversationId,
+                        agent: agentTarget,
                     });
                     // Keep connection open for the client to send resume
                     break;
 
                 case "done":
-                    sendSSE(res, "done", { conversationId });
+                    sendSSE(res, "done", { conversationId, agent: agentTarget });
                     break;
 
                 case "error":
                     sendSSE(res, "error", {
                         message: event.message,
                         conversationId,
+                        agent: agentTarget,
                     });
                     break;
 
@@ -219,7 +241,7 @@ export function createChatRouter(agent: C4Agent): Router {
             if (closed) return;
             const message =
                 err instanceof Error ? err.message : String(err);
-            sendSSE(res, "error", { message, conversationId });
+            sendSSE(res, "error", { message, conversationId, agent: agentTarget });
             res.end();
         }
 

@@ -25,6 +25,9 @@ export interface ChatMessage {
 export interface ChatRequest {
   message: string;
   conversationId?: string;
+  /** 对话目标 Agent（agent.md §2.0.2）：缺省 access；@ 选择/Tab 切换由前端转为
+   *  结构化字段（后端不解析自由文本 @），SSE 事件回显同名字段（前端不消费） */
+  agent?: "access" | "display";
   history?: ChatMessage[];
 }
 

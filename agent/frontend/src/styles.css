@@ -1237,378 +1237,255 @@ input {
   background: var(--primary-hover);
 }
 
-/* ── 对点核验显示卡片（PointDisplayPanel）── */
-
-.pdp {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-3);
-  padding: var(--space-4);
-  background: var(--bg-elev);
-  border: 1px solid var(--border-weak);
-  border-radius: var(--radius-xl);
+/* ── 点位显示表格（PointDisplayTable，web.md §3.5 三列表格范式）── */
+.pdt {
+    margin: 0 auto 16px;
+    width: 100%;
+    max-width: 840px;
+    border-top: 1px solid rgba(0, 0, 0, 0.08);
+    padding-top: 8px;
+}
+.pdt__info {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    padding: 6px 4px;
+    position: sticky;
+    top: 0;
+    background: var(--bg-main, #ffffff);
+    z-index: 2;
+}
+.pdt__info-main {
+    font-size: 13px;
+    color: #61666b;
+}
+.pdt__esc-hint {
+    font-size: 12px;
+    color: #81858c;
+    flex-shrink: 0;
+}
+.pdt__degraded {
+    background: #fdf6e3;
+    color: #9a7b1c;
+    border: 1px solid rgba(154, 123, 28, 0.25);
+    border-radius: 8px;
+    padding: 6px 10px;
+    font-size: 13px;
+    margin-bottom: 6px;
+}
+.pdt__scroll {
+    max-height: 320px;
+    overflow-y: auto;
+    border: 1px solid rgba(0, 0, 0, 0.08);
+    border-radius: 10px;
+}
+.pdt__table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 14px;
+}
+.pdt__table th {
+    text-align: left;
+    font-weight: 500;
+    color: #61666b;
+    font-size: 12px;
+    padding: 6px 12px;
+    border-bottom: 1px solid rgba(0, 0, 0, 0.08);
+    position: sticky;
+    top: 0;
+    background: #ffffff;
+}
+.pdt__table td {
+    padding: 6px 12px;
+    border-bottom: 1px solid rgba(0, 0, 0, 0.04);
+    vertical-align: top;
+}
+.pdt__device {
+    color: #0f1115;
+    white-space: nowrap;
+}
+.pdt__name {
+    color: #0f1115;
+    word-break: break-all;
+}
+.pdt__value {
+    width: 46%;
+}
+.pdt__main {
+    display: block;
+    font-variant-numeric: tabular-nums;
+    color: #0f1115;
+}
+.pdt__main--no_data {
+    color: #81858c;
+}
+.pdt__main--stale {
+    color: #b8860b;
+}
+.pdt__sub {
+    display: block;
+    font-size: 12px;
+    color: #81858c;
+    margin-top: 2px;
+}
+.pdt__row--expandable {
+    cursor: pointer;
+}
+.pdt__row--expandable:hover {
+    background: rgba(38, 49, 72, 0.04);
+}
+.pdt__expand td {
+    background: #f9fafb;
+}
+.pdt__records {
+    list-style: none;
+    margin: 0;
+    padding: 4px 12px;
+    font-size: 12px;
+    color: #61666b;
+    font-variant-numeric: tabular-nums;
+}
+.pdt__records li {
+    display: flex;
+    justify-content: space-between;
+    padding: 1px 0;
+}
+.pdt--ended {
+    border-top: none;
+}
+.pdt__ended-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 4px;
+    font-size: 13px;
+    color: #61666b;
+}
+.pdt__resubscribe {
+    border: 1px solid rgba(57, 100, 254, 0.4);
+    color: #3964fe;
+    background: transparent;
+    border-radius: 8px;
+    padding: 4px 12px;
+    font-size: 13px;
+    cursor: pointer;
+}
+.pdt__resubscribe:hover {
+    background: rgba(57, 100, 254, 0.08);
+}
+.pdt__error {
+    color: #cf4242;
+    font-size: 12px;
+    margin: 4px 0 0;
 }
 
-.pdp__head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  font-size: 13px;
-  color: var(--text-muted);
+/* ── Agent 切换指示器（AgentSwitcher，web.md §3.7.1~3.7.3）── */
+.chat-view__switcher-row {
+    display: flex;
+    justify-content: center;
+    margin-top: 6px;
+}
+.agent-switcher {
+    position: relative;
+}
+.agent-switcher__trigger {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    border: 1px solid rgba(0, 0, 0, 0.1);
+    background: transparent;
+    border-radius: 999px;
+    padding: 3px 14px;
+    font-size: 12px;
+    color: #61666b;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+.agent-switcher__trigger:hover {
+    background: rgba(38, 49, 72, 0.06);
+}
+.agent-switcher__dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #3964fe;
+}
+.agent-switcher__dot--display,
+.agent-switcher__trigger--display .agent-switcher__dot {
+    background: #22c55e;
+}
+.agent-switcher__trigger--access .agent-switcher__dot {
+    background: #3964fe;
+}
+.agent-switcher__arrow {
+    font-size: 10px;
+    color: #81858c;
+}
+.agent-switcher__popup {
+    position: absolute;
+    bottom: calc(100% + 6px);
+    left: 50%;
+    transform: translateX(-50%);
+    background: #ffffff;
+    border: 1px solid rgba(0, 0, 0, 0.1);
+    border-radius: 10px;
+    box-shadow: 0 8px 24px rgba(15, 17, 21, 0.12);
+    padding: 4px;
+    min-width: 150px;
+    z-index: 30;
+}
+.agent-switcher__option {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    border: none;
+    background: transparent;
+    border-radius: 8px;
+    padding: 7px 10px;
+    font-size: 13px;
+    color: #0f1115;
+    cursor: pointer;
+    text-align: left;
+}
+.agent-switcher__option:hover {
+    background: rgba(38, 49, 72, 0.06);
+}
+.agent-switcher__option--active {
+    background: rgba(57, 100, 254, 0.08);
+    color: #3964fe;
+}
+.agent-switcher__check {
+    margin-left: auto;
+    color: #3964fe;
 }
 
-.pdp__stop {
-  border: none;
-  background: transparent;
-  color: var(--text-muted);
-  cursor: pointer;
-  font-size: 13px;
-  border-radius: var(--radius-sm);
-  transition: color var(--transition), background var(--transition);
+/* 用户气泡的目标徽标（web.md §3.7.2④——消息去向可追溯） */
+.chat-bubble__origin {
+    display: block;
+    font-size: 11px;
+    color: #81858c;
+    margin-top: 4px;
 }
 
-.pdp__stop:hover {
-  color: var(--error);
-  background: var(--error-bg);
+/* 双 ESC 首次按键 toast（web.md §3.7.6） */
+.app__esc-toast {
+    position: fixed;
+    bottom: 96px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: rgba(15, 17, 21, 0.86);
+    color: #ffffff;
+    font-size: 13px;
+    border-radius: 999px;
+    padding: 7px 16px;
+    z-index: 200;
+    pointer-events: none;
 }
 
-.pdp__point {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
-  padding: var(--space-3);
-  border: 1px solid var(--border-weak);
-  border-radius: var(--radius-md);
-  background: var(--bg-sidebar);
-}
-
-.pdp__point-head {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  min-width: 0;
-}
-
-.pdp__name {
-  display: flex;
-  align-items: baseline;
-  gap: var(--space-2);
-  min-width: 0;
-  font-weight: 600;
-  font-size: 14px;
-}
-
-.pdp__key-sub {
-  font-weight: 400;
-  font-size: 11px;
-  color: var(--text-tertiary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.pdp__badge {
-  margin-left: auto;
-  padding: 1px 8px;
-  border-radius: 999px;
-  font-size: 11px;
-  white-space: nowrap;
-}
-
-.pdp__badge--ok {
-  background: var(--success-tint);
-  color: var(--color-confirmed);
-}
-
-.pdp__badge--nodata {
-  background: var(--neutral-tint);
-  color: var(--text-muted);
-}
-
-.pdp__badge--stale {
-  background: var(--warning-tint);
-  color: var(--color-executing);
-}
-
-.pdp__point-stop {
-  border: none;
-  background: transparent;
-  color: var(--text-tertiary);
-  cursor: pointer;
-  font-size: 12px;
-  border-radius: var(--radius-sm);
-  transition: color var(--transition);
-}
-
-.pdp__point-stop:hover {
-  color: var(--error);
-}
-
-.pdp__value {
-  font-size: 26px;
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-}
-
-.pdp__meta {
-  font-size: 12px;
-  color: var(--text-muted);
-}
-
-.pdp__records {
-  border-collapse: collapse;
-  font-size: 12px;
-  font-variant-numeric: tabular-nums;
-}
-
-.pdp__records td {
-  padding: 2px 12px 2px 0;
-  color: var(--text-muted);
-}
-
-.pdp__records td:last-child {
-  color: var(--text);
-}
-
-.pdp__resubscribe {
-  border: none;
-  background: transparent;
-  color: var(--primary);
-  cursor: pointer;
-  font-size: 13px;
-  text-decoration: underline;
-}
-
-.pdp--ended {
-  font-size: 13px;
-  color: var(--text-muted);
-}
-
-/* ── Agent 回复 Markdown 渲染样式（DeepSeek：正文 16px/28px；2026-10-05
-   用户指令：层次化排版——标题字号/加重阶梯、表格呈现点表与采集转发关系）── */
-.chat-bubble--agent .md > :first-child { margin-top: 0; }
-.chat-bubble--agent .md > :last-child { margin-bottom: 0; }
-.chat-bubble--agent .md p { margin: 0.5em 0; line-height: 1.75; }
-.chat-bubble--agent .md h1,
-.chat-bubble--agent .md h2,
-.chat-bubble--agent .md h3,
-.chat-bubble--agent .md h4 {
-  margin: 1.35em 0 0.55em;
-  line-height: 1.4;
-  font-weight: 700;
-  color: var(--text);
-}
-.chat-bubble--agent .md h1 {
-  font-size: 1.375em;
-  padding-bottom: 0.3em;
-  border-bottom: 1px solid var(--border-weak);
-}
-.chat-bubble--agent .md h2 { font-size: 1.2em; }
-.chat-bubble--agent .md h3 { font-size: 1.08em; }
-.chat-bubble--agent .md h4 { font-size: 1em; }
-.chat-bubble--agent .md strong { font-weight: 650; }
-.chat-bubble--agent .md ul,
-.chat-bubble--agent .md ol { margin: 0.5em 0; padding-left: 1.4em; }
-.chat-bubble--agent .md li { margin: 0.25em 0; }
-.chat-bubble--agent .md table {
-  border-collapse: collapse;
-  margin: 0.6em 0;
-  font-size: 0.9375em;
-  display: block;
-  overflow-x: auto;
-  max-width: 100%;
-}
-.chat-bubble--agent .md th,
-.chat-bubble--agent .md td {
-  border: none;
-  border-bottom: 1px solid var(--border-weak);
-  padding: 0.45em 0.85em;
-  text-align: left;
-  white-space: nowrap;
-}
-.chat-bubble--agent .md th {
-  background: var(--bg-subtle);
-  font-weight: 650;
-  border-bottom: 2px solid var(--border);
-}
-.chat-bubble--agent .md tbody tr:nth-child(even) { background: var(--bg-subtle-2, transparent); }
-.chat-bubble--agent .md code {
-  background: var(--bg-subtle-2);
-  padding: 0.1em 0.4em;
-  border-radius: 6px;
-  font-size: 0.875em;
-  font-family: var(--font-mono);
-}
-.chat-bubble--agent .md pre {
-  background: var(--bg-subtle);
-  border: 1px solid var(--border-weak);
-  padding: 0.75em 1em;
-  border-radius: var(--radius-md);
-  overflow-x: auto;
-}
-.chat-bubble--agent .md pre code { background: none; padding: 0; }
-.chat-bubble--agent .md blockquote {
-  margin: 0.5em 0;
-  padding-left: 0.8em;
-  border-left: 3px solid var(--border);
-  color: var(--text-muted);
-}
-.chat-bubble--agent .md hr { border: none; border-top: 1px solid var(--border-weak); margin: 0.8em 0; }
-.chat-bubble--agent .md a { color: var(--primary); }
-
-/* ─── 落地形态（www.deepseek.com 风格 hero）────────────────────── */
-
-/* 背景：淡蓝云雾团 + 细网格（www.deepseek.com 首屏观感，纯 CSS 绘制）。
-   网格两层 1px 线性渐变平铺，云雾为多层大尺度径向渐变。 */
-/* 落地页背景：7 张同形式变体（云雾团 + 网格线），每次启动随机选择
-   （App.tsx bgIndex）；形式一致——双层正交网格 + 5 团低饱和雾彩 + 浅色
-   纵向底色，变体间仅色相/网格间距/云雾位置不同，饱和度压低不艳丽 */
-.app--landing.bg-0 {
-  /* 蓝雾 */
-  background:
-    linear-gradient(rgba(99, 125, 197, 0.055) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(99, 125, 197, 0.055) 1px, transparent 1px),
-    radial-gradient(560px 420px at 66% 4%, rgba(139, 162, 219, 0.5), transparent 65%),
-    radial-gradient(640px 480px at 6% 40%, rgba(148, 170, 223, 0.48), transparent 65%),
-    radial-gradient(700px 520px at 98% 66%, rgba(148, 170, 223, 0.42), transparent 65%),
-    radial-gradient(520px 380px at 34% 94%, rgba(167, 186, 231, 0.32), transparent 65%),
-    radial-gradient(460px 360px at 52% 52%, rgba(196, 209, 240, 0.28), transparent 70%),
-    linear-gradient(180deg, #f3f5fb 0%, #eaeef8 52%, #eef1f8 100%);
-  background-size: 88px 88px, 88px 88px, auto, auto, auto, auto, auto, auto;
-}
-.app--landing.bg-1 {
-  /* 青碧 */
-  background:
-    linear-gradient(rgba(96, 158, 165, 0.05) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(96, 158, 165, 0.05) 1px, transparent 1px),
-    radial-gradient(600px 440px at 20% 6%, rgba(125, 190, 192, 0.42), transparent 65%),
-    radial-gradient(560px 420px at 88% 22%, rgba(140, 200, 198, 0.38), transparent 65%),
-    radial-gradient(660px 500px at 70% 78%, rgba(120, 185, 185, 0.4), transparent 65%),
-    radial-gradient(480px 360px at 12% 88%, rgba(160, 205, 205, 0.34), transparent 68%),
-    radial-gradient(420px 340px at 46% 46%, rgba(180, 215, 214, 0.28), transparent 70%),
-    linear-gradient(180deg, #f1f7f7 0%, #e7f0f0 52%, #eaf2f1 100%);
-  background-size: 76px 76px, 76px 76px, auto, auto, auto, auto, auto, auto;
-}
-.app--landing.bg-2 {
-  /* 紫藤 */
-  background:
-    linear-gradient(rgba(140, 125, 190, 0.05) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(140, 125, 190, 0.05) 1px, transparent 1px),
-    radial-gradient(620px 460px at 78% 8%, rgba(168, 152, 214, 0.42), transparent 65%),
-    radial-gradient(540px 420px at 8% 34%, rgba(178, 164, 220, 0.4), transparent 65%),
-    radial-gradient(680px 520px at 92% 70%, rgba(160, 145, 210, 0.4), transparent 65%),
-    radial-gradient(500px 380px at 30% 92%, rgba(190, 178, 226, 0.32), transparent 68%),
-    radial-gradient(440px 340px at 50% 50%, rgba(206, 196, 234, 0.28), transparent 70%),
-    linear-gradient(180deg, #f5f3fa 0%, #ece9f5 52%, #efedf7 100%);
-  background-size: 96px 96px, 96px 96px, auto, auto, auto, auto, auto, auto;
-}
-.app--landing.bg-3 {
-  /* 苔绿 */
-  background:
-    linear-gradient(rgba(110, 150, 125, 0.05) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(110, 150, 125, 0.05) 1px, transparent 1px),
-    radial-gradient(600px 440px at 24% 8%, rgba(140, 185, 158, 0.4), transparent 65%),
-    radial-gradient(560px 420px at 90% 36%, rgba(150, 192, 168, 0.38), transparent 65%),
-    radial-gradient(640px 500px at 66% 74%, rgba(132, 180, 152, 0.38), transparent 65%),
-    radial-gradient(480px 360px at 10% 90%, rgba(165, 200, 178, 0.32), transparent 68%),
-    radial-gradient(420px 330px at 44% 44%, rgba(190, 214, 198, 0.26), transparent 70%),
-    linear-gradient(180deg, #f2f7f3 0%, #e9f1ea 52%, #ecf2ed 100%);
-  background-size: 68px 68px, 68px 68px, auto, auto, auto, auto, auto, auto;
-}
-.app--landing.bg-4 {
-  /* 暖砂 */
-  background:
-    linear-gradient(rgba(178, 150, 108, 0.05) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(178, 150, 108, 0.05) 1px, transparent 1px),
-    radial-gradient(620px 460px at 70% 6%, rgba(214, 188, 142, 0.4), transparent 65%),
-    radial-gradient(560px 420px at 10% 30%, rgba(219, 196, 152, 0.38), transparent 65%),
-    radial-gradient(680px 500px at 96% 62%, rgba(206, 178, 130, 0.36), transparent 65%),
-    radial-gradient(500px 380px at 28% 92%, rgba(222, 202, 162, 0.32), transparent 68%),
-    radial-gradient(430px 340px at 54% 48%, rgba(230, 214, 180, 0.26), transparent 70%),
-    linear-gradient(180deg, #f9f6f0 0%, #f2ede2 52%, #f4efe6 100%);
-  background-size: 104px 104px, 104px 104px, auto, auto, auto, auto, auto, auto;
-}
-.app--landing.bg-5 {
-  /* 灰玫 */
-  background:
-    linear-gradient(rgba(178, 122, 138, 0.05) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(178, 122, 138, 0.05) 1px, transparent 1px),
-    radial-gradient(600px 440px at 18% 10%, rgba(212, 152, 168, 0.38), transparent 65%),
-    radial-gradient(560px 420px at 86% 30%, rgba(216, 160, 175, 0.36), transparent 65%),
-    radial-gradient(660px 500px at 72% 76%, rgba(204, 144, 160, 0.36), transparent 65%),
-    radial-gradient(480px 360px at 14% 86%, rgba(220, 172, 185, 0.32), transparent 68%),
-    radial-gradient(430px 340px at 48% 48%, rgba(230, 192, 202, 0.26), transparent 70%),
-    linear-gradient(180deg, #f9f3f5 0%, #f2e8ec 52%, #f5edf0 100%);
-  background-size: 82px 82px, 82px 82px, auto, auto, auto, auto, auto, auto;
-}
-.app--landing.bg-6 {
-  /* 石板青 */
-  background:
-    linear-gradient(rgba(102, 132, 162, 0.055) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(102, 132, 162, 0.055) 1px, transparent 1px),
-    radial-gradient(620px 460px at 60% 6%, rgba(138, 164, 196, 0.46), transparent 65%),
-    radial-gradient(560px 420px at 4% 44%, rgba(146, 170, 200, 0.44), transparent 65%),
-    radial-gradient(700px 520px at 96% 60%, rgba(128, 156, 190, 0.4), transparent 65%),
-    radial-gradient(520px 380px at 36% 96%, rgba(160, 182, 208, 0.34), transparent 68%),
-    radial-gradient(460px 360px at 50% 46%, rgba(188, 202, 222, 0.28), transparent 70%),
-    linear-gradient(180deg, #f2f4f8 0%, #e9edf3 52%, #edf0f6 100%);
-  background-size: 92px 92px, 92px 92px, auto, auto, auto, auto, auto, auto;
-}
-
-/* hero + 输入框 + 免责声明整组垂直居中，营造官网首页的留白感。
-   栏宽对齐 www.deepseek.com 输入框尺度（约 880px）。 */
-.chat-view--landing {
-  justify-content: center;
-  gap: var(--space-5);
-  padding-bottom: var(--space-6);
-  min-height: 100%;
-  max-width: 880px;
-}
-
-.hero {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  text-align: center;
-  gap: var(--space-4);
-  animation: hero-rise 0.45s ease both;
-}
-
-@keyframes hero-rise {
-  from {
-    opacity: 0;
-    transform: translateY(12px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-
-/* eyebrow：heroTitleSub 式大写小字，蓝色宽字距 */
-.hero__eyebrow {
-  margin: 0;
-  font-size: 12px;
-  font-weight: 600;
-  letter-spacing: 0.32em;
-  text-indent: 0.32em; /* 抵消末字符字距，保持视觉居中 */
-  color: var(--primary);
-  text-transform: uppercase;
-}
-
-/* 主标题：探索未至之境式超大居中标题 */
-.hero__title {
-  margin: 0;
-  font-size: clamp(36px, 6vw, 58px);
-  font-weight: 600;
-  line-height: 1.2;
-  letter-spacing: 0.01em;
-  color: var(--text);
-}
-
-.chat-view__disclaimer {
-  margin: 0;
-  font-size: 12px;
-  color: var(--text-tertiary);
-  text-align: center;
+/* 上传门控置灰（web.md §3.7.5） */
+.file-upload__button--disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
 }

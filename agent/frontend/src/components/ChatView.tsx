@@ -1,5 +1,5 @@
 // c4/agent/frontend/src/components/ChatView.tsx
-// Main chat view — web.md §3.1.
+// Main chat view — web.md §3.1/§3.7（双 Agent 交互，2026-10-24 P2）。
 //
 // 双形态布局：
 //   - 落地形态（landing prop，无任何消息时）：www.deepseek.com 风格 hero 居中
@@ -9,21 +9,29 @@
 // 两种形态共用同一套输入框/testid/发送逻辑（e2e 依赖不变）；首次发送或上传
 // 时回调 onStarted 通知 App 切换外壳（显示侧栏）。
 //
-// History truncation is applied inside useChatStream.send, so by the time
-// the POST leaves the browser the body is already bounded to N rounds.
+// 双 Agent（agent.md §2.0 / web.md §3.7）：
+//   - 输入框正下方居中 AgentSwitcher 指示当前目标（默认数据接入，不记忆）；
+//     @ 弹出选择浮层、Tab 循环切换——切换唯一通道 = 显式手势；
+//   - 提交门控（web.md §3.5.6）：活跃显示会话期间发送禁用（含 manual），
+//     输入框保持可编辑（草稿保留）；上传门控 = 目标接入 且 无活跃显示（交集）；
+//   - history 分桶（web.md §3.1.2）：气泡携带 origin，发送时仅回传当前目标的
+//     history——两 Agent 上下文在后端互不串（agent.md §2.0.1）；
+//   - 点位显示表格（PointDisplayTable）随 useDisplaySession 页面级常驻轮询渲染。
 
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { useChatStream, type ChatBubble } from "@frontend/hooks/useChatStream";
 import {
   CONFIRM_KEYWORD,
-  CANCEL_KEYWORD,
   matchConfirmPhrase,
 } from "@frontend/hooks/useConfirmDetect";
+import { useAgentTarget } from "@frontend/hooks/useAgentTarget";
+import { useDisplaySession } from "@frontend/hooks/useDisplaySession";
+import { AgentSwitcher } from "./AgentSwitcher";
 import { ConfirmButtons } from "./ConfirmButtons";
 import { FileUpload } from "./FileUpload";
 import { LandingHero } from "./LandingHero";
 import { Markdown } from "./Markdown";
-import { PointDisplayPanel } from "./PointDisplayPanel";
+import { PointDisplayTable } from "./PointDisplayTable";
 import { ThinkingBlock } from "./ThinkingBlock";
 import { streamUpload, classifyFileType } from "@frontend/api/upload";
 
@@ -58,6 +66,14 @@ export function ChatView({
   const uploadMessage = "请解析此文件中的设备信息";
   const rootRef = useRef<HTMLDivElement | null>(null);
 
+  // 对话目标 Agent（web.md §3.7）：默认数据接入、不记忆（重挂载即重置）；
+  // @ 浮层开关由输入框键盘驱动
+  const { target, switchTarget, cycleTarget } = useAgentTarget();
+  const [atOpen, setAtOpen] = useState(false);
+
+  // 活跃显示会话页面级常驻轮询（门控与表格渲染同源，web.md §3.5.3/§3.5.6）
+  const { payload: displayPayload, active: displayActive } = useDisplaySession();
+
   // 落地形态的 hero 只在真正「无内容」时展示——消息或工具卡片一旦出现即视为
   // 已进入对话形态（上传轮的工具卡片可能先于用户消息到达）。
   const landingEmpty =
@@ -65,6 +81,11 @@ export function ChatView({
 
   // 回合进行中：输入框与发送按钮共用禁用态
   const streaming = status === "sending" || status === "streaming";
+
+  // 提交门控（web.md §3.5.6）：活跃显示会话期间发送禁用（含 manual——无时长也
+  // 禁用直到双击 ESC 停止）；门控跨目标生效（切换目标不解除）；输入框保持可编辑
+  const sendGated = streaming || displayActive;
+  const uploadGated = streaming || displayActive || target === "display";
 
   // 滚动容器是 app__main（滚动条贴窗口右缘，web.md §3.1 布局约定）——
   // 新消息/思考步骤/计时变化时钉在底部
@@ -95,35 +116,32 @@ export function ChatView({
     [planArmed, assistantText],
   );
 
-  // Reconstruct a minimal history from the bubbles so the confirm/cancel
-  // round-trip includes the prior turns (web.md §3.1.2 多轮上下文).
-  // 后端将 history 原样传给 LangChain，仅接受 user/assistant — 气泡角色 agent 需映射。
+  // history 分桶（web.md §3.1.2/§3.7.4）：仅回传当前目标的气泡——两 Agent 的
+  // 上下文在后端按 {agent}:{conversationId} 分桶互不串（agent.md §2.0.1）。
   const history = useMemo(
     () =>
       messages
-        .filter((m) => m.role !== "error")
+        .filter((m) => m.role !== "error" && (m.origin ?? "access") === target)
         .map((m) => ({
           role: m.role === "agent" ? "assistant" : m.role,
           content: m.content,
         })),
-    [messages],
+    [messages, target],
   );
 
   const handleSend = () => {
     const text = draft.trim();
-    if (!text) return;
+    if (!text || sendGated) return;
     setDraft("");
+    setAtOpen(false);
     onStarted();
-    void send(text, history);
+    void send(text, history, undefined, target);
   };
 
   const handleConfirm = () => {
     onStarted();
-    void send(CONFIRM_KEYWORD, history);
-  };
-  const handleCancel = () => {
-    onStarted();
-    void send(CANCEL_KEYWORD, history);
+    // 确认按钮只在数据接入目标下消费（web.md §3.7.4——展示 Agent 永不产出按钮）
+    void send(CONFIRM_KEYWORD, history, undefined, "access");
   };
 
   const handleFileUpload = async (file: File) => {
@@ -131,7 +149,7 @@ export function ChatView({
     if (classifyFileType(file.name) === "unsupported") {
       // The widget already shows a warning; we still surface a chat-side
       // note so the user sees what happened in context.
-      await send("（文件上传被忽略：暂不支持解析此格式）", history);
+      await send("（文件上传被忽略：暂不支持解析此格式）", history, undefined, "access");
       return;
     }
     try {
@@ -153,26 +171,32 @@ export function ChatView({
           } else if (ev.type === "error") {
             const msg =
               typeof ev.data.message === "string" ? ev.data.message : "文件解析失败";
-            void send(`（文件解析失败：${msg}）`, history);
+            void send(`（文件解析失败：${msg}）`, history, undefined, "access");
           }
         },
       );
       if (returnedCid) setConversationId(returnedCid);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      await send(`（文件上传失败：${msg}）`, history);
+      await send(`（文件上传失败：${msg}）`, history, undefined, "access");
     } finally {
       endEcho();
     }
   };
 
-  // 输入框（落地/对话两形态共用同一实例化 JSX，testid 与发送逻辑单一来源）
+  // 输入框（落地/对话两形态共用同一实例化 JSX，testid 与发送逻辑单一来源）；
+  // 键盘：Enter 发送 / Tab 循环切换目标（§3.7.3，preventDefault）/
+  // @ 打开 Agent 选择浮层（§3.7.2——@ token 不进入 message 文本）
   const inputBox = (
     <div className="chat-view__input">
       <textarea
         data-testid="chat-input"
         aria-label="聊天输入框"
-        placeholder="问点什么，开始接入…"
+        placeholder={
+          target === "display"
+            ? "输入设备名或点名，开始对点核验…"
+            : "问点什么，开始接入…"
+        }
         rows={2}
         value={draft}
         onChange={(e) => setDraft(e.target.value)}
@@ -180,18 +204,42 @@ export function ChatView({
           if (e.key === "Enter" && !e.shiftKey) {
             e.preventDefault();
             handleSend();
+            return;
+          }
+          if (e.key === "Tab") {
+            // Tab 循环切换目标（web.md §3.7.3）：不与页面焦点移动冲突——
+            // 离开输入框用 Esc/点击
+            e.preventDefault();
+            cycleTarget();
+            return;
+          }
+          if (e.key === "@") {
+            e.preventDefault();
+            setAtOpen(true);
           }
         }}
         disabled={streaming}
       />
       <div className="chat-view__input-row">
-        <FileUpload onUpload={(file) => void handleFileUpload(file)} />
+        <FileUpload
+          onUpload={(file) => void handleFileUpload(file)}
+          disabled={uploadGated}
+          disabledReason={
+            target === "display"
+              ? "切换到数据接入后可上传点表"
+              : displayActive
+                ? "展示进行中，双击 ESC 停止显示后可上传"
+                : undefined
+          }
+        />
         <button
           type="button"
           className="chat-view__send"
           onClick={handleSend}
-          disabled={streaming || !draft.trim()}
+          disabled={sendGated || !draft.trim()}
           aria-label="发送"
+          title={displayActive ? "展示进行中，双击 ESC 停止显示后可发送" : undefined}
+          data-testid="chat-send"
         >
           {streaming ? (
             <span className="chat-view__send-ellipsis" aria-hidden="true">
@@ -217,6 +265,15 @@ export function ChatView({
           )}
         </button>
       </div>
+      {/* 底部中间当前 Agent 指示器（C4_RS_00048 规定形态，web.md §3.7.1） */}
+      <div className="chat-view__switcher-row">
+        <AgentSwitcher
+          target={target}
+          onSwitch={switchTarget}
+          atOpen={atOpen}
+          onAtOpenChange={setAtOpen}
+        />
+      </div>
     </div>
   );
 
@@ -236,7 +293,7 @@ export function ChatView({
         </>
       ) : (
         <>
-          <PointDisplayPanel />
+          <PointDisplayTable payload={displayPayload} />
           <div className="chat-view__messages" data-testid="message-list">
             {turns.map((turn, ti) => {
               const isLive = ti === turns.length - 1;
@@ -267,11 +324,7 @@ export function ChatView({
 
           {/* 停靠层：确认按钮 + 输入框钉在滚动容器底部（滚动条贴窗口右缘） */}
           <div className="chat-view__dock">
-            <ConfirmButtons
-              visible={confirmVisible}
-              onConfirm={handleConfirm}
-              onCancel={handleCancel}
-            />
+            <ConfirmButtons visible={confirmVisible} onConfirm={handleConfirm} />
             {inputBox}
             <p className="chat-view__disclaimer">
               AI 生成内容仅供参考，执行操作前请确认
@@ -290,6 +343,12 @@ function Bubble({ bubble }: { bubble: ChatBubble }): JSX.Element {
       : bubble.role === "error"
         ? "chat-bubble chat-bubble--error"
         : "chat-bubble chat-bubble--agent";
+  const originLabel =
+    bubble.role === "user" && bubble.origin !== undefined
+      ? bubble.origin === "display"
+        ? "→ 数据展示"
+        : "→ 数据接入"
+      : null;
   return (
     <div
       data-testid={
@@ -306,6 +365,11 @@ function Bubble({ bubble }: { bubble: ChatBubble }): JSX.Element {
       ) : (
         (bubble.display ?? bubble.content)
       )}
+      {originLabel !== null ? (
+        <span className="chat-bubble__origin" data-testid="bubble-origin">
+          {originLabel}
+        </span>
+      ) : null}
     </div>
   );
 }

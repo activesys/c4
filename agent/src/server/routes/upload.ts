@@ -163,9 +163,12 @@ export function createUploadRouter(agent: C4Agent): Router {
             // 2026-10-05：dying 回合不再空耗配额/写 phase）
             const controller = new AbortController();
             let closed = false;
+            // 上传固定路由数据接入 Agent（agent.md §2.0.2 路由即职责——点表解析
+            // 属接入职责，接口不设 agent 字段；显式标注便于 AgentGroup 分派审计）
             const stream = agent.invoke({
                 messages: [{ role: "user", content: prompt }],
                 conversationId,
+                agent: "access",
                 signal: controller.signal,
             });
             res.on("close", () => {

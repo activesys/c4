@@ -1,3 +1,53 @@
+2026-10-24  activesys  <activesys@sina.com>
+    Version 2.1.88
+    * agent: Update — 方案确认话术残留清理：8 处方案模板仍写「如需取消请点击
+      「取消」」（取消按钮已随 2.1.88 双 ESC 裁定废除），统一改为「如需放弃本次
+      接入请开启新对话」。
+    * agent: Fix — 相似点推荐评分失效：suggest_points 候选语料为「设备名+key尾段」
+      长拼接串，edit 距离被无关字符稀释，短查询永远负分被过滤（「桨叶角速度」
+      找不到「桨叶角度」实测）；改为设备名/设备_点名/裸点名多形态取最优分。
+    * agent: Fix — 订阅回合取消竞态：display 回合未登记取消桥接（/api/cancel
+      中止不了在途订阅回合）；且取消先于会话建立到达时，回合在工具执行后才
+      中止，本回合建立的显示会话脱离取消语义存活——双侧回合统一登记 AbortSignal
+      桥接 + 中止路径级联停止本回合建立的显示会话（§2.4.2 订阅窗口并存）。
+    * agent: Fix — 展示编排器历史重放孤儿 ToolMessage：模型偶发返回缺失 call id 的
+      工具调用时，ToolMessage 与 assistant 消息 tool_calls 配不上对，历史重放被
+      OpenAI 兼容 API 400 拒绝且该会话桶此后每轮皆死（表现为此后所有展示请求
+      空回复）；修复为缺失 id 就地回写合成 id + 重放前剔除孤儿 ToolMessage。
+    * agent: Fix — 配置通道忙时方案被误消耗：execute_steps 把 ConfigBusyError 的
+      固定话术当成功串返回，② 执行路径随即置 planConsumed 并清空方案，下一轮
+      零认领谎报「当前接入已完成」而实例从未落地；改为向上抛出，交由 ② 的
+      保留方案路径处理（§2.8 同语义：方案保留、按钮重武装、可再次确认）。
+    * agent: Support — **双 Agent 架构落地（数据接入 + 数据展示，P1+P2）**：新增
+      AgentGroup 装配单元（单进程双编排器，agent.md §2.0）——/api/chat 请求体新增
+      agent 字段（access|display，缺省 access 向后兼容），会话按 {agent}:{cid} 分桶
+      两 Agent 上下文互不串；新增数据展示编排器（display_orchestrator.ts，轻量
+      「意图→工具→回复」循环 + display_prompt.txt 三要素解析：点名命中分类/统称
+      展开/suggest 相似点/频率时长词形，缺省 1s/30s 强制回显）；SSE 全事件回显
+      agent 字段（调试可观测）。
+    * agent: Fix — **升压站上传劫持根除（RP-UC-04）**：接入编排器删除
+      handle_display_intent 显示分叉与 displayTools 注入（agent.md §2.0.3 职责
+      不涉入——展示类消息走零认领路径）；工具集互斥（接入无显示工具，展示恰
+      list_points/display_points 两工具）。
+    * agent: Update — **取消交互重构为双 ESC 阻塞态中断**（2026-10-24 用户裁定，
+      agent.md §2.4.2/web.md §3.7.6）：文本取消词检测、[C4_BUTTON_CANCEL] 哨兵、
+      确认取消按钮、LLM stop_display 工具全部废除；新增 POST /api/cancel（活跃
+      显示会话终止 / 在途回合 dying 中止，非阻塞态空操作）；/api/state/reset 级联
+      终止活跃显示会话；全部用户话术「回复取消」改「开启新对话」；方案已消耗
+      守卫（零认领消息不再重走缺口提问）。
+    * agent: Update — **展示工具与数据面配套**：list_points 增 suggest 相似点模式
+      （确定性编辑距离+公共子串 top-5）；display_points 增 intervalMs/manual，
+      终止缺省 30s（manual 仅显式触发）；「刷新 N 次」类按次数终止的展示缺省
+      cumulative 序列模式（缺省应用归确定性代码，§3.6.7）；累积模式 >100 点拒绝；
+      /api/display 载荷 points 增 device 字段（表格设备列数据源）。
+    * web: Support — **双 Agent 前端交互（C4_FUN_00091）**：输入框底部中间 Agent
+      指示器（AgentSwitcher：@ 弹出选择/Tab 循环/默认数据接入不记忆）；消息气泡
+      目标徽标与 history 分桶回传；提交门控（显示期间发送禁用、草稿保留、双 ESC
+      解除）与上传门控（目标接入且无活跃显示）；点位显示改三列表格
+      （PointDisplayTable：设备名|点名|值、信息区、状态文案替代数值、两项频率
+      指标、累积行展开手风琴、终止摘要+重新订阅）；双击 ESC 手势
+      （useDoubleEscCancel：1500ms 窗口、模态框优先）；确认按钮仅保留「确认」。
+
 2026-10-19  activesys  <activesys@sina.com>
     Version 2.1.87
     * agent: Fix — **匿名设备声明误当名字**（用例 47C 生产野测）：应「设备叫什么」之答
