@@ -1,3 +1,13 @@
+2026-10-27  activesys  <activesys@sina.com>
+    Version 2.1.89
+    * web: Fix — **恢复落地页背景与布局（2026-10-27 用户指令）**：2.1.88 前端样式
+      重写时误删落地形态整段 CSS（.app--landing.bg-0~6 七张随机背景变体——
+      云雾团+细网格、.chat-view--landing hero 居中布局、.hero/.hero__eyebrow/
+      .hero__title/.chat-view__disclaimer），App.tsx 的 bgIndex 随机选背景逻辑与
+      LandingHero 组件标记仍在、唯 CSS 缺失，落地页退化为白底普通布局；从
+      2.1.87（d97bf01~1）原样提取该 156 行段落回填 styles.css 末尾，渲染实测
+      与 2.1.87 观感一致（本轮新增的 Agent 指示器/三列表格等 2.1.88 功能不受影响）。
+
 2026-10-24  activesys  <activesys@sina.com>
     Version 2.1.88
     * agent: Update — 方案确认话术残留清理：8 处方案模板仍写「如需取消请点击
