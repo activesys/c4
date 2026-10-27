@@ -1400,8 +1400,9 @@ input {
     border: none;
     background: transparent;
     border-radius: 999px;
-    padding: 3px 10px;
-    /* 字号对齐「上传」按钮（14px，2026-10-27 用户裁定——原对齐输入框 16px 改此） */
+    /* 上下 padding 对齐「上传」按钮（--space-2）——同行两控件等高、基线一致；
+       字号 14px 同「上传」；文字带目标色（接入蓝，display 绿见下） */
+    padding: var(--space-2) var(--space-3);
     font-size: 14px;
     color: #3964fe;
     cursor: pointer;
@@ -1427,9 +1428,8 @@ input {
     background: #3964fe;
 }
 .agent-switcher__arrow {
-    font-size: 11px;
     color: inherit;
-    opacity: 0.65;
+    opacity: 0.7;
 }
 .agent-switcher__popup {
     position: absolute;

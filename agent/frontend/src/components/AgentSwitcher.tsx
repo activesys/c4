@@ -87,9 +87,22 @@ export function AgentSwitcher({
           data-testid={`agent-dot-${target}`}
         />
         {AGENT_LABELS[target]}
-        <span className="agent-switcher__arrow" aria-hidden="true">
-          ▾
-        </span>
+        <svg
+          className="agent-switcher__arrow"
+          viewBox="0 0 24 24"
+          width="14"
+          height="14"
+          aria-hidden="true"
+        >
+          <path
+            d="m6 9 6 6 6-6"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2.5"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
       </button>
       {atOpen ? (
         <div className="agent-switcher__popup" role="listbox" data-testid="agent-popup">

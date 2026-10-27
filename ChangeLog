@@ -1,4 +1,12 @@
 2026-10-27  activesys  <activesys@sina.com>
+    Version 2.1.92
+    * web: Fix — **输入行控件协调性（2026-10-27 用户反馈「上传/数据接入未对齐、
+      ▾太小」）**：触发器上下 padding 3px→var(--space-2)（与「上传」按钮完全
+      一致，两控件等高、垂直中线对齐——DOM 实测 mid 536.39px=536.39px）；
+      下拉箭头从文字字符 ▾（11px）改为 14px SVG chevron 图标（currentColor
+      随文字色、粗描边圆角端点、形状不受字体影响），观感清晰协调。
+
+2026-10-27  activesys  <activesys@sina.com>
     Version 2.1.91
     * web: Update — Agent 指示器字号对齐「上传」按钮（2026-10-27 用户裁定）：
       触发器 font-size 显式锚定 14px（与 .file-upload__button 同字号；中间
