@@ -232,6 +232,13 @@ export function ChatView({
                 : undefined
           }
         />
+        {/* 当前 Agent 指示器与上传/发送同行（2026-10-27 用户指令）；无边框 */}
+        <AgentSwitcher
+          target={target}
+          onSwitch={switchTarget}
+          atOpen={atOpen}
+          onAtOpenChange={setAtOpen}
+        />
         <button
           type="button"
           className="chat-view__send"
@@ -264,15 +271,6 @@ export function ChatView({
             </svg>
           )}
         </button>
-      </div>
-      {/* 底部中间当前 Agent 指示器（C4_RS_00048 规定形态，web.md §3.7.1） */}
-      <div className="chat-view__switcher-row">
-        <AgentSwitcher
-          target={target}
-          onSwitch={switchTarget}
-          atOpen={atOpen}
-          onAtOpenChange={setAtOpen}
-        />
       </div>
     </div>
   );

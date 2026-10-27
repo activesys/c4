@@ -1,5 +1,10 @@
 2026-10-27  activesys  <activesys@sina.com>
-    Version 2.1.89
+    Version 2.1.90
+    * web: Update — **Agent 指示器移入输入行（2026-10-27 用户指令）**：「数据接入/
+      数据展示」切换器从输入框下方独立行移入 .chat-view__input-row（左上传、
+      右发送之间居中），删除 .chat-view__switcher-row；触发器去胶囊边框，字号
+      12px→14px，文字改目标色（接入蓝 #3964fe / 展示绿 #16a34a，与点色一致），
+      下拉箭头随文字色。playwright 四态截图验证（落地页/对话视图/弹层/展示绿态）。
     * web: Fix — **恢复落地页背景与布局（2026-10-27 用户指令）**：2.1.88 前端样式
       重写时误删落地形态整段 CSS（.app--landing.bg-0~6 七张随机背景变体——
       云雾团+细网格、.chat-view--landing hero 居中布局、.hero/.hero__eyebrow/
