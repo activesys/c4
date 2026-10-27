@@ -114,7 +114,10 @@ export function source_zone_ordinals(message: string): number[] {
         .map((c) => c.trim())
         .filter((c) => c.length > 0);
     for (const clause of clauses) {
-        if (/转发|入库|写入|推送|发送|目标|服务器/.test(clause)) continue;
+        // 转发目标子句排除含口语动词形态（转到/转往/发到/发往/送到/送至——
+        // 2026-10-27 生产实测：「转到2区，asfp2协议，127.0.0.1:9900」的「转到」
+        // 不命中「转发」，2区被当源区声明，与 1区绑定场站确定性冲突误拒接入）
+        if (/转发|转到|转往|发到|发往|送到|送至|入库|写入|推送|发送|目标|服务器/.test(clause)) continue;
         if (/点表|一致/.test(clause)) continue;
         if (/风电场|风场|光伏|电站|场站/.test(clause)) continue;
         for (const m of clause.matchAll(ZONE_ORD_RE)) {
