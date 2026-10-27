@@ -1782,6 +1782,9 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
         state.turnFwdWithdraw = false;
 
         // 连接信息中的 ip/port 兜底捕获（确定性；提示词未覆盖的简写形式）
+        // 转发语境排除词与 site_check.source_zone_ordinals 对齐（2026-10-27）：口语
+        // 动词形态（转到/转往/发到/发往/送到/送至）同属转发目标子句标记
+        const RECV_FWD_EXCLUDE = /转发|转到|转往|发到|发往|送到|送至|目标|服务器/;
         if (state.recv.conn["ip"] === undefined && state.mtDevs === null) {
             // 带标签 IP 若处于去向语境（「II服务器地址是…」「转发目标地址…」）则属转发
             // 目标，不得误入采集侧连接（func_test_case 用例 4，2026-09-26 recap 实测暴露）。
@@ -1795,8 +1798,22 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 progress = true;
             }
             const bareIp = semantic.match(/(\d{1,3}(?:\.\d{1,3}){3})/);
-            if (state.recv.conn["ip"] === undefined && bareIp && !/转发|目标/.test(semantic) && !state.forwardIntent) {
+            if (state.recv.conn["ip"] === undefined && bareIp && !RECV_FWD_EXCLUDE.test(semantic) && !state.forwardIntent) {
                 state.recv.conn["ip"] = bareIp[1];
+                progress = true;
+            }
+            // ip:port 冒号合并写法（2026-10-27 生产实测：「地址是192.168.4.5:2404」——
+            // 裸 IP 正则抓到 ip，但 parse_receive_port 的四种写法与 LLM 兜底触发词
+            // 「端口/port/ip」全不命中，端口悬空 → 重复追问端口）：ip 捕获同步落 port
+            const ipPort = semantic.match(/(\d{1,3}(?:\.\d{1,3}){3}):(\d{2,5})/);
+            if (
+                ipPort &&
+                state.recv.conn["ip"] === ipPort[1] &&
+                state.recv.conn["port"] === undefined &&
+                !RECV_FWD_EXCLUDE.test(semantic) &&
+                !state.forwardIntent
+            ) {
+                state.recv.conn["port"] = Number(ipPort[2]);
                 progress = true;
             }
         }
@@ -1824,7 +1841,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
         if (
             ((state.recv.conn["ip"] === undefined ||
                 state.recv.conn["port"] === undefined) &&
-                /端口|port|ip/i.test(semantic)) ||
+                /端口|port|ip|地址/i.test(semantic)) ||
             extraConnCtx
         ) {
             const r = await llm_json(
@@ -3516,12 +3533,13 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
 
         // 平台硬约束（2026-09-29 用例11 实测）：c4_shm_manager 要求设备配置 writer/reader
         // 成对（CONFIG_MISSING_SECTION），纯采集方案必然执行失败——接收点表就绪而用户无
-        // 转发意向、且无既有转发链路可沿用时，转发是必答缺口，不再放行只采集方案
+        // 转发意向时，转发是必答缺口，不再放行只采集方案。
+        // （2026-10-27 用户裁定：原「无既有转发链路可沿用」豁免随自动沿用一并废除——
+        // 未经用户声明不得从既有链路推导转发目标，一律追问。）
         if (
             (state.recv.points !== null || state.mtDevs !== null) &&
             !state.forwardIntent &&
-            state.mtTargets === null &&
-            find_existing_reader_info() === null
+            state.mtTargets === null
         ) {
             gaps.push({
                 key: "fwd.required",
@@ -3746,55 +3764,8 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
         return null;
     }
 
-    // 当前 config.json 中的既有转发链路（reader 角色实例，取点数最多者）
-    function find_existing_reader_info(): {
-        id: string;
-        name: string;
-        protocol: string;
-        ip: string | null;
-        port: number | null;
-        maxAddr: number;
-    } | null {
-        let current: Record<string, unknown>;
-        try {
-            current = JSON.parse(readFileSync(cfg.configPath, "utf-8"));
-        } catch {
-            return null;
-        }
-        let best: {
-            id: string;
-            name: string;
-            protocol: string;
-            ip: string | null;
-            port: number | null;
-            maxAddr: number;
-        } | null = null;
-        for (const [st, list] of Object.entries(current ?? {})) {
-            if (st === "c4_shm_manager" || !Array.isArray(list)) continue;
-            const entry = registry.get_entry(st);
-            if (entry?.role !== "reader") continue;
-            for (const inst of list as Array<Record<string, unknown>>) {
-                const pts = (inst["points"] ?? []) as Array<Record<string, unknown>>;
-                if (pts.length === 0) continue;
-                const addrs = pts
-                    .map((p) => Number(p["addr"]))
-                    .filter((n) => !Number.isNaN(n));
-                const maxAddr = addrs.length > 0 ? Math.max(...addrs) : 0;
-                const id = String(inst["id"] ?? "");
-                if (!best || maxAddr > best.maxAddr) {
-                    best = {
-                        id,
-                        name: String(inst["name"] ?? id),
-                        protocol: entry.protocols?.[0]?.protocol ?? st,
-                        ip: typeof inst["ip"] === "string" ? (inst["ip"] as string) : null,
-                        port: typeof inst["port"] === "number" ? (inst["port"] as number) : null,
-                        maxAddr,
-                    };
-                }
-            }
-        }
-        return best;
-    }
+    // （find_existing_reader_info 已随 2026-10-27 转发目标自动沿用废除删除——
+    //   转发目标不得从既有链路推导，agent.md §2.4）
 
     // 变更流配对查找：writer 实例 id → 引用其数据的 reader 实例（key 前缀匹配）
     function find_reader_for_writer(
@@ -4561,40 +4532,13 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
         };
 
         const forward_targets: Array<Record<string, unknown>> = [];
-        // 裁定（func_test_case 用例语义）：新增采集点必须同时转发——既有转发链路存在时，
-        // 未声明转发意向的追加接入自动沿用该链路（转发地址顺延，方案中标注）。
-        // 链路优先取引用本宿主的 reader（并入/复用场景成对追加，§3.2.1.3 示例 4）。
-        // 例外：链路为 influxdb 时不沿用——field 已裁定必填、不推导（2026-10-01），
-        // 镜像点无法确定性补齐 field，沿用会在确认后 fatal；forward_targets 为空时
-        // 由下方「转发必答」硬约束 issue 要求用户明确转发（用户声明 influxdb 后走
-        // 正常收集，缺 field 由 points.fields 缺口追问）
-        if (!state.forwardIntent && current) {
-            const hostReader = writerId !== "" ? find_reader_for_writer(current, writerId) : null;
-            const info = hostReader
-                ? _reader_chain_info(current, hostReader.id, hostReader.service_type)
-                : (() => {
-                      const best = find_existing_reader_info();
-                      return best ? _reader_chain_info(current, best.id, "") : null;
-                  })();
-            if (info && info.protocol !== "influxdb") {
-                // 镜像点只带 addr（_derived 标注）：key 由拆解器按 writer 点 key 与
-                // reader 实例 id 确定性生成，方案载荷不携带（避免 reader id 前缀的
-                // 误导性 key 字样）
-                const mirror = writerPoints.map((p, i) => ({
-                    addr: info.maxAddr + 1 + i,
-                    _derived: "addr",
-                }));
-                forward_targets.push({
-                    name: info.name,
-                    action: "modify",
-                    instanceId: info.id,
-                    protocol: info.protocol,
-                    ...(info.ip !== null ? { ip: info.ip } : {}),
-                    ...(info.port !== null ? { port: info.port } : {}),
-                    points: mirror,
-                });
-            }
-        }
+        // 裁定（2026-10-27 用户裁定，agent.md §2.4 收口）：转发目标与地址不适用任何
+        // 系统侧推导——既有实现曾在未声明转发意向时自动沿用既有链路（hostReader/
+        // find_existing_reader_info fallback，转发地址顺延并标注「自动推导」），越出了
+        // §3.2.1.3 示例 4 的宿主并入授权边界，生产实测升压站追加接入被静默沿用风机
+        // 的转发目标；废除：未声明 forwardIntent 一律走「转发必答」追问，顺延仅在
+        // 用户主动声明（「与 X 同一转发目标，地址顺延」）后经正常收集路径执行。
+        // （原 influxdb 不沿用例外随之失去意义——没有任何沿用路径了。）
         if (state.forwardIntent && state.fwd.protocol) {
             const ftName = state.fwd.deviceName ?? "转发目标";
             const ftPoints =
