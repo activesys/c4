@@ -1401,6 +1401,7 @@ input {
     background: transparent;
     border-radius: 999px;
     padding: 3px 10px;
+    /* 字号对齐「上传」按钮（14px，2026-10-27 用户裁定——原对齐输入框 16px 改此） */
     font-size: 14px;
     color: #3964fe;
     cursor: pointer;

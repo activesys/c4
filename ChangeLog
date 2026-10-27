@@ -1,5 +1,8 @@
 2026-10-27  activesys  <activesys@sina.com>
-    Version 2.1.90
+    Version 2.1.91
+    * web: Update — Agent 指示器字号对齐「上传」按钮（2026-10-27 用户裁定）：
+      触发器 font-size 显式锚定 14px（与 .file-upload__button 同字号；中间
+      曾按输入框调至 16px，最终裁定与上传一致），下拉箭头 11px 随文字色。
     * web: Update — **Agent 指示器移入输入行（2026-10-27 用户指令）**：「数据接入/
       数据展示」切换器从输入框下方独立行移入 .chat-view__input-row（左上传、
       右发送之间居中），删除 .chat-view__switcher-row；触发器去胶囊边框，字号
