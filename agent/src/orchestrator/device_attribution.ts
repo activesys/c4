@@ -65,6 +65,15 @@ export function clean_device_candidate(raw: string): string | null {
     if (name === "") {
         return null;
     }
+    // 尾部口语后缀「数据」剥离（2026-10-28 用户裁定：「接入风机数据」的设备是
+    // 「风机」——「数据」是「接入X的数据」口语结构的残留，不是名字成分）：
+    // 剥离后剩余部分命中类型词表才剥（「风机数据」→「风机」、「升压站数据」→
+    // 「升压站」）；不命中则保留全名（「气象数据」本身是类型词，剥后「气象」
+    // 不在词表 → 保留原名不误伤）
+    const stripped = name.replace(/数据$/, "");
+    if (stripped !== name && stripped.length >= 2 && device_type_of(stripped) !== null) {
+        return stripped;
+    }
     if (device_type_of(name) !== null) {
         return name;
     }

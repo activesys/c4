@@ -1,3 +1,104 @@
+2026-10-28  activesys  <activesys@sina.com>
+    Version 2.1.101
+    * web: Update — **显示表格沉淀与统计行清理（2026-10-28 用户裁定）**：
+      ① 值单元格下方的统计次行删除（「时刻 · 近 60s 刷新 N 次 · 平均 X.Xs」
+      与累积「已刷 N」计数——统计信息不再伴随数据展示）；
+      ② 刷新停止/双 ESC 停止后**表格保留在页面中**：会话结束时把最后活跃载荷
+      沉淀为只读快照表（最后值/最后状态 + 结束原因 + 重新订阅入口）依次排列在
+      消息流顶部，每次新显示在下方重新生成活跃表格（dock 钉住）——快照随
+      「开启新对话」重挂载清空。
+    * agent: Fix — 零认领回复后 phase 停留 collecting（顶栏徽标「收集信息中」
+      误导——接入已收摊）：零认领守卫回复时复位 phase → idle。
+
+2026-10-28  activesys  <activesys@sina.com>
+    Version 2.1.100
+    * web: Fix — **三列表格在显示期间被滚出视口（2026-10-28 用户实测：「只显示了
+      提示没有实际表格」）**：PointDisplayTable 渲染在消息流顶部，display 回合的
+      思考块/文本把内容推长、钉底滚动后表格在视口上方（DOM 实测 y=-364）用户
+      根本看不到——活跃显示会话期间表格**钉在 dock 层**（输入框上方，随会话
+      始终可见）；会话结束后摘要在消息流顶部（重新订阅入口）。
+    * agent: Fix — 零认领回复后 phase 停留 collecting（顶栏徽标「收集信息中」
+      误导——接入已收摊）：零认领守卫回复时复位 phase → idle。
+
+2026-10-28  activesys  <activesys@sina.com>
+    Version 2.1.99
+    * agent: Fix — **手工登记的白名单条目被加载器清空（2026-10-28 用户实测）**：
+      用户手工创建 abbr_registry.json（条目预填 host=channel1/2）+ 空实例
+      config.json，load_abbr_registry 的 config 对齐（「config 权威、注册表派生」
+      ——宿主不在 config 的条目当回滚残留移除）把整表过滤 → 白名单全拒。
+      修复为**降级准入**：宿主不在 config 的条目 host 置空（不再丢弃）——名单
+      是登记资产不得因 config 失步丢失；接入状态由 config 对齐重算，接入成功后
+      finalize_entry 按 prefix 就地回填。配套（2.1.95/本轮）：方案装配层准入条目
+      （host=""）命中走新设备接入路径（分配宿主/前缀 + 撞名检查豁免准入条目自身，
+      不复用空 host 走合并）。验证：用户实际文件 → 风机/升压站 same_device（准入
+      放行）、点击量 no_hit（拒绝）；build.sh prune 修后 node_modules 保留 dev 依赖。
+    * agent: Fix — **准入条目在解析层被丢弃（同日第二处，用户实际文件为准入形态
+      host=""）**：_parse_entry 要求 host 非空（已接入形态），host="" 的白名单
+      准入条目在 JSON 解析层即返回 null 被丢——对齐层降级修复根本见不到条目；
+      放宽为 host 仅要求 string 类型（空串=准入形态合法）。c4 身份 + 生产 dist
+      分步复现实证：解析层修复后 loaded=2（风机/升压站准入）、风机放行、点击量
+      拒绝；生产端到端「接入风机数据」不再误拒、设备名「风机」、正常推进点表追问。
+
+2026-10-28  activesys  <activesys@sina.com>
+    Version 2.1.98
+    * web: Update — **版本展示移入免责声明（2026-10-28 用户裁定）**：落地页与
+      对话页的免责声明文案追加版本尾注——「AI 生成内容仅供参考，执行操作前
+      请确认，智能体版本C4He1.98」（c4_version_label 周期表格式）；顶栏
+      C4 图标旁的独立版本徽标（2.1.97 形态）废除。version 由 App 经 props
+      传入 ChatView（两处 disclaimer 共用）。
+    * web: Update — **取消 @ 触发智能体选择（2026-10-28 用户指令）**：输入框
+      键入 @ 恢复为普通字符（删除 onKeyDown 的 @ preventDefault 分支）；目标
+      切换保留 Tab 循环与点击指示器两种方式。
+
+2026-10-28  activesys  <activesys@sina.com>
+    Version 2.1.97
+    * agent,web: Support — **web 顶栏版本徽标（周期表格式，2026-10-28 用户裁定）**：
+      版本 MAJOR.MINOR.PATCH → C4{元素符号}{MINOR}.{PATCH}，元素序号 = MAJOR
+      （2.1.96 → C4He1.96、3.5.127 → C4Li5.127）；「跳过 C 元素」：MAJOR=6 的
+      元素符号是 C（与 C4 前缀重复成 C4C…），跳用下一元素 N 表示。数据链：
+      build.sh 打包时将 packaging/VERSION 写入 agent/dist/version.json（源 dist
+      与暂存 dist 各一份——rsync 部署路径同携）→ AgentStateTracker 启动读取 →
+      GET /api/state 增 version 字段 → 前端顶栏 C4 图标旁小字徽标
+      （c4_version_label：周期表前 20 元素映射，超表/非标准形态原样回落）。
+      开发态无 version.json 不显示徽标。
+
+2026-10-28  activesys  <activesys@sina.com>
+    Version 2.1.96
+    * agent: Fix — **「X数据」口语后缀误入设备名（2026-10-28 生产实测）**：
+      「接入风机数据」设备名被捕获为「风机数据」而非「风机」（用户裁定：设备
+      是风机，「数据」是「接入X的数据」口语结构残留不是名字成分）——
+      clean_device_candidate 增尾部「数据」剥离：剥离后剩余命中类型词表才剥
+      （风机数据→风机、升压站数据→升压站、测风塔数据→测风塔；「气象数据」
+      本身是类型词，剥后「气象」不在词表 → 保留原名不误伤）；纯类型词守卫
+      （47①）对数据后缀剥离名豁免（「风机」放行不再追问编号；无「数据」后缀
+      的裸类型词说法仍按 47① 追问）；bind_device_answer（设备名缺口应答）
+      同规则剥离。9 例单测全过（含编号名/词表外全名/点击量不受影响）。
+
+2026-10-27  activesys  <activesys@sina.com>
+    Version 2.1.95
+    * agent: Update — **设备白名单（2026-10-27 用户裁定）**：只认设备身份注册表中
+      已登记的设备——add 意图无命中一律拒绝接入（固定话术「该设备不在设备列表中，
+      无法接入；请核对设备名称，或先将设备登记到设备列表后再试」，site_mismatch
+      同款强约束），废除「视为新设备接入」路径（no_hit_add_new → no_hit_rejected）；
+      同名命中仍走描述仲裁（命中即列表内设备）。生产实测驱动：口语词「点击量」被
+      设备名槽位接受为新建设备。design agent.md §3.2.1.3 检索规则、func_test_case.md
+      术语表同步修订。
+    * agent: Fix — **addr 缺口应答绑定通道缺失（同会话实测：四轮地址应答全部落空
+      gapRepeat 计满收摊）**：recv.points.fields 应答分支此前只绑 uid（2026-10-02
+      补）——addr 四种词形无任何通道；新增 addr_point_map_of（逐点映射「电量1：1000」
+      全/半角冒号）、addr_anchor_of（首点锚定「电量1的地址是1000，依次类推」，
+      剥尾部助词「的」）、addr_start_of（起始递增「接入地址从1000开始」+可选步长，
+      排除转发语境），绑定优先级 逐点>锚定>起始，递增填充只作用缺 addr 点。
+      gap_answer.ts 词形对齐原则（绑定器必须认识问题文案里的每个词）落地。
+    * agent: Fix — **缺口应答侧别锁定**：正问接入侧字段缺口（recv.points.fields）
+      时本轮消息锁定接入侧、不进入转发点表提取/修正（生产实测「接入地址从1000开始」
+      被转发提取误消费，转发点表 10000 被改写成 1000）；显式转发表述弃权即继续
+      追问（fwd_file_gate 同款哲学：代价一次追问而非静默错绑）。
+    * packaging: Fix — build.sh 的 `npm prune --omit=dev` 在源仓库 agent/node_modules
+      上执行，dev 依赖（@types/*、eslint、typescript）被打包过程删光，后续
+      typecheck/lint 全部报废（今日五次手动 npm install 恢复）；改为暂存树内
+      prune（--prefix），源仓库依赖不再被打包破坏。
+
 2026-10-27  activesys  <activesys@sina.com>
     Version 2.1.94
     * agent: Update — **废除转发目标/地址系统侧推导（2026-10-27 用户裁定，生产

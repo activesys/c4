@@ -1367,18 +1367,6 @@ input {
     font-size: 13px;
     color: #61666b;
 }
-.pdt__resubscribe {
-    border: 1px solid rgba(57, 100, 254, 0.4);
-    color: #3964fe;
-    background: transparent;
-    border-radius: 8px;
-    padding: 4px 12px;
-    font-size: 13px;
-    cursor: pointer;
-}
-.pdt__resubscribe:hover {
-    background: rgba(57, 100, 254, 0.08);
-}
 .pdt__error {
     color: #cf4242;
     font-size: 12px;

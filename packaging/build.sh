@@ -111,12 +111,18 @@ CUR=$((CUR + 1)); step "$CUR" "$TOTAL" "构建 Agent (npm ci && npm run build)"
     # npm run build 自带 src/prompts → dist/prompts 拷贝（运行时仅读 dist/prompts，
     # render_prompt 以 dist/<dir>/../prompts 解析——历史 super_worker 路径自
     # 初版即不存在，2026-10-17 v2.1.78 清理）
-    # 仅保留生产依赖（设计 §4.2 预打包 node_modules）
-    npm prune --omit=dev
+    # 仅保留生产依赖（设计 §4.2 预打包 node_modules）——prune 在暂存树内执行
+    #（2026-10-27 修正：原在源仓库 node_modules 上 prune，dev 依赖（@types/*、
+    # eslint、typescript）被打包过程删光，后续 typecheck/lint 全部报废）
 )
 install -d "$STAGING/usr/local/lib/c4/agent"
 cp -a "$C4_ROOT/agent/dist" "$STAGING/usr/local/lib/c4/agent/dist"
 cp -a "$C4_ROOT/agent/node_modules" "$STAGING/usr/local/lib/c4/agent/node_modules"
+npm prune --omit=dev --prefix "$STAGING/usr/local/lib/c4/agent"
+# 产品版本注入（web 顶栏周期表格式展示——2.1.96 → C4He1.96）：
+# 写入源 dist 与暂存 dist（源 dist 供 rsync 部署路径 c4/AGENTS.md 规则 3 同样携带）
+printf '{"version":"%s"}\n' "$PKG_VERSION" > "$C4_ROOT/agent/dist/version.json"
+cp "$C4_ROOT/agent/dist/version.json" "$STAGING/usr/local/lib/c4/agent/dist/version.json"
 
 # ── 4. 构建前端（vite）──────────────────────────────────────
 CUR=$((CUR + 1)); step "$CUR" "$TOTAL" "构建前端 (npm ci && npm run build)"

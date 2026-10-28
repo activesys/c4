@@ -20,6 +20,8 @@ export interface AgentState {
   lastError: string | null;
   /** 当前绑定场站名（agent.json 权威配置；未绑定为 null，顶栏中央展示） */
   siteName: string | null;
+  /** 产品版本（打包时 dist/version.json；开发态为 null，顶栏不显示版本徽标） */
+  version: string | null;
 }
 
 interface StateResponseOk {

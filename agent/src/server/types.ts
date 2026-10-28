@@ -58,6 +58,9 @@ export interface AgentStateSummary {
   lastError: string | null;
   /** 当前绑定场站名（agent.json 权威配置，§3.2.1.3a；未绑定为 null） */
   siteName: string | null;
+  /** 产品版本（打包时写入 dist/version.json；packaging/VERSION 是唯一权威源，
+   *  web 顶栏按周期表元素格式展示——2.1.96 → C4He1.96；开发态无该文件为 null） */
+  version: string | null;
 }
 
 // ── Agent State Provider ──────────────────────────────────

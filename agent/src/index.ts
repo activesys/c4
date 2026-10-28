@@ -10,9 +10,10 @@
 //      （收敛不做全量 Stop-Start：无在途事务标记时仅 start，ALREADY_RUNNING 无动作）
 
 import { readFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import { createApp } from "./server/app.js";
 import {
     C4McpManager,
@@ -124,10 +125,12 @@ class AgentStateTracker implements AgentStateProvider, AgentStateWriter {
     private _hasAccessPlan: boolean = false;
     private _lastError: string | null = null;
     private _siteName: string | null;
+    private _version: string | null;
 
-    constructor(initialSiteName: string | null = null) {
+    constructor(initialSiteName: string | null = null, version: string | null = null) {
         // 初值取部署配置（agent.json §3.2.1.3a 权威绑定），启动即可展示
         this._siteName = initialSiteName;
+        this._version = version;
     }
 
     getState(): TypesAgentStateSummary {
@@ -136,6 +139,7 @@ class AgentStateTracker implements AgentStateProvider, AgentStateWriter {
             hasAccessPlan: this._hasAccessPlan,
             lastError: this._lastError,
             siteName: this._siteName,
+            version: this._version,
         };
     }
 
@@ -565,8 +569,27 @@ async function main(): Promise<void> {
         process.exit(1);
     }
 
+    // 产品版本：打包时 build.sh 写入 dist/version.json（packaging/VERSION 是唯一
+    // 权威源）；web 顶栏按周期表元素格式展示（2.1.96 → C4He1.96）。开发态无该
+    // 文件 → null（前端不显示版本徽标）
+    let productVersion: string | null = null;
+    try {
+        const versionFile = path.join(
+            path.dirname(fileURLToPath(import.meta.url)),
+            "version.json",
+        );
+        const parsed = JSON.parse(readFileSync(versionFile, "utf-8")) as {
+            version?: unknown;
+        };
+        if (typeof parsed.version === "string" && parsed.version.length > 0) {
+            productVersion = parsed.version;
+        }
+    } catch {
+        // dist/version.json 不存在（开发态/源码运行）→ 不展示版本
+    }
+
     // ── Step 6: Create Agent State Tracker ──
-    const stateTracker = new AgentStateTracker(config.site?.name ?? null);
+    const stateTracker = new AgentStateTracker(config.site?.name ?? null, productVersion);
 
     // ── Step 7: Create Agent Group（agent.md §2.0 双 Agent 组，2026-10-24）──
     // 单进程双编排器：接入编排器（缺口驱动九阶段流水线）+ 展示编排器（轻量

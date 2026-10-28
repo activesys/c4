@@ -7,12 +7,12 @@
 //     刷新 N 次 · 平均 X.Xs」（C4_RS_00055 两项频率指标齐全）。
 //   - 累积模式：值格次行已刷计数，点击行展开序列明细（手风琴单开）。
 //   - 终止：双击 ESC（唯一手动通道，web.md §3.7.6——无停止按钮）；会话结束后
-//     信息区原位转终止摘要 + 重新订阅按钮（POST /api/display 同入口）。
+//     信息区原位转终止摘要（2026-10-28 用户裁定：重新订阅按钮废除——重开显示由
+//     用户重新发起对话完成）。
 // 轮询由 ChatView 的 useDisplaySession 页面级常驻承载（门控与渲染同源）。
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import {
-  resubscribeDisplay,
   type DisplayPayload,
   type DisplayPointSnapshot,
 } from "@frontend/api/display";
@@ -32,11 +32,6 @@ function clockOf(ts: number | null): string {
 function bareName(key: string): string {
   const idx = key.indexOf(".");
   return idx >= 0 ? key.slice(idx + 1) : key;
-}
-
-function freqLine(p: DisplayPointSnapshot): string {
-  const sec = p.freq.intervalMs > 0 ? p.freq.intervalMs / 1000 : 0;
-  return `近 60s 刷新 ${p.freq.count} 次 · 平均 ${sec.toFixed(1)}s`;
 }
 
 function staleMinutes(p: DisplayPointSnapshot): number {
@@ -66,39 +61,9 @@ export function PointDisplayTable({
 }: PointDisplayTableProps): JSX.Element | null {
   // 累积模式行展开（手风琴单开，web.md §3.5.2——防批量下 DOM 爆炸）
   const [expandedKey, setExpandedKey] = useState<string | null>(null);
-  // 最近一次活跃会话的订阅参数（重新订阅按钮载荷；终止条件不可从快照恢复，
-  // 重新订阅后按缺省 30s——需要精确保留时长时由用户重新声明）
-  const [lastKeys, setLastKeys] = useState<string[]>([]);
-  const [lastMode, setLastMode] = useState<"realtime" | "cumulative">("realtime");
-  const [lastNames, setLastNames] = useState<Record<string, string>>({});
-  const [resubError, setResubError] = useState<string | null>(null);
 
   const session = payload?.session;
   const lastSession = payload?.lastSession ?? null;
-
-  // 活跃会话参数留存（会话消失后仍可供重新订阅）；effect 内更新，不在渲染期写态
-  useEffect(() => {
-    if (!session) return;
-    setLastKeys(session.points.map((p) => p.key));
-    setLastMode(session.mode);
-    const names: Record<string, string> = {};
-    for (const p of session.points) {
-      if (p.name !== undefined && p.name !== "") names[p.key] = p.name;
-    }
-    setLastNames(names);
-  }, [session]);
-
-  const handleResubscribe = () => {
-    if (lastKeys.length === 0) return;
-    setResubError(null);
-    resubscribeDisplay({
-      pointKeys: lastKeys,
-      displayNames: Object.keys(lastNames).length > 0 ? lastNames : undefined,
-      mode: lastMode,
-    }).catch((err: unknown) => {
-      setResubError(err instanceof Error ? err.message : String(err));
-    });
-  };
 
   if (payload === null) return null;
 
@@ -110,20 +75,7 @@ export function PointDisplayTable({
           <span data-testid="point-display-ended-text">
             {endedSummary(lastSession.endedReason, lastSession.finalTick)}
           </span>
-          <button
-            type="button"
-            className="pdt__resubscribe"
-            data-testid="pdt-resubscribe"
-            onClick={handleResubscribe}
-          >
-            重新订阅
-          </button>
         </div>
-        {resubError !== null ? (
-          <p className="pdt__error" role="alert">
-            {resubError}
-          </p>
-        ) : null}
       </div>
     );
   }
@@ -223,16 +175,6 @@ function RowGroup({
                 ? "暂无数据"
                 : `已停止刷新 ${staleMinutes(point)} 分钟`}
           </span>
-          <span className="pdt__sub">
-            {point.state === "ok"
-              ? `${clockOf(point.timestampMs)} · ${freqLine(point)}`
-              : point.state === "no_data"
-                ? "—"
-                : `最后数据 ${clockOf(point.timestampMs)}`}
-            {cumulative && point.records !== undefined
-              ? ` · 已刷 ${point.records.length}`
-              : ""}
-          </span>
         </td>
       </tr>
       {expanded && point.records !== undefined ? (
@@ -250,5 +192,77 @@ function RowGroup({
         </tr>
       ) : null}
     </>
+  );
+}
+
+// ── 结束会话的沉淀快照表（2026-10-28 用户裁定：刷新停止/双 ESC 停止后表格
+//    保留在页面中，每次显示在下方重新生成）——只读三列表格（最后值/最后状态）
+//    + 结束原因行 ─────────────────────────────
+
+export interface DisplaySnapshot {
+  /** 会话结束前的最后活跃载荷（session.points 含最后值/最后状态） */
+  payload: DisplayPayload & { session: NonNullable<DisplayPayload["session"]> };
+  endedReason: NonNullable<DisplayPayload["lastSession"]>["endedReason"];
+  finalTick: number;
+}
+
+export function DisplaySnapshotTable({
+  snapshot,
+}: {
+  snapshot: DisplaySnapshot;
+}): JSX.Element {
+  const session = snapshot.payload.session;
+  const rows = [...session.points].sort((a, b) =>
+    a.device === b.device
+      ? a.key.localeCompare(b.key)
+      : a.device.localeCompare(b.device),
+  );
+  const intervalText = String(session.intervalMs / 1000).replace(/\.0$/, "");
+
+  return (
+    <div className="pdt pdt--ended" data-testid="point-display-snapshot">
+      <div className="pdt__ended-row">
+        <span data-testid="point-display-ended-text">
+          {endedSummary(snapshot.endedReason, snapshot.finalTick)} · 每{" "}
+          {intervalText} 秒刷新
+        </span>
+      </div>
+      <div className="pdt__scroll">
+        <table className="pdt__table">
+          <thead>
+            <tr>
+              <th>设备名</th>
+              <th>点名</th>
+              <th>值</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((p) => {
+              const name =
+                p.name !== undefined && p.name !== ""
+                  ? p.name
+                  : bareName(p.key);
+              return (
+                <tr key={p.key} title={p.key}>
+                  <td className="pdt__device">{p.device}</td>
+                  <td className="pdt__name">{name}</td>
+                  <td className="pdt__value">
+                    <span
+                      className={`pdt__main pdt__main--${p.state}`}
+                    >
+                      {p.state === "ok" && p.value !== null
+                        ? String(p.value)
+                        : p.state === "no_data"
+                          ? "暂无数据"
+                          : `已停止刷新 ${staleMinutes(p)} 分钟`}
+                    </span>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
   );
 }

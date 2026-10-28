@@ -31,20 +31,28 @@ import { ConfirmButtons } from "./ConfirmButtons";
 import { FileUpload } from "./FileUpload";
 import { LandingHero } from "./LandingHero";
 import { Markdown } from "./Markdown";
-import { PointDisplayTable } from "./PointDisplayTable";
+import {
+  PointDisplayTable,
+  DisplaySnapshotTable,
+  type DisplaySnapshot,
+} from "./PointDisplayTable";
 import { ThinkingBlock } from "./ThinkingBlock";
 import { streamUpload, classifyFileType } from "@frontend/api/upload";
+import { c4_version_label } from "@frontend/version";
 
 export interface ChatViewProps {
   /** true = 外壳处于落地形态（App 在新会话时置位，首条消息后解除） */
   landing?: boolean;
   /** 首次实际交互（发送/上传）时触发 — App 据此切换到对话外壳 */
   onStarted?: () => void;
+  /** 产品版本（2.1.97+，disclaimer 文案尾注「智能体版本C4He1.97」；开发态 null 不显示） */
+  version?: string | null;
 }
 
 export function ChatView({
   landing = false,
   onStarted = () => {},
+  version = null,
 }: ChatViewProps): JSX.Element {
   const {
     status,
@@ -73,6 +81,35 @@ export function ChatView({
 
   // 活跃显示会话页面级常驻轮询（门控与表格渲染同源，web.md §3.5.3/§3.5.6）
   const { payload: displayPayload, active: displayActive } = useDisplaySession();
+
+  // 结束会话的沉淀快照（2026-10-28 用户裁定：刷新停止/双 ESC 停止后表格保留在
+  // 页面中，每次显示在消息流下方依次生成新表）——活跃期持续留存最后载荷，
+  // active 翻 false 时沉淀一张快照；「开启新对话」重挂载时随组件清空
+  const [displaySnapshots, setDisplaySnapshots] = useState<DisplaySnapshot[]>([]);
+  const lastActivePayloadRef = useRef<DisplaySnapshot["payload"] | null>(null);
+  const prevActiveRef = useRef(false);
+  useEffect(() => {
+    if (displayActive && displayPayload !== null) {
+      lastActivePayloadRef.current = displayPayload as DisplaySnapshot["payload"];
+    }
+    if (prevActiveRef.current && !displayActive) {
+      const frozen = lastActivePayloadRef.current;
+      const reason =
+        (displayPayload?.lastSession?.endedReason ?? "stopped") as DisplaySnapshot["endedReason"];
+      if (frozen !== null) {
+        setDisplaySnapshots((prev) => [
+          ...prev,
+          {
+            payload: frozen,
+            endedReason: reason,
+            finalTick: displayPayload?.lastSession?.finalTick ?? frozen.session.tick,
+          },
+        ]);
+      }
+      lastActivePayloadRef.current = null;
+    }
+    prevActiveRef.current = displayActive;
+  }, [displayActive, displayPayload]);
 
   // 落地形态的 hero 只在真正「无内容」时展示——消息或工具卡片一旦出现即视为
   // 已进入对话形态（上传轮的工具卡片可能先于用户消息到达）。
@@ -200,24 +237,21 @@ export function ChatView({
         rows={2}
         value={draft}
         onChange={(e) => setDraft(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" && !e.shiftKey) {
-            e.preventDefault();
-            handleSend();
-            return;
-          }
-          if (e.key === "Tab") {
-            // Tab 循环切换目标（web.md §3.7.3）：不与页面焦点移动冲突——
-            // 离开输入框用 Esc/点击
-            e.preventDefault();
-            cycleTarget();
-            return;
-          }
-          if (e.key === "@") {
-            e.preventDefault();
-            setAtOpen(true);
-          }
-        }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && !e.shiftKey) {
+              e.preventDefault();
+              handleSend();
+              return;
+            }
+            if (e.key === "Tab") {
+              // Tab 循环切换目标（web.md §3.7.3）：不与页面焦点移动冲突——
+              // 离开输入框用 Esc/点击。@ 触发浮层已取消（2026-10-28 用户指令：
+              // 键入 @ 作为普通字符；切换走 Tab/点击指示器）
+              e.preventDefault();
+              cycleTarget();
+              return;
+            }
+          }}
         disabled={streaming}
       />
       <div className="chat-view__input-row">
@@ -287,11 +321,16 @@ export function ChatView({
           {inputBox}
           <p className="chat-view__disclaimer">
             AI 生成内容仅供参考，执行操作前请确认
+            {version !== null ? `，智能体版本${c4_version_label(version)}` : ""}
           </p>
         </>
       ) : (
         <>
-          <PointDisplayTable payload={displayPayload} />
+          {/* 无快照时的会话结束摘要兜底（有快照时表格沉在对话末尾——用户视线
+              所在；放顶部会被钉底滚动推出视口造成「表格消失」体感） */}
+          {!displayActive && displaySnapshots.length === 0 ? (
+            <PointDisplayTable payload={displayPayload} />
+          ) : null}
           <div className="chat-view__messages" data-testid="message-list">
             {turns.map((turn, ti) => {
               const isLive = ti === turns.length - 1;
@@ -320,12 +359,22 @@ export function ChatView({
             })}
           </div>
 
-          {/* 停靠层：确认按钮 + 输入框钉在滚动容器底部（滚动条贴窗口右缘） */}
+          {/* 停止后的沉淀快照表（旧→新）——渲染在对话末尾（最后一条消息下方，
+              用户停止时视线所在；2026-10-28 用户反馈「表格消失」体感根因是快照
+              在消息流顶部被滚出视野） */}
+          {displaySnapshots.map((snap, i) => (
+            <DisplaySnapshotTable key={`snap-${i}`} snapshot={snap} />
+          ))}
+
+          {/* 停靠层：显示表格（活跃期钉住，2026-10-28 用户裁定三列表格显眼可见）+
+              确认按钮 + 输入框钉在滚动容器底部（滚动条贴窗口右缘） */}
           <div className="chat-view__dock">
+            {displayActive ? <PointDisplayTable payload={displayPayload} /> : null}
             <ConfirmButtons visible={confirmVisible} onConfirm={handleConfirm} />
             {inputBox}
             <p className="chat-view__disclaimer">
               AI 生成内容仅供参考，执行操作前请确认
+              {version !== null ? `，智能体版本${c4_version_label(version)}` : ""}
             </p>
           </div>
         </>

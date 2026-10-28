@@ -9,6 +9,7 @@
 
 import { is_safe_point_key } from "../executor/point_key.js";
 import { zh_convert } from "./zh_numeral.js";
+import { device_type_of } from "./device_attribution.js";
 
 /** 结构化缺口：key 供 pending 绑定与日志使用，text 复述/收摊，ask 确切提问 */
 export interface Gap {
@@ -262,7 +263,20 @@ export function bind_device_answer(
         if (/^[\d.]+$/.test(t)) {
             return null;
         }
-        // 全名（含设备类型词或显式命名）→ 原样接受
+        // 全名（含设备类型词或显式命名）→ 原样接受；尾部口语后缀「数据」剥离
+        //（2026-10-28 用户裁定：「风机数据」的设备是「风机」——与 dm/acc 捕获侧
+        // clean_device_candidate 同规则：剥离后剩余命中类型词表才剥，「气象数据」
+        // 本身是类型词不误伤）
+        const strippedName = t.endsWith("数据")
+            ? t.slice(0, -2)
+            : t;
+        if (
+            strippedName !== t &&
+            strippedName.length >= 2 &&
+            device_type_of(strippedName) !== null
+        ) {
+            return strippedName;
+        }
         return t;
     }
     // 裸数字/中文数字 → 需累积文本存在设备类型词

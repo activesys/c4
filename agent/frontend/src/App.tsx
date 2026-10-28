@@ -47,7 +47,7 @@ function App(): JSX.Element {
     setNavHidden((prev) => !prev);
   }, []);
 
-  const { phase, lastError, siteName, refresh } = useAgentState(1000);
+  const { phase, lastError, siteName, version, refresh } = useAgentState(1000);
 
   // 双 ESC 全局取消手势（web.md §3.7.6）：模态框优先、1500ms 窗口、
   // POST /api/cancel（阻塞态中断）；首次按键 toast 提示
@@ -277,6 +277,7 @@ function App(): JSX.Element {
               key={chatEpoch}
               landing={landing}
               onStarted={() => setStarted(true)}
+              version={version}
             />
           </div>
           <div className="app__view" hidden={view !== "services"}>

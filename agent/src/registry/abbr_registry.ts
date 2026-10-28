@@ -94,12 +94,23 @@ export async function load_abbr_registry(
     }
 
     // config.json 是权威、注册表是派生数据（失败回滚/点级删除等都可能造成失步）：
-    // 每次加载按 config 对齐——宿主已不存在的条目移除（回滚残留）；
-    // pointMap 从宿主点表同源重建；channelHighWatermark 取两者较大值（永不回退）。
+    // 每次加载按 config 对齐——宿主已不存在的条目**降级为准入**（host 置空，名字
+    // 保留——2026-10-28 用户裁定白名单模式：名单是登记资产不得因 config 失步丢失，
+    // 手工登记实测：预填 host 的条目 + 空实例 config 被当「回滚残留」整表过滤致
+    // 白名单全拒）；接入状态由 config 对齐重算，接入成功后 finalize_entry 按
+    // prefix 就地回填 host/pointMap，条目转回已接入形态。
+    // pointMap 从宿主点表同源重建（仅对宿主仍存在的条目）；channelHighWatermark
+    // 取两者较大值（永不回退）。
     if (config_json) {
         const hosts = _collect_hosts(config_json);
-        parsed.entries = parsed.entries.filter((e) => hosts.has(e.host));
         for (const entry of parsed.entries) {
+            if (entry.host !== "" && !hosts.has(entry.host)) {
+                entry.host = "";
+                entry.pointMap = {};
+            }
+        }
+        for (const entry of parsed.entries) {
+            if (entry.host === "") continue;
             const rebuilt = _rebuild_point_map(config_json, entry.host, entry.prefix);
             if (rebuilt !== null) {
                 entry.pointMap = rebuilt;
@@ -360,11 +371,13 @@ function _parse_entry(value: unknown): AbbrEntry | null {
     const obj = value as Record<string, unknown>;
     // 旧格式条目（id/abbr、无 prefix/host）直接丢弃——不保留旧格式兼容（§3.2.1.3）。
     // prefix==="" 是 §2.12.6 下游目标条目的合法形态（按 name upsert/delete），
-    // 不得当作损坏数据丢弃（2026-10-05 用例 65 实测：每次加载目标条目凭空消失）
+    // 不得当作损坏数据丢弃（2026-10-05 用例 65 实测：每次加载目标条目凭空消失）。
+    // host==="" 是白名单准入条目的合法形态（2026-10-28 用户裁定：登记设备未接入、
+    // 无宿主——手工登记实测：准入条目在解析层被 host 非空校验丢弃致白名单失效）
     if (
         typeof obj["name"] !== "string" || obj["name"].length === 0 ||
         typeof obj["prefix"] !== "string" ||
-        typeof obj["host"] !== "string" || obj["host"].length === 0
+        typeof obj["host"] !== "string"
     ) {
         return null;
     }

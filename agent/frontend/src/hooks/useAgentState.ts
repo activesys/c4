@@ -14,6 +14,8 @@ export interface UseAgentStateReturn {
   lastError: string | null;
   /** 当前绑定场站名（未绑定为 null，顶栏中央展示） */
   siteName: string | null;
+  /** 产品版本（顶栏周期表格式展示；开发态 null 不显示） */
+  version: string | null;
   refresh: () => Promise<void>;
 }
 
@@ -49,6 +51,7 @@ export function useAgentState(intervalMs = 1000): UseAgentStateReturn {
     hasAccessPlan: state?.hasAccessPlan ?? false,
     lastError: state?.lastError ?? null,
     siteName: state?.siteName ?? null,
+    version: state?.version ?? null,
     refresh,
   };
 }

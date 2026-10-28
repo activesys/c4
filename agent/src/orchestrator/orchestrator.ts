@@ -49,7 +49,7 @@ import {
     split_clauses,
     type ProtocolMatcher,
 } from "./protocol_attribution.js";
-import { fwd_file_gate, uid_answer_of } from "./gap_answer.js";
+import { fwd_file_gate, uid_answer_of, addr_point_map_of, addr_start_of, addr_anchor_of } from "./gap_answer.js";
 import {
     clean_device_candidate,
     numbered_device_of,
@@ -1944,8 +1944,14 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                     ? accStripped
                     : null;
             const accClean = accRaw !== null ? clean_device_candidate(accRaw) : null;
+            // 纯类型词守卫豁免（2026-10-28 用户裁定：「接入风机数据」设备是「风机」）：
+            // 原始候选以「数据」结尾且清洗后为纯类型词（「风机数据」→「风机」）——
+            // 「数据」是口语结构后缀，剥离名是用户本意的设备名，放行不追问；
+            // 无「数据」后缀的裸类型词（「接入风机」）仍按 47① 追问编号
             const accName =
-                accClean !== null && !TYPE_ONLY_DEVICE_RE.test(accClean)
+                accClean !== null &&
+                (!TYPE_ONLY_DEVICE_RE.test(accClean) ||
+                    (accRaw?.endsWith("数据") ?? false))
                     ? accClean
                     : null;
             // 常见编号表述（2026-10-19 用户口径：编号也是设备名的一部分）：
@@ -2749,7 +2755,15 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
         // 走确定性推导、其余协议交 LLM——文本重述或 <file_data> 文件通道（2026-09-29
         // 用例11 缺陷C）。point_prompt（side=forward）禁止以采集点表编造转发地址
         //（9a 条），空结果不落槽位，缺失即走缺口追问
-        if (state.forwardIntent && !state.mtTargets && state.fwd.protocol && state.recv.points) {
+        // 侧别锁定（2026-10-27 生产实测：点击量会话「接入地址从1000开始」应答被
+        // 转发提取误消费，转发点表 10000 被改写成 1000）——正问接入侧字段缺口
+        // （recv.points.fields）时本轮消息锁定接入侧，不得进入转发点表提取/修正；
+        // 用户若同时显式给了转发表述，弃权即继续追问（fwd_file_gate 同款哲学：
+        // 代价一次追问而非静默错绑）
+        if (
+            state.forwardIntent && !state.mtTargets && state.fwd.protocol && state.recv.points &&
+            state.pendingGap !== "recv.points.fields"
+        ) {
             const n = state.recv.points.length;
             const fwdProtocol = state.fwd.protocol;
             // catch-up（2026-09-27 用例6）：确定性扫描扩展到「含转发关键词的句子」的
@@ -4336,8 +4350,27 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             },
         });
         if (retrieval.decision === "same_device" && retrieval.entry) {
-            reused = retrieval.entry;
-            prefix = retrieval.entry.prefix;
+            // 准入条目（host=""——白名单登记、尚未接入，2026-10-28 手工登记实测）：
+            // 走新设备接入路径（分配宿主/前缀，固化时 finalize_entry 按 prefix 就地
+            // 回填条目）——不能复用空 host 走合并（modify 不存在的实例必然失败）。
+            // 撞名检查豁免准入条目自身（其 prefix 即设备名派生，是回填目标非占用）
+            if (retrieval.entry.host === "") {
+                const cand = device_prefix_candidate(devName);
+                if (
+                    cand !== "dev" &&
+                    abbr.entries.some((e) => e.prefix === cand && e.host !== "")
+                ) {
+                    return {
+                        plan: {},
+                        display: "",
+                        issue: `设备「${devName}」重名（点 key 前缀「${cand}_」已被占用）——同名设备按点表问题拒收，请用可区分的名称（如「1号风机B」）重新说明，或直接对既有设备做变更。`,
+                    };
+                }
+                prefix = cand === "dev" ? next_dev_prefix(abbr) : cand;
+            } else {
+                reused = retrieval.entry;
+                prefix = retrieval.entry.prefix;
+            }
         } else if (retrieval.decision === "name_conflict") {
             // 同名冲突（§3.2.1.3a）：列区分建议追问，同时开启「坚持新增」应答语境
             //（用例 49②：用户坚持同名 → 前缀顺延；改口可区分名称/取消 → 正常流程）
@@ -4354,15 +4387,14 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                     `若要操作的是已有设备，请直接说明要做的变更（如「给${devName}加点」「删除${devName}」）。`,
             };
         } else {
-            const cand = device_prefix_candidate(devName);
-            if (cand !== "dev" && abbr.entries.some((e) => e.prefix === cand)) {
-                return {
-                    plan: {},
-                    display: "",
-                    issue: `设备「${devName}」重名（点 key 前缀「${cand}_」已被占用）——同名设备按点表问题拒收，请用可区分的名称重新说明，或直接对既有设备做变更。`,
-                };
-            }
-            prefix = cand === "dev" ? next_dev_prefix(abbr) : cand;
+            // 设备白名单（2026-10-27 用户裁定）：只认注册表已登记设备——检索无命中
+            // 一律拒绝。确定性强制放在方案装配层（必然执行）：生产实测 LLM 未调用
+            // query_abbr_registry 工具即绕过工具侧白名单，「点击量」仍被当新设备接受
+            return {
+                plan: {},
+                display: "",
+                issue: `设备「${devName}」不在设备列表中，无法接入；请核对设备名称，或先将设备登记到设备列表后再试。`,
+            };
         }
         }
 
@@ -8892,6 +8924,65 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                             });
                         }
                     }
+                    // addr 缺口应答绑定（2026-10-27 生产实测：点击量 10 点缺 addr 四轮
+                    // 应答全落空收摊——uid 有绑定通道而 addr 没有）。三形态，命中即不再
+                    // 尝试后续形态（优先级：逐点映射 > 首点锚定递增 > 起始递增）：
+                    //   ① 「电量1：1000，电量2：1001」（全/半角冒号逐点，点名匹配）
+                    //   ② 「电量1的地址是1000，依次类推」（首点锚定 + 按序递增）
+                    //   ③ 「接入地址从1000开始」（起始 + 按序递增；可选「步长N」）
+                    // 递增填充只作用于缺 addr 的点；点名匹配按 name 精确 == 或归一化
+                    // 包含（「电量1」vs 点名「电量1」——不猜同义变体）
+                    const pts = state.recv.points as Array<Record<string, unknown>>;
+                    let addrBound = 0;
+                    const normName = (v: unknown): string =>
+                        String(v ?? "").replace(/\s+/g, "").toLowerCase();
+                    const mapAns = addr_point_map_of(userText);
+                    if (mapAns !== null) {
+                        // 逐点映射：每一对独立绑定（同点名多处缺 addr 一并填充）
+                        for (const { name, addr } of mapAns) {
+                            for (const p of pts) {
+                                const n = normName(p["name"]);
+                                if (
+                                    p["addr"] === undefined &&
+                                    (n === normName(name) || n.includes(normName(name)))
+                                ) {
+                                    p["addr"] = addr;
+                                    addrBound++;
+                                }
+                            }
+                        }
+                    } else {
+                        const anchor = addr_anchor_of(userText);
+                        // 锚定形态：首点名 + 递增；起始形态：start(+step)；二者互斥
+                        const anchorName = anchor !== null ? normName(anchor.name) : null;
+                        const startAns =
+                            anchor !== null ? null : addr_start_of(userText);
+                        if (anchor !== null || startAns !== null) {
+                            let cursor = anchor !== null ? anchor.addr : startAns!.start;
+                            const step = startAns?.step ?? 1;
+                            // 锚定形态：先从锚点名字对应的点开始递增（未找到锚名则按序）
+                            let started = anchorName === null;
+                            for (const p of pts) {
+                                if (!started) {
+                                    if (normName(p["name"]) === anchorName) started = true;
+                                    else continue;
+                                }
+                                if (p["addr"] === undefined) {
+                                    p["addr"] = cursor;
+                                    addrBound++;
+                                }
+                                cursor += step;
+                            }
+                        }
+                    }
+                    if (addrBound > 0) {
+                        extraction_progress = true;
+                        cfg.agentLogger.memory(conversation, "pending_bind", {
+                            gap: "recv.points.fields",
+                            field: "addr",
+                            bound: addrBound,
+                        });
+                    }
                 } else if (
                     state.pendingGap === "recv.modbus.fun" &&
                     state.recv.points !== null
@@ -9056,6 +9147,9 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 state.fileBlocks === null
             ) {
                 state.planConsumed = false;
+                // phase 复位（2026-10-28 实测：接入完成后 phase 停留 collecting，
+                // 顶栏徽标「收集信息中」误导——接入已收摊应回 idle）
+                stateWriter.setPhase("idle");
                 yield {
                     type: "text",
                     content:
@@ -9065,6 +9159,41 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 return;
             }
             state.planConsumed = false;
+
+            // ⑥.95 设备白名单（2026-10-27 用户裁定，§3.2.1.3 检索规则）：只认注册表
+            // 已登记设备——设备名已捕获且检索无命中 → 拒绝接入并撤销捕获（撤销使
+            // 用户改名后重新捕获校验，不残留死循环）。确定性强制放此处（缺口计算前，
+            // 捕获当轮即拒绝）：生产实测 LLM 未调用 query_abbr_registry 即绕过工具侧
+            // 白名单；方案装配层检查太靠后——缺口追问阶段根本不会到达
+            if (state.recv.deviceName !== null && !state.recv.anonymous) {
+                let currentWL: Record<string, unknown> | undefined;
+                try {
+                    currentWL = JSON.parse(
+                        readFileSync(cfg.configPath, "utf-8"),
+                    ) as Record<string, unknown>;
+                } catch {
+                    currentWL = undefined;
+                }
+                const abbrWL = await load_abbr_registry(
+                    abbrPath,
+                    currentWL as never,
+                );
+                const retWL = retrieve_device(
+                    abbrWL,
+                    state.recv.deviceName,
+                    state.userTexts.join("\n"),
+                );
+                if (retWL.decision === "no_hit") {
+                    const rejected = state.recv.deviceName;
+                    state.recv.deviceName = null;
+                    yield {
+                        type: "text",
+                        content: `设备「${rejected}」不在设备列表中，无法接入；请核对设备名称，或先将设备登记到设备列表后再试。`,
+                    };
+                    yield { type: "done" };
+                    return;
+                }
+            }
 
             // ⑦ 缺口计算 + 单缺口顺序提问（提问即终局，§2.6）
             const { gaps, recap } = compute_gaps(state);
