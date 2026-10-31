@@ -1,0 +1,17 @@
+{
+  "name": "c4-monorepo",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "stages",
+    "assets",
+    "agent"
+  ],
+  "scripts": {
+    "build": "npm run build -w @c4/stages && npm run build -w @c4/assets && npm run build -w c4-agent",
+    "typecheck": "npm run typecheck -w @c4/stages && npm run typecheck -w @c4/assets && npm run typecheck -w c4-agent",
+    "lint": "npm run lint -w c4-agent",
+    "test": "npm test -w c4-agent"
+  }
+}

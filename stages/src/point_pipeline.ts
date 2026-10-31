@@ -4,8 +4,8 @@
 // 协议无关红线（§2.13.1）：本模块不出现任何协议专属字样/分区数字——规则与数字全部
 // 来自注册信息规格或 LLM 识别结果；数值换算由代码机制性执行（归一化执行主体是管道）。
 
-import type { ParsedPointBlock, ParsedPointFile } from "../subagents/tools/doc_parsers.js";
-import { normalize_point_name } from "../executor/point_key.js";
+import type { ParsedPointBlock, ParsedPointFile } from "./point_file_types.js";
+import { normalize_point_name } from "./point_key.js";
 
 // ── 类型 ──────────────────────────────────────────────────
 

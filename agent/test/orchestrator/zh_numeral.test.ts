@@ -3,7 +3,7 @@
 // → 10000；同时必须不误伤「一一对应」类普通词汇）
 
 import { describe, expect, it } from "vitest";
-import { zh_start_address } from "../../src/orchestrator/zh_numeral.js";
+import { zh_start_address } from "@c4/stages";
 
 describe("zh_start_address", () => {
   it("用例 5 原句：从一万开始 → 10000", () => {

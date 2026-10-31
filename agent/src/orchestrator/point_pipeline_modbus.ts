@@ -9,7 +9,7 @@
 // point_pipeline.ts 的协议无关红线（不出现协议专属字样）由模块拆分承载——
 // 协议知识集中于本文件；逐「块」调用（声明与展开作用域 = 数据块）。
 
-import type { ExcludedGroup, RawPoint } from "./point_pipeline.js";
+import type { ExcludedGroup, RawPoint } from "@c4/stages";
 import type { ParsedPointBlock } from "../subagents/tools/doc_parsers.js";
 
 // ── ASFP2 类型枚举（c4_modbus_client.md §4.6.1）──────────────

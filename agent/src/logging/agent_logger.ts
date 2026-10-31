@@ -103,17 +103,31 @@ export class AgentLogger {
         this._write("user_input", "info", conversation, { role, content });
     }
 
-    /** 送入 LLM 的消息（含注入的确认指令，按轮记录）。 */
+    /** 送入 LLM 的消息（含注入的确认指令，按轮记录）。stage = 提示词文件名
+     *  （阶段归属标签，c4_asset_learning.md §10 指标埋点——词表覆盖率/
+     *  LLM 调用递减按阶段统计）。 */
     llm_call(
         conversation: string,
         round: number,
         messages: Array<{ role: string; content: string }>,
+        stage?: string,
     ): void {
         this._write("llm_call", "debug", conversation, {
             round,
             message_count: messages.length,
             messages,
+            ...(stage ? { stage } : {}),
         });
+    }
+
+    /** 方案展示（button_arm 武装——「一次通过率/追问轮数」分母事件）。 */
+    plan_shown(conversation: string, data: Record<string, unknown>): void {
+        this._write("plan_shown", "info", conversation, data);
+    }
+
+    /** 方案确认执行（「一次通过率」分子事件；corrected 统计口径见设计 §10）。 */
+    confirm(conversation: string, data: Record<string, unknown>): void {
+        this._write("confirm", "info", conversation, data);
     }
 
     /** LLM 文本输出（按消息聚合，避免逐 token 刷屏）。 */

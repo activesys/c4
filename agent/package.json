@@ -12,6 +12,8 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@c4/assets": "*",
+    "@c4/stages": "*",
     "@langchain/core": "^1.2.5",
     "@langchain/langgraph": "^1.4.9",
     "@langchain/mcp-adapters": "^1.1.3",

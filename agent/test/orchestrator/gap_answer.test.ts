@@ -5,7 +5,7 @@ import { describe, it, expect } from "vitest";
 import {
     fwd_file_gate,
     uid_answer_of,
-} from "../../src/orchestrator/gap_answer.js";
+} from "@c4/stages";
 
 describe("uid_answer_of 词形对齐", () => {
     it("从站词形（2026-10-02 链步31 原口径，不得退化）", () => {

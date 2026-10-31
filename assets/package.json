@@ -1,0 +1,26 @@
+{
+  "name": "@c4/assets",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "C4 学习资产库——StageLearner 实现 + SQLite 存储（c4_asset_learning.md 第四、五章）",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@c4/stages": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.5.0"
+  }
+}

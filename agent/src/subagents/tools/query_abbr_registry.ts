@@ -20,7 +20,7 @@ import type { SystemConfig } from "../../types/index.js";
 
 export type AbbrDecision =
     | "hit_add_merge"
-    | "no_hit_rejected"
+    | "no_hit_new_device"
     | "hit_modify"
     | "hit_delete"
     | "no_hit_modify_delete_not_exist"
@@ -124,9 +124,9 @@ function compute_decision(
         return "name_conflict";
     }
     if (intent === "add") {
-        // 设备白名单（2026-10-27 用户裁定）：只认注册表中已登记的设备——
-        // 无命中一律拒绝接入，废除「视为新设备接入」路径
-        return "no_hit_rejected";
+        // 白名单已废除（2026-10-31 用户裁定）：注册表无命中 = 新设备——按缺口
+        // 流程收集接入信息，确认成功后沉淀为设备资产（learner.recordDeviceConfirm）
+        return "no_hit_new_device";
     }
     return "no_hit_modify_delete_not_exist";
 }
@@ -139,11 +139,13 @@ function decision_hint(
         case "hit_add_merge":
             return `同一设备已接入（宿主实例 ${match.entry?.host ?? ""}，点 key 前缀 ${match.entry?.prefix ?? ""}_）。` +
                 "加点合并到已有设备（宿主实例），不新建——方案确认时用户会对设备身份做最终确认。";
-        case "no_hit_rejected":
-            // 设备白名单（2026-10-27 用户裁定）：未登记设备拒绝接入——强约束与
-            // site_mismatch 同款（原话固定、禁止生成方案/调用其他工具，不依赖 LLM 听话）
-            return "设备列表（注册表）中没有该设备。你必须原样回复「该设备不在设备列表中，无法接入；请核对设备名称，或先将设备登记到设备列表后再试」这一句话，" +
-                "禁止调用任何其他工具，禁止生成方案，禁止继续接入流程。";
+        case "no_hit_new_device":
+            // 白名单已废除（2026-10-31 用户裁定）：未知设备按新设备接入——不拒绝、
+            // 不复述固定拒绝句，正常继续缺口流程
+            return "注册表中没有该设备——这是一台新设备，按新设备接入：继续收集接入信息" +
+                "（协议、点表、连接参数），信息齐全后生成方案；方案确认时用户会对设备" +
+                "身份做最终确认，确认接入后该设备将登记为已知设备。禁止声称设备不在" +
+                "设备列表中，禁止拒绝接入。";
         case "hit_modify":
             return `目标已接入（宿主实例 ${match.entry?.host ?? ""}，前缀 ${match.entry?.prefix ?? ""}_）。请复述修改内容，询问是否确认修改。`;
         case "hit_delete":

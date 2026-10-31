@@ -8,7 +8,7 @@ import {
     split_clauses,
     evidence_tag,
     type ProtocolMatcher,
-} from "../../src/orchestrator/protocol_attribution.js";
+} from "@c4/stages";
 
 // 注册表替身：modbus/asfp2/iec104 为接入侧支持协议，influxdb 仅转发侧；
 // clauseCanonical 按别名包含（alias_match_protocol 同口径）

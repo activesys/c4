@@ -16,7 +16,7 @@ import {
     point_duplicate_error,
 } from "../../executor/executor.js";
 import { derive_point_id } from "../../executor/point_rules.js";
-import { normalize_point_name, point_key_error } from "../../executor/point_key.js";
+import { normalize_point_name, point_key_error } from "@c4/stages";
 import type {
     PointField,
     RegistryEntry,

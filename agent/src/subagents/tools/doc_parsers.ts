@@ -225,23 +225,10 @@ export function parse_any_file(filePath: string): string {
 // 面向真实厂家点表：多 sheet 全量解析、GBK 解码、数值单元格按存储值转写、
 // 文档序保序、非数据行（段标题）识别。产出结构化文件块供分块提取与两遍法转录。
 
-export interface ParsedPointBlock {
-    /** 逻辑块标题：sheet 名 / "csv" / "text" */
-    title: string;
-    kind: "table" | "text";
-    /** 表头行（无表头为 null——首行即数据） */
-    header: string[] | null;
-    /** 非数据行（段标题等）：row = 该行之后首个数据行的行号（1 起） */
-    nonData: Array<{ row: number; text: string }>;
-    /** 数据行（保序；单元格为存储值字符串化，空单元格为 ""） */
-    rows: string[][];
-}
-
-export interface ParsedPointFile {
-    /** 原始文件名（上传原名，语境行与同名替换判定用） */
-    name: string;
-    blocks: ParsedPointBlock[];
-}
+// 类型定义自 2026-10-29（M1）收口到共享包 @c4/stages（stages/src/point_file_types.ts，
+// c4_asset_learning.md §2.2 识别流水线训练/运行同构）——此处转出保持既有相对导入兼容
+import type { ParsedPointBlock, ParsedPointFile } from "@c4/stages";
+export type { ParsedPointBlock, ParsedPointFile };
 
 function decode_bytes(buf: Buffer): string {
     // 按字节探测：utf-8 严格解码失败（GBK 厂家文件）→ 回退 GB18030（超集兼容 GBK）

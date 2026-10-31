@@ -11,10 +11,10 @@ import {
     DEFAULT_PLACEHOLDER_NAMES,
     type NormSpec,
     type RawPoint,
-} from "../../src/orchestrator/point_pipeline.js";
-import { is_safe_point_key, normalize_point_name } from "../../src/executor/point_key.js";
+} from "@c4/stages";
+import { is_safe_point_key, normalize_point_name } from "@c4/stages";
 import { parse_point_file } from "../../src/subagents/tools/doc_parsers.js";
-import { zh_start_address } from "../../src/orchestrator/zh_numeral.js";
+import { zh_start_address } from "@c4/stages";
 
 const SPEC: NormSpec = {
     type_field: "point_type",

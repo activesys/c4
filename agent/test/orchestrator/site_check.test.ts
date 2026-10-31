@@ -10,7 +10,7 @@ import {
     llm_site_tag,
     site_zone_of,
     zone_value,
-} from "../../src/orchestrator/site_check.js";
+} from "@c4/stages";
 
 describe("deterministic_site_tag", () => {
     const site = "华能阿拉善";

@@ -102,23 +102,44 @@ for svc in $MCP_SERVICES; do
     install -m 0555 "$C4_ROOT/mcp/$svc/$svc" "$STAGING/usr/local/bin/$svc"
 done
 
-# ── 3. 构建 Agent（npm ci + tsc）────────────────────────────
-CUR=$((CUR + 1)); step "$CUR" "$TOTAL" "构建 Agent (npm ci && npm run build)"
+# ── 3. 构建共享包 + Agent（npm workspaces，c4_asset_learning.md §2.2）───
+CUR=$((CUR + 1)); step "$CUR" "$TOTAL" "构建 stages/assets 共享包 + Agent (root npm ci)"
 (
-    cd "$C4_ROOT/agent"
+    cd "$C4_ROOT"
+    # workspaces 根安装（package-lock 在 c4/ 根；agent/ 独立 npm ci 不再支持）
     npm ci
-    npm run build
+    # 共享包先于 agent 构建——agent 经 node_modules 链接消费 @c4/* 的 dist
+    npm run build -w @c4/stages
+    npm run build -w @c4/assets
+    npm run build -w c4-agent
     # npm run build 自带 src/prompts → dist/prompts 拷贝（运行时仅读 dist/prompts，
     # render_prompt 以 dist/<dir>/../prompts 解析——历史 super_worker 路径自
     # 初版即不存在，2026-10-17 v2.1.78 清理）
-    # 仅保留生产依赖（设计 §4.2 预打包 node_modules）——prune 在暂存树内执行
-    #（2026-10-27 修正：原在源仓库 node_modules 上 prune，dev 依赖（@types/*、
-    # eslint、typescript）被打包过程删光，后续 typecheck/lint 全部报废）
 )
 install -d "$STAGING/usr/local/lib/c4/agent"
 cp -a "$C4_ROOT/agent/dist" "$STAGING/usr/local/lib/c4/agent/dist"
+# agent 自身依赖仍在 agent/node_modules（npm 未 hoist——workspaces 布局实测 2.1.104）
 cp -a "$C4_ROOT/agent/node_modules" "$STAGING/usr/local/lib/c4/agent/node_modules"
+# 仅保留生产依赖（设计 §4.2 预打包 node_modules）——prune 在暂存树内执行
+#（2026-10-27 修正：原在源仓库 node_modules 上 prune，dev 依赖被打包删光）
+# prune 需要 package.json 描述 prod 集——生成运行时最小 manifest（v2.1.104
+# workspaces 适配；prune 先于 @c4 拷贝执行，避免把共享包当 extraneous 清掉）
+node -e '
+const fs = require("fs");
+const src = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+const out = {
+  name: "c4-agent-runtime",
+  version: src.version,
+  private: true,
+  dependencies: src.dependencies || {},
+};
+fs.writeFileSync(process.argv[2], JSON.stringify(out, null, 2) + "\n");
+' "$C4_ROOT/agent/package.json" "$STAGING/usr/local/lib/c4/agent/package.json"
 npm prune --omit=dev --prefix "$STAGING/usr/local/lib/c4/agent"
+# @c4/* 共享包：根 node_modules 内为 workspace 链接——解引用复制为实体目录
+# （运行时 dist/index.js 解析 @c4/stages|@c4/assets 走本 node_modules）
+mkdir -p "$STAGING/usr/local/lib/c4/agent/node_modules/@c4"
+cp -aL "$C4_ROOT/node_modules/@c4/." "$STAGING/usr/local/lib/c4/agent/node_modules/@c4/"
 # 产品版本注入（web 顶栏周期表格式展示——2.1.96 → C4He1.96）：
 # 写入源 dist 与暂存 dist（源 dist 供 rsync 部署路径 c4/AGENTS.md 规则 3 同样携带）
 printf '{"version":"%s"}\n' "$PKG_VERSION" > "$C4_ROOT/agent/dist/version.json"

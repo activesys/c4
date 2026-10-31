@@ -10,7 +10,7 @@
 //     （orchestrator prefix_taken_issue），不再 wt1→wt2 式改写。
 // 供 orchestrator（方案层）、output_plan_steps（拆解器）、group_access（组模式）共用。
 
-import { normalize_point_name } from "../executor/point_key.js";
+import { normalize_point_name } from "@c4/stages";
 
 /** 已知设备类型词（组模式类型词门）：13 类封闭词表 + 历史类型词 */
 const KNOWN_TYPE_RE =

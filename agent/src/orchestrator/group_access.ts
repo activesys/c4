@@ -15,7 +15,7 @@
 // 协议无关：本模块不解读协议语义（ip 是否必填由编排器按服务角色判定）。
 
 import { device_type_known } from "../registry/device_prefix.js";
-import { normalize_point_name } from "../executor/point_key.js";
+import { normalize_point_name } from "@c4/stages";
 
 /** 组成员连接参数（展开后逐台一份；字段缺失 = 待组级缺口追问） */
 export interface GroupMemberConn {

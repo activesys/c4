@@ -7,6 +7,11 @@ C4 是一个部署在工业数据服务器上的 AI 智能体。架构：Agent�
 
 ```
 c4/
+├── package.json    # npm workspaces 根（stages/assets/agent 三包；package-lock 在根）
+├── stages/         # 共享包 @c4/stages——九阶段识别/校验层（agent 与 trainer 共用，
+│                   #   c4_asset_learning.md §2.2；训练/运行同构）
+├── assets/         # 共享包 @c4/assets——学习资产库（StageLearner + SQLite，
+│                   #   ~/.local/c4/assets.db）
 ├── mcp/            # MCP Server 源代码（Go），目录名加 c4_ 前缀
 │   ├── c4_shm_manager/
 │   ├── c4_modbus_client/
@@ -14,7 +19,8 @@ c4/
 │   ├── c4_asfp2_client/
 │   ├── c4_asfp2_server/
 │   └── c4_influxdb_client/
-├── agent/          # Agent 源代码（Node.js / TypeScript）
+├── agent/          # Agent 源代码（Node.js / TypeScript，workspace c4-agent；
+│                   #   依赖 @c4/stages、@c4/assets——构建顺序 stages → assets → agent）
 ├── test/           # 功能测试（Python 3）
 │   ├── c4_fun_00053/
 │   └── ...
@@ -31,6 +37,7 @@ c4/
 | 目录 | 语言 | 说明 |
 |------|------|------|
 | `c4/mcp/` | **Go** | MCP Server，目录名加 `c4_` 前缀，编译为静态二进制，部署于工业 Linux |
+| `c4/stages/` `c4/assets/` | **TypeScript** | 共享包 @c4/stages（识别/校验层）与 @c4/assets（学习资产库），agent 与 trainer 共同依赖 |
 | `c4/agent/` | **Node.js / TypeScript** | AI 推理层，MCP SDK 原生支持、Web 界面同语言 |
 | `c4/test/` | **Python 3** | 功能测试，测试目录命名对应功能编号（如 `c4_fun_00053`） |
 
@@ -38,7 +45,10 @@ c4/
 
 1. **评审之后不能直接修改**：经 Oracle / Momus / 代码评审后，必须先向用户汇报评审发现的问题，由用户确认后再修改。不得在评审后静默修改代码或文档。
 2. **修改代码之后不能直接提交**：任何代码修改完成后，必须经用户确认后方可 `git commit`。不得在用户未明确要求的情况下自动提交。
-3. **修改代码之后必须自动部署**（2026-09-29 用户指令）：agent 源码修改完成并通过构建/静态检查后，无需等待用户指令，即执行部署——`npm run build` 后 rsync `agent/dist/` 到 `/usr/local/lib/c4/agent/dist/` 并重启 c4-agent，最后冒烟验证 9988 端口。版本号随之递增：**每次修改代码必须提升 `packaging/VERSION` 的 PATCH 位**（如 2.1.4 → 2.1.5，2026-10-03 用户指令，与根 AGENTS.md「Version Management」强制规则一致；该文件是打包唯一权威版本源，lib.sh 的 `PKG_VERSION` 仅为环境变量兜底默认，不必随手改），并**在 `c4/ChangeLog` 追加对应版本条目**（2026-10-06 用户指令新建，格式同 acquisition/src/ChangeLog：日期头 + `Version X.Y.Z` + 缩进条目，新版本在上）。**ChangeLog 只随版本变更记录**（2026-10-07 用户指令）：仅文档变更（不提升版本号）不写 ChangeLog 条目——文档自身的版本头与日期即追溯记录，不再使用「Version docs」类条目。git 提交仍须用户确认（见规则 2）。
+3. **修改代码之后必须自动部署**（2026-09-29 用户指令）：agent 源码修改完成并通过构建/静态检查后，无需等待用户指令，即执行部署——
+npm workspaces 化（2026-10-29，M1）后构建须在 **c4/ 根**执行：`npm ci && npm run build`
+（根脚本按 stages → assets → agent 顺序构建；agent/ 目录内独立 npm ci 不再支持，
+package-lock 在根）；随后 rsync `agent/dist/` 到 `/usr/local/lib/c4/agent/dist/` 并重启 c4-agent，最后冒烟验证 9988 端口。版本号随之递增：**每次修改代码必须提升 `packaging/VERSION` 的 PATCH 位**（如 2.1.4 → 2.1.5，2026-10-03 用户指令，与根 AGENTS.md「Version Management」强制规则一致；该文件是打包唯一权威版本源，lib.sh 的 `PKG_VERSION` 仅为环境变量兜底默认，不必随手改），并**在 `c4/ChangeLog` 追加对应版本条目**（2026-10-06 用户指令新建，格式同 acquisition/src/ChangeLog：日期头 + `Version X.Y.Z` + 缩进条目，新版本在上）。**ChangeLog 只随版本变更记录**（2026-10-07 用户指令）：仅文档变更（不提升版本号）不写 ChangeLog 条目——文档自身的版本头与日期即追溯记录，不再使用「Version docs」类条目。git 提交仍须用户确认（见规则 2）。
 4. **实现功能测试代码时必须严格按照 README 规格，不参考源代码**：功能测试用例的 README.md 是测试的唯一权威来源。实现测试代码时不得阅读 Go 源码、不得根据当前二进制行为调整断言——即使测试全部失败，也说明源码尚未实现对应功能，测试代码本身是正确的。
 5. **实现功能后必须验证本功能测试全部通过，再验证全部功能测试通过**：每次实现功能之后，首先确保本功能的测试用例全部通过，然后运行全部功能测试用例（`c4/test/` 下所有测试套件）确保没有引入回归。如果本功能导致了其他功能的测试用例失败，应立即停止、报告错误和原因，并报告可能的功能冲突或设计冲突。本功能未全部通过前不得进入下一步，全部测试未通过前不得提交。当所有的功能测试用例全部通过后，将 `c4_function.md` 对应的功能条目设置成已完成（标题后加 ✅）。
 
@@ -56,6 +66,7 @@ c4/
 |------|------|------|
 | 架构设计 | `docs/design/c4_architecture.md` | 整体架构、共享内存布局、并发协议、配置格式 |
 | 共享内存管理 | `docs/design/c4_shm_manager.md` | 创建/扩容/分配算法、MCP 工具定义、交互时序、错误码 |
+| 资产学习与迁移 | `docs/design/c4_asset_learning.md` | 学习资产模型（三层/生命周期）、StageLearner、导入导出与合并、训练客户端（M1~M4） |
 | 功能规格 | `docs/specification/c4_function.md` | 功能点及其验收指导 |
 | 需求规格 | `docs/specification/c4_requirement.md` | 104 条形式化需求（功能 73 + 非功能 31） |
 | 项目概述 | `docs/specification/c4_description.md` | 架构、应用场景 |

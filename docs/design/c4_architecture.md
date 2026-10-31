@@ -1,6 +1,6 @@
 # C4 架构设计
 
-> **版本**：v0.4.2 | **最后更新**：2026-10-07
+> **版本**：v0.4.3 | **最后更新**：2026-10-29
 
 ---
 
@@ -1310,4 +1310,6 @@ IEC104 采集（2 个主变 RTU）和 ASFP2 转发（到中心侧数据库和第
 
 > **对应功能**：C4_FUN_00006, C4_FUN_00008, C4_FUN_00009, C4_FUN_00010, C4_FUN_00011, C4_FUN_00012~00017, C4_FUN_00022, C4_FUN_00024, C4_FUN_00042, C4_FUN_00047
 >
-> **子文档**：[c4_shm_manager.md](c4_shm_manager.md) — 共享内存管理详细设计
+> **子文档**：[c4_shm_manager.md](c4_shm_manager.md) — 共享内存管理详细设计；
+> [agent.md](agent.md) — Agent 系统架构设计；
+> [c4_asset_learning.md](c4_asset_learning.md) — 资产学习与迁移体系设计（待实施 M1~M4）

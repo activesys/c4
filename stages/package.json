@@ -1,0 +1,22 @@
+{
+  "name": "@c4/stages",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "C4 九阶段识别/校验共享层——agent 与 trainer 共同依赖（c4_asset_learning.md §2.2）",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0"
+  }
+}

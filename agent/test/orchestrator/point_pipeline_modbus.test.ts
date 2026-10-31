@@ -8,7 +8,7 @@ import {
     type BlockIdent,
     type ParsedPointBlock,
     type RawPoint,
-} from "../../src/orchestrator/point_pipeline.js";
+} from "@c4/stages";
 import {
     mb_rescue_variable_sheet,
     mb_dedupe_copies,

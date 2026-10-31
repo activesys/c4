@@ -11,7 +11,7 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
-import { zh_convert } from "../orchestrator/zh_numeral.js";
+import { zh_convert } from "@c4/stages";
 
 import type { MCPInstanceConfig, SystemConfig } from "../types/index.js";
 

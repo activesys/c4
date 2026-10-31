@@ -28,7 +28,7 @@ import {
     type AbbrEntry,
     type AbbrRegistry,
 } from "../registry/abbr_registry.js";
-import { is_safe_point_key, normalize_point_name, point_key_error } from "../executor/point_key.js";
+import { is_safe_point_key, normalize_point_name, point_key_error } from "@c4/stages";
 import { validate_point_table, derive_point_id } from "../executor/point_rules.js";
 import { write_site_config } from "../site_config.js";
 import {
@@ -48,8 +48,8 @@ import {
     side_redeclaration_scan,
     split_clauses,
     type ProtocolMatcher,
-} from "./protocol_attribution.js";
-import { fwd_file_gate, uid_answer_of, addr_point_map_of, addr_start_of, addr_anchor_of } from "./gap_answer.js";
+} from "@c4/stages";
+import { fwd_file_gate, uid_answer_of, addr_point_map_of, addr_start_of, addr_anchor_of } from "@c4/stages";
 import {
     clean_device_candidate,
     numbered_device_of,
@@ -77,8 +77,8 @@ import {
     arbitrate_site_tags,
     deterministic_site_tag,
     llm_site_tag,
-} from "./site_check.js";
-import { zh_start_address } from "./zh_numeral.js";
+} from "@c4/stages";
+import { zh_start_address } from "@c4/stages";
 import { device_prefix_candidate } from "../registry/device_prefix.js";
 import {
     ask_conn,
@@ -111,7 +111,7 @@ import {
     type NormSpec,
     type RawPoint,
     type ResetInfo,
-} from "./point_pipeline.js";
+} from "@c4/stages";
 import {
     mb_finalize_block,
     mb_dedupe_copies,
@@ -133,6 +133,13 @@ import {
     type GroupMemberConn,
     type GroupSpec,
 } from "./group_access.js";
+
+import { get_asset_learner } from "@c4/assets";
+
+// 学习资产库（M1 样板闭环，c4_asset_learning.md §11.1：C4_FUN_00094）——
+// 协议别名「命中→确认→计数→沉淀」；库打开失败自动降级 no-op，学习停摆
+// 不影响接入主流程（§1.2 不变量 1 的前提）
+const assets = get_asset_learner();
 
 // ── 会话状态（agent.md §3.1 SessionState，单设备在途模型）────
 
@@ -1089,10 +1096,15 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
         const stepLabel =
             PROMPT_STEP_LABELS[prompt_file] ?? `AI 解析（${prompt_file}）`;
         note_step(conversation, stepLabel);
-        cfg.agentLogger.llm_call(conversation, ++turnLlmRound, [
-            { role: "system", content: rendered },
-            { role: "user", content: `<user_input>\n${user_input}\n</user_input>` },
-        ]);
+        cfg.agentLogger.llm_call(
+            conversation,
+            ++turnLlmRound,
+            [
+                { role: "system", content: rendered },
+                { role: "user", content: `<user_input>\n${user_input}\n</user_input>` },
+            ],
+            prompt_file,
+        );
         let sawNonEmpty = false;
         // 回合取消信号：客户端断开时在途调用立即中断（AbortError 上抛终止回合）
         const signal = turnSignals.get(conversation);
@@ -1209,11 +1221,34 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 });
             }
         }
+        // 学习资产注入（c4_asset_learning.md §7.7）：学习别名追加到对应协议的
+        // aliases——运行期注入，不写回 registry 文件（升级覆盖教训）
+        for (const l of learned_alias_overlays(role)) {
+            const h = hints.find((x) => x["protocol"] === l.canonical);
+            if (h) {
+                h["aliases"] = [...((h["aliases"] as string[]) ?? []), l.alias];
+            }
+        }
         return JSON.stringify(hints);
+    }
+
+    // 学习别名叠加列表（M1 闭环）：registry 别名之外追加学习资产别名；
+    // canonical 必须命中本侧支持列表才放行（学习值不把会话引向不存在的服务）
+    function learned_alias_overlays(
+        role: "writer" | "reader",
+    ): Array<{ alias: string; canonical: string }> {
+        const out: Array<{ alias: string; canonical: string }> = [];
+        for (const l of assets.learnedProtocolAliases()) {
+            const canon = normalize_protocol(l.canonical);
+            if (!canon || !find_service_type(registry, canon, role)) continue;
+            out.push({ alias: l.alias, canonical: canon });
+        }
+        return out;
     }
 
     // L0 确定性协议预匹配（registry aliases，侧别分词）：命中即免 LLM；未命中交协议提示词
     function alias_match_protocol(
+        conversation: string,
         text: string,
         role: "writer" | "reader",
         side_keywords: RegExp,
@@ -1244,6 +1279,15 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                         return normalize_protocol(p.protocol);
                     }
                 }
+            }
+        }
+        // 学习别名叠加（M1 闭环 §3.2）：registry 未命中时查学习资产——命中即
+        // 绑定并记录，确认成功后 confirm_streak/usage_count 递增
+        for (const l of learned_alias_overlays(role)) {
+            const a = l.alias.trim().toLowerCase();
+            if (a.length >= 3 && scoped.some((c) => c.toLowerCase().includes(a))) {
+                assets.recordLearnedHit(conversation, l.alias, l.canonical);
+                return l.canonical;
             }
         }
         return null;
@@ -1431,6 +1475,8 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                     );
                     if (hit) {
                         state.recv.protocol = hit;
+// 逐轮提议快照（c4_asset_learning.md §4.1：确认时终局比对判 corrected）
+assets.recordProposal(conversation, "2", hit);
                         state.recv.protocolEvidence = "点表文件协议列";
                     }
                     // 未命中 → 交协议阶段提示词/缺口处理（declared 保留在 raw）
@@ -1610,6 +1656,15 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                     from: fromRecv,
                     to: reRecv.recv.canonical,
                 });
+                // 学习资产（c4_asset_learning.md §4.4 失败归因）：协议误判 →
+                // 更正子句中的别名候选沉淀（排除既有别名与 canonical 本身）
+                assets.learnAliasFromCorrection(
+                    conversation,
+                    "2",
+                    reRecv.recv.canonical,
+                    reRecv.recv.clause,
+                    learned_alias_overlays("writer").map((l) => l.alias),
+                );
             }
         }
         if (!state.mtTargets) {
@@ -1630,6 +1685,13 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                     from: fromFwd,
                     to: reFwd.fwd.canonical,
                 });
+                assets.learnAliasFromCorrection(
+                    conversation,
+                    "5",
+                    reFwd.fwd.canonical,
+                    reFwd.fwd.clause,
+                    learned_alias_overlays("reader").map((l) => l.alias),
+                );
             }
         }
 
@@ -1658,6 +1720,8 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             const bareRecv = tokenHit("writer");
             if (bareRecv !== undefined) {
                 state.recv.protocol = bareRecv;
+// 逐轮提议快照（c4_asset_learning.md §4.1：确认时终局比对判 corrected）
+assets.recordProposal(conversation, "2", bareRecv);
                 state.recv.protocolRaw = null;
                 state.recv.protocolEvidence = evidence_clause(semantic);
                 progress = true;
@@ -1672,6 +1736,8 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             const bareFwd = tokenHit("reader");
             if (bareFwd !== undefined) {
                 state.fwd.protocol = bareFwd;
+// 逐轮提议快照（c4_asset_learning.md §4.1：确认时终局比对判 corrected）
+assets.recordProposal(conversation, "5", bareFwd);
                 state.fwd.protocolRaw = null;
                 state.fwd.protocolEvidence = evidence_clause(semantic);
                 progress = true;
@@ -1696,6 +1762,8 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             }
             if (scan.bind !== null) {
                 state.recv.protocol = scan.bind.canonical;
+// 逐轮提议快照（c4_asset_learning.md §4.1：确认时终局比对判 corrected）
+assets.recordProposal(conversation, "2", scan.bind.canonical);
                 state.recv.protocolRaw = null;
                 state.recv.protocolEvidence = scan.bind.clause;
                 progress = true;
@@ -1725,6 +1793,8 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                         // §2.4.1 锁后变更 → 丢弃（拒绝文案在缺口/回复层）
                     } else {
                         state.recv.protocol = canonical;
+// 逐轮提议快照（c4_asset_learning.md §4.1：确认时终局比对判 corrected）
+assets.recordProposal(conversation, "2", canonical);
                         state.recv.protocolRaw = null;
                         state.recv.protocolEvidence = evidence_clause(
                             String(r["reason"] ?? "LLM 语义识别"),
@@ -2007,9 +2077,11 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             }
         }
         if (state.forwardIntent && !state.mtTargets && !state.fwd.protocol) {
-            const fwdAlias = alias_match_protocol(semantic, "reader", /转发|入库|写入|上传|推送|发送/);
+            const fwdAlias = alias_match_protocol(conversation, semantic, "reader", /转发|入库|写入|上传|推送|发送/);
             if (fwdAlias) {
                 state.fwd.protocol = fwdAlias;
+// 逐轮提议快照（c4_asset_learning.md §4.1：确认时终局比对判 corrected）
+assets.recordProposal(conversation, "5", fwdAlias);
                 state.fwd.protocolRaw = null;
                 // 依据子句：首个带转发标记且含该协议名的子句（证据出示）
                 for (const fc of split_clauses(semantic)) {
@@ -2040,6 +2112,8 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                 const canonical = r["canonical_name"];
                 if (match === "matched" && typeof canonical === "string") {
                     state.fwd.protocol = canonical;
+// 逐轮提议快照（c4_asset_learning.md §4.1：确认时终局比对判 corrected）
+assets.recordProposal(conversation, "5", canonical);
                     state.fwd.protocolRaw = null;
                     state.fwd.protocolEvidence = evidence_clause(
                         String(r["reason"] ?? "LLM 语义识别"),
@@ -4387,14 +4461,19 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                     `若要操作的是已有设备，请直接说明要做的变更（如「给${devName}加点」「删除${devName}」）。`,
             };
         } else {
-            // 设备白名单（2026-10-27 用户裁定）：只认注册表已登记设备——检索无命中
-            // 一律拒绝。确定性强制放在方案装配层（必然执行）：生产实测 LLM 未调用
-            // query_abbr_registry 工具即绕过工具侧白名单，「点击量」仍被当新设备接受
-            return {
-                plan: {},
-                display: "",
-                issue: `设备「${devName}」不在设备列表中，无法接入；请核对设备名称，或先将设备登记到设备列表后再试。`,
-            };
+            // 未知设备（2026-10-31 白名单废除裁定）：视为新设备——前缀确定性派生
+            //（前缀被既有设备占用仍属同名问题，按点表问题拒收；匿名 dev{N} 序列）；
+            // 确认成功后沉淀为设备资产（learner.recordDeviceConfirm，stage 1.5
+            // 站点层试用期）——演进的 C4 设备认知来自确认沉淀，而非预置名单
+            const cand = device_prefix_candidate(devName);
+            if (cand !== "dev" && abbr.entries.some((e) => e.prefix === cand)) {
+                return {
+                    plan: {},
+                    display: "",
+                    issue: `设备「${devName}」重名（点 key 前缀「${cand}_」已被占用）——同名设备按点表问题拒收，请用可区分的名称（如「1号风机B」）重新说明，或直接对既有设备做变更。`,
+                };
+            }
+            prefix = cand === "dev" ? next_dev_prefix(abbr) : cand;
         }
         }
 
@@ -5216,6 +5295,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
         if (g.protocol === null) {
             const try_bind = async (text: string): Promise<boolean> => {
                 const aliasHit = alias_match_protocol(
+                    conversation,
                     text,
                     "writer",
                     /采集|接入|接收|采用|上传|设备|协议|规约|PLC/,
@@ -5520,6 +5600,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
         if (g.fwd === null) {
             const try_bind = async (text: string): Promise<boolean> => {
                 const proto = alias_match_protocol(
+                    conversation,
                     text,
                     "reader",
                     /转发|发送|上传|写入/,
@@ -5630,6 +5711,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
         stateWriter.setPhase("planning");
         cfg.agentLogger.phase(conversation, "planning");
         yield { type: "text", content: assembled.display };
+        cfg.agentLogger.plan_shown(conversation, { kind: "access_plan" });
         yield { type: "button_arm" };
         yield { type: "done" };
     }
@@ -8283,6 +8365,28 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             cfg.agentLogger.phase(conversation, "executing");
             try {
                 const okMsg = await execute_steps(state, steps, conversation);
+                // 学习资产终局采集（c4_asset_learning.md §4.1）：草稿清空之前
+                // 比对逐轮快照判 corrected、命中确认计数递增——学习失败不影响
+                // 确认结果（learner 内部已降级容错）
+                assets.collectConfirm(conversation, {
+                    recv: state.recv.protocol,
+                    fwd: state.fwd.protocol,
+                });
+                assets.promote();
+                // 设备资产沉淀（c4_asset_learning.md §3.3 阶段 1.5，站点层试用期）：
+                // 确认成功 → 设备名入资产库，streak≥3 转正——设备认知来自确认沉淀
+                if (state.recv.deviceName) {
+                    assets.recordDeviceConfirm(
+                        conversation,
+                        state.recv.deviceName,
+                        state.site?.abbr ?? "",
+                        state.userTexts.join("\n").slice(0, 200),
+                    );
+                }
+                cfg.agentLogger.confirm(conversation, {
+                    recv: state.recv.protocol,
+                    fwd: state.fwd.protocol,
+                });
                 // 成功：方案被消耗 + 在途态清空（等价新会话，§2.4.2）
                 state.accessPlan = null;
                 state.userConfirmed = false;
@@ -8602,6 +8706,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
                     stateWriter.setPhase("planning");
                     cfg.agentLogger.phase(conversation, "planning");
                     yield { type: "text", content: change.display };
+                    cfg.agentLogger.plan_shown(conversation, { kind: "change_plan" });
                     yield { type: "button_arm" };
                     yield { type: "done" };
                     return;
@@ -9160,40 +9265,10 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             }
             state.planConsumed = false;
 
-            // ⑥.95 设备白名单（2026-10-27 用户裁定，§3.2.1.3 检索规则）：只认注册表
-            // 已登记设备——设备名已捕获且检索无命中 → 拒绝接入并撤销捕获（撤销使
-            // 用户改名后重新捕获校验，不残留死循环）。确定性强制放此处（缺口计算前，
-            // 捕获当轮即拒绝）：生产实测 LLM 未调用 query_abbr_registry 即绕过工具侧
-            // 白名单；方案装配层检查太靠后——缺口追问阶段根本不会到达
-            if (state.recv.deviceName !== null && !state.recv.anonymous) {
-                let currentWL: Record<string, unknown> | undefined;
-                try {
-                    currentWL = JSON.parse(
-                        readFileSync(cfg.configPath, "utf-8"),
-                    ) as Record<string, unknown>;
-                } catch {
-                    currentWL = undefined;
-                }
-                const abbrWL = await load_abbr_registry(
-                    abbrPath,
-                    currentWL as never,
-                );
-                const retWL = retrieve_device(
-                    abbrWL,
-                    state.recv.deviceName,
-                    state.userTexts.join("\n"),
-                );
-                if (retWL.decision === "no_hit") {
-                    const rejected = state.recv.deviceName;
-                    state.recv.deviceName = null;
-                    yield {
-                        type: "text",
-                        content: `设备「${rejected}」不在设备列表中，无法接入；请核对设备名称，或先将设备登记到设备列表后再试。`,
-                    };
-                    yield { type: "done" };
-                    return;
-                }
-            }
+            // ⑥.95 设备白名单已废除（2026-10-31 用户裁定）：演进的 C4 最初不知道
+            // 任何设备——未知设备不拒绝，走缺口询问 → 用户确认 → 接入，确认成功后
+            // 沉淀为设备资产（learner.recordDeviceConfirm，stage 1.5 站点层试用期）。
+            // 注册表检索保留同名消歧/同设备重入复用（方案装配层），仅拒绝语义删除。
 
             // ⑦ 缺口计算 + 单缺口顺序提问（提问即终局，§2.6）
             const { gaps, recap } = compute_gaps(state);
@@ -9339,6 +9414,7 @@ export function createOrchestrator(cfg: OrchestratorConfig): C4Agent {
             // 方案展示含设备身份（§4.5.3 确认文本列「将新建设备 1号风机（点 key 前缀 wt1_）」；
             // 实例句柄 channel{N} 不出现在对话文本，agent.md §3.2.1.3）
             yield { type: "text", content: assembled.display };
+            cfg.agentLogger.plan_shown(conversation, { kind: "group_plan" });
             yield { type: "button_arm" };
             yield { type: "done" };
     }

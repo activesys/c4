@@ -7,8 +7,8 @@
 //   - 裸值兜底绑定：提问后用户以纯值片段（端口/IP/地址范围）作答时，
 //     绑定给 pending 缺口——仅接受"整条消息就是一个值"的形态，宁可放过不可错绑。
 
-import { is_safe_point_key } from "../executor/point_key.js";
-import { zh_convert } from "./zh_numeral.js";
+import { is_safe_point_key } from "@c4/stages";
+import { zh_convert } from "@c4/stages";
 import { device_type_of } from "./device_attribution.js";
 
 /** 结构化缺口：key 供 pending 绑定与日志使用，text 复述/收摊，ask 确切提问 */

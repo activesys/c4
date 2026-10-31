@@ -13,7 +13,7 @@ import type {
 import type { C4McpManager } from "../mcp/client.js";
 import { restore_prev1, atomic_write_raw } from "./transaction.js";
 import { check_duplicate_points, check_fun_codes, check_shm_overlap } from "./point_rules.js";
-import { point_key_error } from "./point_key.js";
+import { point_key_error } from "@c4/stages";
 import { SHM_SERVICE_TYPE } from "../mcp/client.js";
 
 // ── Point 匹配辅助 ────────────────────────────────────────

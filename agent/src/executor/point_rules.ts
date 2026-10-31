@@ -5,7 +5,7 @@
 //
 // 类型枚举对齐 c4/mcp/internal/protocol/const.go（Boolean=0 … LargeDataBlock=16）。
 // 跨度单位 = Modbus 寄存器（16bit）。
-import { normalize_point_name, point_key_error } from "./point_key.js";
+import { normalize_point_name, point_key_error } from "@c4/stages";
 //
 // 层级适用范围（agent.md §2.4.3）：
 //   - output_access_plan 层：仅对「身份+type 字段齐全」的点执行 overlap/duplicate，

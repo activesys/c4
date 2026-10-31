@@ -1,3 +1,33 @@
+2026-10-31  activesys  <activesys@sina.com>
+    Version 2.2.0
+    * agent: Fix — **设备白名单废除（2026-10-31 用户裁定）**：演进的 C4 最初不知道
+      任何设备——未知设备不拒绝，走缺口询问 → 用户确认 → 接入，确认成功后沉淀为
+      设备资产（learner.recordDeviceConfirm，stage 1.5 站点层试用期 streak≥3 转正）。
+      删除缺口计算前守卫与方案装配层拒绝（orchestrator ⑥.95/装配 no_hit 分支恢复
+      新设备路径：前缀确定性派生 + 前缀撞名仍按同名问题拒收）；query_abbr_registry
+      add 意图无命中改 no_hit_new_device（提示继续收集信息，禁止复述拒绝句）。
+      根因：10-27 白名单使全新实例（空注册表）无法引导第一台设备——10-29 e2e
+      实测 prereq 在新旧构建上同样失败（决定性对照），历史通过依赖附着白名单
+      落地前启动的旧进程（假象）。
+    * agent/stages/assets: New — **资产学习体系 M1：共享层抽取 + 学习资产库 + 协议别名闭环**
+      （C4_FUN_00094 首期，设计 docs/design/c4_asset_learning.md v0.2.2，立项 C4_RS_00049）：
+      ① npm workspaces 改造——c4/ 根 package.json 管理 stages/assets/agent 三包，
+      新增 @c4/stages（九阶段确定性层：point_pipeline / protocol_attribution /
+      gap_answer / site_check / zh_numeral / point_key 自 orchestrator 迁入，点表文件
+      结构类型收口 point_file_types）与 @c4/assets（SQLite 学习资产库 + StageLearner，
+      node:sqlite 驱动，schema 按设计 §5.2 全量建表）；依赖方向 agent→stages 单向；
+      ② 协议别名（阶段 2/5）样板闭环——registry 快路未命中时叠加学习别名
+      （canonical 须命中本侧支持列表），命中记录 + handle_confirm 草稿清空前终局采集
+      （逐轮提议快照判 corrected，学习别名命中且确认一致 → usage_count/streak 递增，
+      达 usage_count≥5 沉淀 active），纠错通道沉淀更正子句别名候选（排除既有别名）；
+      match_hints 注入学习别名（运行期注入，不写回 registry 文件）；
+      ③ 指标埋点——llm_call 事件补 stage 标签（提示词文件名），新增 plan_shown /
+      confirm 结构化事件（§10 演进指标数据源）；
+      ④ 打包链适配——build.sh 根安装 + 共享包先构建 + prune 用运行时最小 manifest
+      （prune 先于 @c4 解引用拷贝，避免共享包被清）；
+      ⑤ 单测 8 例新增（alias_key_norm 编号语境折叠 / 闭环计数 / 降级容错），全部
+      306 测试通过；make lint 通过。
+
 2026-10-28  activesys  <activesys@sina.com>
     Version 2.1.101
     * web: Update — **显示表格沉淀与统计行清理（2026-10-28 用户裁定）**：
