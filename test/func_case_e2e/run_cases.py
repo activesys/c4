@@ -412,6 +412,9 @@ class Agent:
         env = dict(os.environ)
         env["ZHIPU_API_KEY"] = load_api_key()
         env["C4_SOCK_DIR"] = SOCK_DIR
+        # 学习资产库随隔离实例（2026-10-31）：不落 root homedir、不跨回归运行
+        # 累积——资产沉淀/别名学习不影响用例确定性（c4_asset_learning.md §5.1）
+        env["C4_ASSETS_DB"] = os.path.join(self.dir, "assets.db")
         self.f = open(f"/tmp/e2e_agent_{time.strftime('%H%M%S')}.log", "w")
         self.p = subprocess.Popen(
             ["node", AGENT_JS, "--config-dir", self.dir],
@@ -440,7 +443,8 @@ class Agent:
         MCP_STACK.stop_instances()
         if self.dir:
             names = ["config.json", "abbr_registry.json", "pending_change.json",
-                     "config.json.prev.1", "config.json.prev.2", "config.json.prev.3"]
+                     "config.json.prev.1", "config.json.prev.2", "config.json.prev.3",
+                     "assets.db", "assets.db-shm", "assets.db-wal"]
             for name in names:
                 p = os.path.join(self.dir, name)
                 if os.path.exists(p):

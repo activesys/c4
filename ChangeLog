@@ -1,4 +1,19 @@
 2026-10-31  activesys  <activesys@sina.com>
+    Version 2.2.1
+    * test: New — **SEQUENCE2 本机模拟环境入库 + e2e 学习库隔离**：
+      ① test/func_case_e2e/simenv/（setup_simulators.sh + README）——一条命令
+      重建用例 30~43 全部外部依赖（modbusd×2 @5020/5021、iec104d×3 @2404/2405/
+      2406、influxd @18086、redis 26 键喂数）；端序定版 modbusd {swap:1,
+      hton_register:1} ↔ agent 实例 {hton_register:1, swap:2}（源码仿真 + 探针
+      18 点实证，改其它组合对点全挂）；
+      ② run_cases.py 隔离 agent 注入 C4_ASSETS_DB 指向实例目录（学习资产不跨
+      回归运行累积、不落 root homedir），reset 清理清单补 assets.db 组——学习
+      沉淀不再影响用例确定性；
+      验证：SEQUENCE2 17/17 通过（30 真实值对点 / 34 电度二段踢 / 38 入库对点 /
+      42 设备下电不谎报等）；reset+prereq 学习库隔离复验（资产落实例目录、
+      prereq 通过）。
+
+2026-10-31  activesys  <activesys@sina.com>
     Version 2.2.0
     * agent: Fix — **设备白名单废除（2026-10-31 用户裁定）**：演进的 C4 最初不知道
       任何设备——未知设备不拒绝，走缺口询问 → 用户确认 → 接入，确认成功后沉淀为
